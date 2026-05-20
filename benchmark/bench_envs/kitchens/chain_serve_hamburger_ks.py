@@ -20,6 +20,10 @@ class chain_serve_hamburger_ks(KitchenS_base_task):
     Composed from pick_hamburger_from_microwave_ks + close_microwave_ks.
     """
 
+    # Keep the door-swing zone in front of the microwave clear of spawned
+    # objects, or the door cannot be closed.
+    microwave_front_keepout = True
+
     def setup_demo(self, is_test=False, **kwargs):
         kwargs["collision_cache"] = {"mesh": 100, "obb": 3}
         super()._init_task_env_(**kwargs)

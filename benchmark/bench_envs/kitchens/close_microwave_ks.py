@@ -10,6 +10,10 @@ import glob
 
 class close_microwave_ks(KitchenS_base_task):
 
+    # Keep the door-swing zone in front of the microwave clear of spawned
+    # objects, or the door cannot be closed.
+    microwave_front_keepout = True
+
     def _get_target_object_names(self) -> set[str]:
         return set()  # pure joint task — no actor targets
 

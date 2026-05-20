@@ -179,7 +179,7 @@ class chain_bowl_rack_apple_sink_ks(KitchenS_base_task):
     def check_success(self):
         sink_p = self.sink.get_pose().p
         sg = self.kitchens_info["sink_geom"]
-        rack_p = self.dishrack.get_pose().p
+        rack_p = self.dishrack_center  # true rack center, not the offset entity pose
         b1 = self.bowl1.get_pose().p
         ap = self.apple.get_pose().p
 
