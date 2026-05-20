@@ -5,15 +5,20 @@ location but were **never wired into the runtime loaders**. Recovered here
 during the asset consolidation refactor (PR / commit `d97bb67`) so the work
 isn't lost while we triage.
 
+All three remaining items are variants of objects that the 80 tasks *do*
+use — but the tasks load the copy in `benchmark/assets/objects/<name>/`,
+not these. Triage whether any variant should replace the loaded copy.
+
 | Item | Files | Why preserved |
 |---|---|---|
-| `044_microwave/` | 316 | Custom `mobility.urdf` referencing 134 collision meshes (CoACD output) — runtime uses the upstream URDF with 16 meshes from `benchmark/assets/objects/044_microwave/` |
-| `034_knife/` | 4 | `model_data0.json` had different `contact_points_pose` (likely re-annotated grasp points) |
-| `122_file-holder/` | 1 | Bench had a sub-named `122_file_holder/base.glb`; runtime expects `base.glb` at the dir root |
-| `121_cabinet_cjcyed/` | 2 | Bench-only articulated, never referenced by any code |
-| `123_drawer_dsbcxl/` | 11 | Bench-only articulated, never referenced |
-| `126_fridge_hivvdfn/` | 10 | Bench-only articulated, never referenced |
-| `120_storage-rack/` | 73 | Was in upstream `assets/objects/` too, but no code references it |
+| `044_microwave/` | 316 | Custom `mobility.urdf` referencing 134 collision meshes (CoACD output) — runtime uses the upstream URDF with 16 meshes from `benchmark/assets/objects/044_microwave/`. Used by all 40 kitchen tasks (scene furniture). |
+| `034_knife/` | 4 | `model_data0.json` had different `contact_points_pose` (likely re-annotated grasp points). Used as an object-OOD / distractor object. |
+| `122_file-holder/` | 1 | Bench had a sub-named `122_file_holder/base.glb`; runtime expects `base.glb` at the dir root. Used by all 20 office tasks (scene furniture). |
+
+Four other items (`121_cabinet_cjcyed`, `123_drawer_dsbcxl`,
+`126_fridge_hivvdfn`, `120_storage-rack`) were also stashed here but
+confirmed dead — zero references in any `bench_envs/` file or
+`bench_task_config/` — and deleted.
 
 ## To use one
 
