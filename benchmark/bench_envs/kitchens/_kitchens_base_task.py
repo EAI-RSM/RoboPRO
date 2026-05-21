@@ -62,7 +62,18 @@ class KitchenS_base_task(Bench_base_task):
         random.seed(self.seed)
         print_c(f"#### Seed value {self.seed} ####", "YELLOW")
 
-        self.scene_id = kwags.get("scene_id") if kwags.get("scene_id") is not None else np.random.randint(0, 3)
+        # A task may restrict which KitchenS scenes it runs in by setting the
+        # class attribute `allowed_scene_ids` (e.g. microwave-cavity tasks skip
+        # scene 2, where the microwave sits center and the cavity is out of the
+        # arm's reach). Default behaviour is unchanged (uniform over 0,1,2).
+        if kwags.get("scene_id") is not None:
+            self.scene_id = kwags.get("scene_id")
+        else:
+            _allowed = getattr(self, "allowed_scene_ids", None)
+            if _allowed:
+                self.scene_id = int(np.random.choice(list(_allowed)))
+            else:
+                self.scene_id = np.random.randint(0, 3)
         print_c(f"KitchenS scene {self.scene_id} selected", "YELLOW")
         
         self.FRAME_IDX = 0
