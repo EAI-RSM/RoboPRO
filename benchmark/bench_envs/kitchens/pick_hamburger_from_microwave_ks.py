@@ -12,6 +12,10 @@ import glob
 
 class pick_hamburger_from_microwave_ks(KitchenS_base_task):
 
+    # Skip scene 2 (microwave center): the cavity is out of the arm's IK reach
+    # for the pick grasp. Only scenes 0/1 (microwave on the left) are used.
+    allowed_scene_ids = (0, 1)
+
     def setup_demo(self, is_test=False, **kwargs):
         kwargs["collision_cache"] = {"mesh": 100, "obb": 3}
         super()._init_task_env_(**kwargs)
@@ -63,7 +67,9 @@ class pick_hamburger_from_microwave_ks(KitchenS_base_task):
         # in world y and sits slightly to -x in world x.
         spawn_x = mw_x + float(np.random.uniform(-0.08, -0.03))
         spawn_y = mw_y + float(np.random.uniform(-0.10, -0.04))
-        spawn_z = mw_z + 0.02
+        # Spawn at the cavity floor (measured: hamburger rests at mw_z - 0.074).
+        # The old mw_z + 0.02 spawned it ~9.5 cm in midair → free-fall + roll.
+        spawn_z = mw_z - 0.07
 
         hpose = sapien.Pose(
             [spawn_x, spawn_y, spawn_z],

@@ -44,8 +44,8 @@ class KitchenS_base_task(Bench_base_task):
         # sink basin (has box collision) + chrome rim pieces (create_box, static)
         "sink",
         "sink_rim_front", "sink_rim_back", "sink_rim_left", "sink_rim_right",
-        # dish rack body (collision mesh) + invisible containment walls (box collision)
-        "dishrack", "dishrack_walls",
+        # dish rack body (non-convex collision mesh = exact rack geometry)
+        "dishrack",
     }
 
     def __init__(self):
@@ -62,7 +62,18 @@ class KitchenS_base_task(Bench_base_task):
         random.seed(self.seed)
         print_c(f"#### Seed value {self.seed} ####", "YELLOW")
 
-        self.scene_id = kwags.get("scene_id") if kwags.get("scene_id") is not None else np.random.randint(0, 3)
+        # A task may restrict which KitchenS scenes it runs in by setting the
+        # class attribute `allowed_scene_ids` (e.g. microwave-cavity tasks skip
+        # scene 2, where the microwave sits center and the cavity is out of the
+        # arm's reach). Default behaviour is unchanged (uniform over 0,1,2).
+        if kwags.get("scene_id") is not None:
+            self.scene_id = kwags.get("scene_id")
+        else:
+            _allowed = getattr(self, "allowed_scene_ids", None)
+            if _allowed:
+                self.scene_id = int(np.random.choice(list(_allowed)))
+            else:
+                self.scene_id = np.random.randint(0, 3)
         print_c(f"KitchenS scene {self.scene_id} selected", "YELLOW")
         
         self.FRAME_IDX = 0
@@ -666,6 +677,17 @@ class KitchenS_base_task(Bench_base_task):
             "collision_path": f"{os.environ['BENCH_ROOT']}/assets/objects/044_microwave/visual/base0.glb",
         })
 
+        # Tasks that close the microwave door (close_microwave_ks and the
+        # heat/serve chains) must keep the door-swing zone in front of the
+        # microwave clear — an object spawned there blocks the door from
+        # closing. The microwave opening/door faces -y (the robot side), so
+        # prohibit a strip spanning the microwave width and extending in front.
+        if getattr(self, "microwave_front_keepout", False):
+            self.prohibited_area["table"].append([
+                x - 0.25, y - 0.35,   # x0, y0  (-y = robot / door side)
+                x + 0.25, y + 0.10,   # x1, y1
+            ])
+
     def _load_dishrack(self, table_height, table_xy_bias):
         x, y = self._get_scene_obj_locations("dishrack")
         x += table_xy_bias[0]
@@ -698,8 +720,13 @@ class KitchenS_base_task(Bench_base_task):
         _rack_scale_xyz = [_rack_scale, _rack_scale, _rack_scale]
         _rack_builder = self.scene.create_actor_builder()
         _rack_builder.set_physx_body_type("static")
-        _rack_builder.add_multiple_convex_collisions_from_file(
-            filename=f"{rack_asset_dir}/collision/base0.glb", scale=_rack_scale_xyz)
+        # The rack is static, so use the exact visual mesh as a non-convex
+        # (triangle-mesh) collision. The shipped collision/base0.glb was a
+        # mismatched, undersized convex blob; convex decomposition is also
+        # wrong for a concave basin (it fills the opening). Non-convex of the
+        # real mesh keeps the basin and matches the visual exactly.
+        _rack_builder.add_nonconvex_collision_from_file(
+            filename=f"{rack_asset_dir}/base0.glb", scale=_rack_scale_xyz)
         _rack_builder.add_visual_from_file(
             filename=f"{rack_asset_dir}/base0.glb", scale=_rack_scale_xyz)
         _rack_entity = _rack_builder.build()
@@ -718,6 +745,11 @@ class KitchenS_base_task(Bench_base_task):
         _rack_entity.set_name("135_dish-rack")
         self.dishrack = Simple_Actor(_rack_entity, scale=_rack_scale_xyz)
         self.dishrack.set_name("dishrack")
+        # True geometric center of the rack on the counter. The rack ENTITY
+        # pose (dishrack.get_pose()) is deliberately offset from the body (the
+        # mesh origin sits outside the mesh), so check_success must compare
+        # placed objects against this real center, not the entity pose.
+        self.dishrack_center = np.array([x, y, rack_z])
         # Prohibit-area footprint in world AABB, centered on the spawn coord now
         # that the rack pose is compensated.
         _rack_x0, _rack_x1 = _mx_min - _cx_off, _mx_max - _cx_off
@@ -731,41 +763,13 @@ class KitchenS_base_task(Bench_base_task):
         ])
         self.collision_list.append({
             "actor": self.dishrack,
-            "collision_path": f"{os.environ['BENCH_ROOT']}/assets/objects/135_dish-rack/collision/base0.glb",
+            "collision_path": f"{os.environ['BENCH_ROOT']}/assets/objects/135_dish-rack/base0.glb",
         })
-
-        # The convex decomp from the rack glb has thin walls that plates can
-        # tunnel through. Add an explicit containment tray (floor + 4 walls)
-        # sitting on top of the rack so the plate can be reliably caught.
-        rack_top_z = table_height + (_my_max - _my_min)
-        rack_hx = 0.5 * (_rack_x1 - _rack_x0)  # world-x half extent
-        rack_hy = 0.5 * (_rack_y1 - _rack_y0)  # world-y half extent
-        _inset = 0.005
-        _wall_hx = rack_hx - _inset
-        _wall_hy = rack_hy - _inset
-        _wall_hz = 0.015
-        _wall_t = 0.0015
-        _floor_t = 0.002
-
-        _walls_builder = self.scene.create_actor_builder()
-        _walls_builder.set_physx_body_type("static")
-        # Floor (base) — top surface at rack_top_z
-        _walls_builder.add_box_collision(
-            pose=sapien.Pose([x, y, rack_top_z - _floor_t]),
-            half_size=[_wall_hx, _wall_hy, _floor_t],
-        )
-        # N/S/E/W side walls — bottoms at rack_top_z, extending up
-        for _wx, _wy, _whx, _why in [
-            ( _wall_hx, 0, _wall_t, _wall_hy),
-            (-_wall_hx, 0, _wall_t, _wall_hy),
-            (0,  _wall_hy, _wall_hx, _wall_t),
-            (0, -_wall_hy, _wall_hx, _wall_t),
-        ]:
-            _walls_builder.add_box_collision(
-                pose=sapien.Pose([x + _wx, y + _wy, rack_top_z + _wall_hz]),
-                half_size=[_whx, _why, _wall_hz],
-            )
-        _walls_entity = _walls_builder.build(name="dishrack_walls")
+        # NOTE: the old invisible box "containment tray" was removed. It sat a
+        # solid floor at rack_top_z, so objects landed on top of the rack
+        # instead of descending into the basin ("floating"). With the rack now
+        # using an exact non-convex collision, objects settle into the real
+        # basin geometry directly.
 
     def _load_sink(self, table_height, table_xy_bias):
         sink_geom = self.kitchens_info["sink_geom"]

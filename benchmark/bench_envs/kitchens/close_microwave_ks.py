@@ -10,6 +10,10 @@ import glob
 
 class close_microwave_ks(KitchenS_base_task):
 
+    # Keep the door-swing zone in front of the microwave clear of spawned
+    # objects, or the door cannot be closed.
+    microwave_front_keepout = True
+
     def _get_target_object_names(self) -> set[str]:
         return set()  # pure joint task — no actor targets
 
@@ -65,13 +69,15 @@ class close_microwave_ks(KitchenS_base_task):
         start_qpos = self.microwave.get_qpos()[0]
 
         # Push the handle diagonally toward the microwave body to close it.
+        # Push until the door is within 3 degrees of shut (check_success), not
+        # just "mostly closed" — the eval threshold is a strict 3 degree.
         for _ in range(3):
             self.move(self.move_by_displacement(arm_tag=arm_tag, x=0.10, y=0.00))
 
             new_qpos = self.microwave.get_qpos()[0]
             if not self.plan_success:
                 break
-            if self.check_success(target=0.1):
+            if self.check_success():
                 break
             # If nothing is happening, bail out early.
             if abs(new_qpos - start_qpos) <= 0.001 and _ > 2:
@@ -84,7 +90,7 @@ class close_microwave_ks(KitchenS_base_task):
             new_qpos = self.microwave.get_qpos()[0]
             if not self.plan_success:
                 break
-            if self.check_success(target=0.1):
+            if self.check_success():
                 break
             # If nothing is happening, bail out early.
             if abs(new_qpos - start_qpos) <= 0.001 and _ > 2:
@@ -94,7 +100,9 @@ class close_microwave_ks(KitchenS_base_task):
 
 
 
-    def check_success(self, target=0.1):
-        limits = self.microwave.get_qlimits()
+    # Door counts as closed only within 3 degrees of fully shut.
+    DOOR_CLOSED_RAD = math.radians(3.0)
+
+    def check_success(self):
         qpos = self.microwave.get_qpos()
-        return qpos[0] <= limits[0][1] * target
+        return qpos[0] <= self.DOOR_CLOSED_RAD

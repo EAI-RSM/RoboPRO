@@ -9,6 +9,9 @@ from envs._GLOBAL_CONFIGS import *
 from copy import deepcopy
 import glob
 
+# Microwave door counts as closed only within 3 degrees of fully shut.
+DOOR_CLOSED_RAD = math.radians(3.0)
+
 
 class chain_serve_hamburger_ks(KitchenS_base_task):
     """
@@ -16,6 +19,14 @@ class chain_serve_hamburger_ks(KitchenS_base_task):
     pick it out → place in bowl on counter → close microwave door.
     Composed from pick_hamburger_from_microwave_ks + close_microwave_ks.
     """
+
+    # Keep the door-swing zone in front of the microwave clear of spawned
+    # objects, or the door cannot be closed.
+    microwave_front_keepout = True
+
+    # Skip scene 2 (microwave center): the cavity is out of the arm's IK reach
+    # for the pick grasp. Only scenes 0/1 (microwave on the left) are used.
+    allowed_scene_ids = (0, 1)
 
     def setup_demo(self, is_test=False, **kwargs):
         kwargs["collision_cache"] = {"mesh": 100, "obb": 3}
@@ -40,7 +51,9 @@ class chain_serve_hamburger_ks(KitchenS_base_task):
         self.hamburger_id = int(np.random.choice([0, 1, 2]))
         spawn_x = mw_x + float(np.random.uniform(-0.08, -0.03))
         spawn_y = mw_y + float(np.random.uniform(-0.10, -0.04))
-        spawn_z = mw_z + 0.02
+        # Spawn at the cavity floor (measured: hamburger rests at mw_z - 0.074).
+        # The old mw_z + 0.02 spawned it ~9.5 cm in midair → free-fall + roll.
+        spawn_z = mw_z - 0.07
         hpose = sapien.Pose(
             [spawn_x, spawn_y, spawn_z],
             [0.5, 0.5, 0.5, 0.5],
@@ -173,12 +186,13 @@ class chain_serve_hamburger_ks(KitchenS_base_task):
         limits = self.microwave.get_qlimits()
         start_qpos = self.microwave.get_qpos()[0]
 
+        # Push until the door is within 3 degrees of shut (strict eval threshold).
         for _ in range(3):
             self.move(self.move_by_displacement(arm_tag=arm_tag, x=0.10, y=0.00))
             new_qpos = self.microwave.get_qpos()[0]
             if not self.plan_success:
                 break
-            if self.microwave.get_qpos()[0] <= limits[0][1] * 0.1:
+            if new_qpos <= DOOR_CLOSED_RAD:
                 break
             if abs(new_qpos - start_qpos) <= 0.001 and _ > 2:
                 break
@@ -189,7 +203,7 @@ class chain_serve_hamburger_ks(KitchenS_base_task):
             new_qpos = self.microwave.get_qpos()[0]
             if not self.plan_success:
                 break
-            if self.microwave.get_qpos()[0] <= limits[0][1] * 0.1:
+            if new_qpos <= DOOR_CLOSED_RAD:
                 break
             if abs(new_qpos - start_qpos) <= 0.001 and _ > 2:
                 break
@@ -209,5 +223,5 @@ class chain_serve_hamburger_ks(KitchenS_base_task):
         burger_in_bowl = (abs(tp[0] - bowl_p[0]) < 0.08
                           and abs(tp[1] - bowl_p[1]) < 0.08
                           and tp[2] > bowl_p[2] - 0.02)
-        door_closed = self.microwave.get_qpos()[0] <= limits[0][1] * 0.2
+        door_closed = self.microwave.get_qpos()[0] <= DOOR_CLOSED_RAD
         return burger_in_bowl and door_closed

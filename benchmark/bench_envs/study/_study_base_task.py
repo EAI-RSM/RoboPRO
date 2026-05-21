@@ -104,7 +104,7 @@ class Study_base_task(Bench_base_task):
 
         self._parse_perturbations(random_setting)
 
-        self.col_temp = os.environ['ROBOTWIN_ROOT'] + "/assets/objects/{object}/collision/base{object_id}.glb"
+        self.col_temp = os.environ['BENCH_ROOT'] + "/assets/objects/{object}/collision/base{object_id}.glb"
         self.file_path = []
         self.plan_success = True
         self.step_lim = None
