@@ -1,4 +1,0 @@
-[submodule "customized_robotwin"]
-	path = customized_robotwin
-	url = ../customized_robotwin
-	branch = mark_evaluate
