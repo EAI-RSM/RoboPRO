@@ -11,25 +11,63 @@ RoboPRO extends the RoboTwin simulation framework with:
 
 ## Installation
 
+System prereqs (one-time): `libvulkan1 mesa-vulkan-drivers vulkan-tools` (apt), `ffmpeg`, and an NVIDIA driver with CUDA 12.x.
+
 ```bash
 git clone https://anonymous.4open.science/r/RoboPRO-EDE0
 cd RoboPRO
 ```
 
-Follow the RoboTwin install guide: https://robotwin-platform.github.io/doc/usage/robotwin-install.html for the simulator and policy dependencies.
-
-Then fetch the asset bundle (~15 GB, not tracked in git) from HuggingFace:
+### 1. Conda env
 
 ```bash
+conda create -n robopro python=3.10 -y
+# Keep the env isolated from ~/.local/lib site-packages (otherwise sapien/torch
+# may resolve there instead of in robopro):
+conda env config vars set -n robopro PYTHONNOUSERSITE=1
+conda activate robopro
+```
+
+### 2. Python deps
+
+```bash
+cd customized_robotwin
+pip install -r script/requirements.txt
+pip install setuptools==69.5.1       # provides pkg_resources for sapien
+pip install "git+https://github.com/facebookresearch/pytorch3d.git@stable" --no-build-isolation
+bash script/_install.sh              # patches sapien urdf_loader + mplib planner
+```
+
+`script/_install.sh` also clones CuRobo v0.7.8 into `envs/curobo/` and pip-installs it editable, then re-pins `warp-lang==1.12.0` and `setuptools==69.5.1`. If you keep `scipy==1.10.1` from `requirements.txt`, `scikit-image` will print a version-conflict warning — harmless.
+
+### 3. Assets (~15 GB)
+
+```bash
+cd ..                                # back to repo root
 python scripts/install/download_assets.py
 ```
 
-This populates `benchmark/assets/` (objects, embodiments, background_texture, backgrounds, files). Two one-time setup notes after the download:
+This fetches the HuggingFace bundle (`Hoshipu/RoboPRO_assets`) into `benchmark/assets/` (objects, embodiments, background_texture, backgrounds). The bundle already includes the large `aloha-agilex/.../meshes/box2_Link.dae` mesh — no separate fetch needed.
 
-1. Edit absolute paths inside `benchmark/assets/embodiments/aloha-agilex/curobo_left.yml` and `curobo_right.yml` (`urdf_path`, `collision_spheres`) so they match the absolute path of your local `benchmark/assets/embodiments/aloha-agilex/` checkout.
-2. Fetch the large `box2_Link.dae` mesh (not tracked here — see `docs/install.html`, Step 4).
+The shipped `task_config/_embodiment_config.yml` uses upstream-relative paths (`./assets/embodiments/...`). RoboPRO keeps assets under `benchmark/assets/`, so add a one-line symlink so the upstream paths resolve:
 
-### CuRobo cache patch
+```bash
+ln -sfn ../benchmark/assets customized_robotwin/assets
+```
+
+Generate the local-path curobo configs from the shipped templates, and patch them so CuRobo can attach grasped objects (the shipped configs lack the `attached_object` link entries):
+
+```bash
+ASSETS_PATH="$(pwd)/benchmark"
+cd benchmark/assets/embodiments/aloha-agilex
+for side in left right; do
+  sed "s|\${ASSETS_PATH}|$ASSETS_PATH|g" curobo_${side}_tmp.yml > curobo_${side}.yml
+done
+cd -
+python scripts/install/patch_aloha_curobo.py
+```
+
+### 4. CuRobo cache patch
 
 In `customized_robotwin/envs/curobo/src/curobo/geom/sdf/world_mesh.py`, replace `clear_cache` with:
 
@@ -46,6 +84,19 @@ def clear_cache(self):
                 self._env_mesh_names[i][j] = None
     super().clear_cache()
 ```
+
+### 5. Verify (headless rollout)
+
+```bash
+cd customized_robotwin
+source set_env.sh
+export ROBOTWIN_BENCH_TASK=bench
+python script/bench_script/visualize_task_scene.py \
+    put_mouse_on_pad bench_demo_office_clean \
+    --bench-subdir office --rollout --no-render --seed 0 --save_data
+```
+
+Expected on success: a `Success: True` line and an MP4 at `customized_robotwin/data/bench_data/video/episode_put_mouse_on_pad_0.mp4` (~176 frames @ 320×240).
 
 ## Usage
 

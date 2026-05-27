@@ -56,42 +56,64 @@ cd RoboPRO</code></pre>
 
 <section class="install-section">
   <div class="container">
-    <p class="step-num">Step 2 · Base install</p>
-    <h2>RoboTwin base install.</h2>
-    <p>
-      Follow the upstream RoboTwin setup for the conda environment, CuRobo, and SAPIEN:
-      <a href="https://robotwin-platform.github.io/doc/usage/robotwin-install.html">robotwin-platform.github.io/doc/usage/robotwin-install.html</a>.
-      Use the <code>RoboTwin</code> conda environment for all RoboPRO commands.
-    </p>
+    <p class="step-num">Step 2 · System</p>
+    <h2>System packages.</h2>
+    <p>RoboTwin needs Vulkan and ffmpeg present at the OS level:</p>
+<pre><code>sudo apt install libvulkan1 mesa-vulkan-drivers vulkan-tools ffmpeg
+vulkaninfo  # smoke test</code></pre>
+    <p>NVIDIA driver with CUDA 12.x is required (the torch wheel below targets CUDA 12.1).</p>
   </div>
 </section>
 
 <section class="install-section">
   <div class="container">
-    <p class="step-num">Step 3 · Assets</p>
-    <h2>Fetch the asset bundle.</h2>
-    <p>Assets (~15 GB: objects, embodiments, background textures, scene-camera configs) live under <code>benchmark/assets/</code> and are not tracked in git. Fetch from the HuggingFace dataset <a href="https://huggingface.co/datasets/Hoshipu/RoboPRO_assets">Hoshipu/RoboPRO_assets</a>:</p>
-<pre><code>python scripts/install/download_assets.py</code></pre>
-    <p>Edit <code>curobo_left.yml</code> and <code>curobo_right.yml</code> under <code>benchmark/assets/embodiments/aloha-agilex/</code> to point at the absolute path of your local <code>benchmark/assets/embodiments/aloha-agilex/</code> checkout (the URDF and collision-spheres references are hardcoded absolute paths).</p>
+    <p class="step-num">Step 3 · Conda env</p>
+    <h2>Create the <code>robopro</code> env.</h2>
+<pre><code>conda create -n robopro python=3.10 -y
+# Block ~/.local/lib site-packages from leaking into the env:
+conda env config vars set -n robopro PYTHONNOUSERSITE=1
+conda activate robopro</code></pre>
+    <p>The <code>PYTHONNOUSERSITE</code> step matters: without it, a prior <code>~/.local/lib/python3.10/site-packages/sapien</code> (or torch) will be picked up ahead of the conda env's copy and break imports.</p>
   </div>
 </section>
 
 <section class="install-section">
   <div class="container">
-    <p class="step-num">Step 4 · Mesh</p>
-    <h2>Fetch the large mesh.</h2>
-    <p>
-      The file <code>aloha-agilex/urdf/aloha_maniskill_sim/meshes/box2_Link.dae</code> (~206&nbsp;MB) is not tracked here. Fetch it from the upstream Aloha-Agilex release and place it at:
-    </p>
-<pre><code>benchmark/assets/embodiments/aloha-agilex/
-  urdf/aloha_maniskill_sim/meshes/box2_Link.dae</code></pre>
+    <p class="step-num">Step 4 · Python deps</p>
+    <h2>Install RoboTwin deps + CuRobo.</h2>
+<pre><code>cd customized_robotwin
+pip install -r script/requirements.txt
+pip install setuptools==69.5.1
+pip install "git+https://github.com/facebookresearch/pytorch3d.git@stable" --no-build-isolation
+bash script/_install.sh</code></pre>
+    <p><code>script/_install.sh</code> patches <code>sapien/wrapper/urdf_loader.py</code> (utf-8 encoding) and <code>mplib/planner.py</code> (drops a too-strict collision check), then clones CuRobo v0.7.8 into <code>envs/curobo/</code> and pip-installs it editable. It re-pins <code>warp-lang==1.12.0</code> and <code>setuptools==69.5.1</code> at the end. A <code>scikit-image vs scipy</code> version warning is harmless &mdash; the simulator needs <code>scipy==1.10.1</code>.</p>
   </div>
 </section>
 
 <section class="install-section">
   <div class="container">
-    <p class="step-num">Step 5 · CuRobo</p>
-    <h2>CuRobo cache patch.</h2>
+    <p class="step-num">Step 5 · Assets</p>
+    <h2>Fetch the asset bundle (~15&nbsp;GB).</h2>
+<pre><code>cd ..
+python scripts/install/download_assets.py</code></pre>
+    <p>Pulls from <a href="https://huggingface.co/datasets/Hoshipu/RoboPRO_assets">Hoshipu/RoboPRO_assets</a> into <code>benchmark/assets/</code> (objects, embodiments, background_texture, backgrounds). The bundle already includes <code>aloha-agilex/.../meshes/box2_Link.dae</code> (~206&nbsp;MB) &mdash; no separate fetch needed.</p>
+    <p>The shipped <code>task_config/_embodiment_config.yml</code> uses upstream-relative paths (<code>./assets/embodiments/...</code>). RoboPRO keeps assets under <code>benchmark/assets/</code>, so add a one-line symlink so the upstream paths resolve:</p>
+<pre><code>ln -sfn ../benchmark/assets customized_robotwin/assets</code></pre>
+    <p>Generate the local-path curobo configs from the shipped templates, and patch them so CuRobo can attach grasped objects (the shipped configs lack the <code>attached_object</code> link entries):</p>
+<pre><code>ASSETS_PATH="$(pwd)/benchmark"
+cd benchmark/assets/embodiments/aloha-agilex
+for side in left right; do
+  sed "s|\${ASSETS_PATH}|$ASSETS_PATH|g" curobo_${side}_tmp.yml &gt; curobo_${side}.yml
+done
+cd -
+python scripts/install/patch_aloha_curobo.py</code></pre>
+  </div>
+</section>
+
+<section class="install-section">
+  <div class="container">
+    <p class="step-num">Step 6 · CuRobo cache patch</p>
+    <h2>Replace <code>clear_cache</code>.</h2>
     <p>In <code>customized_robotwin/envs/curobo/src/curobo/geom/sdf/world_mesh.py</code>, replace the <code>clear_cache</code> method with:</p>
 <pre><code>def clear_cache(self):
     self._wp_mesh_cache = {}
@@ -109,15 +131,16 @@ cd RoboPRO</code></pre>
 
 <section class="install-section">
   <div class="container">
-    <p class="step-num">Step 6 · Verify</p>
-    <h2>Verify a rollout.</h2>
+    <p class="step-num">Step 7 · Verify (headless)</p>
+    <h2>Run one rollout.</h2>
 <pre><code>cd customized_robotwin
 source set_env.sh
 export ROBOTWIN_BENCH_TASK="bench"
 
 python script/bench_script/visualize_task_scene.py \
-    put_mouse_on_pad bench_demo_office_clean --rollout --seed 0</code></pre>
-    <p>A SAPIEN viewer window should open and play a reference rollout. Once that works, you're ready to collect with any perturbation config.</p>
+    put_mouse_on_pad bench_demo_office_clean \
+    --bench-subdir office --rollout --no-render --seed 0 --save_data</code></pre>
+    <p>On success you'll see <code>Success: True</code> and an MP4 at <code>customized_robotwin/data/bench_data/video/episode_put_mouse_on_pad_0.mp4</code> (~176 frames @ 320×240, ~6&nbsp;s). Drop <code>--no-render --save_data</code> to use the interactive SAPIEN viewer instead.</p>
   </div>
 </section>
 
