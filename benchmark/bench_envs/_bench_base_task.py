@@ -686,6 +686,7 @@ class Bench_base_task(Base_Task):
         self._counted_furniture_names: set[str] = set()
         self._hit_furniture_names: set[str] = set()
         self.filtered_contacts_for_log = []
+        self.static_object_pose_prev: dict = {}
 
     def _get_target_object_names(self) -> set[str]:
         """Return the names of target objects for this task.
@@ -733,6 +734,20 @@ class Bench_base_task(Base_Task):
             pos_delta >= self.STATIC_OBJECT_POSITION_THRESHOLD_M
             or ang_delta >= self.STATIC_OBJECT_ORIENTATION_THRESHOLD_RAD
         )
+
+    def _snapshot_static_object_poses(self):
+        """Snapshot poses of all static objects before scene.step() for pose-change collision detection."""
+        if not hasattr(self, 'static_object_names'):
+            return
+        actor_map = {e.get_name(): e for e in self.scene.get_all_actors() if e.get_name()}
+        for name in self.static_object_names:
+            entity = actor_map.get(name)
+            if entity is not None:
+                p = entity.get_pose()
+                self.static_object_pose_prev[name] = (
+                    np.array(p.p, dtype=np.float64),
+                    np.array(p.q, dtype=np.float64),
+                )
 
     def check_collisions(self):
         """
@@ -786,24 +801,26 @@ class Bench_base_task(Base_Task):
                         self._counted_furniture_names.add(furniture_name)
                     count_furniture = True
 
-            # Static objects: count each unique object at most once per episode; exclude gripper links
+            # Static objects: count only when the object has moved more than threshold
             if ((is_robot_0 and is_static_1 and not is_gripper_0) or (is_robot_1 and is_static_0 and not is_gripper_1)):
                 static_name = name1 if is_static_1 else name0
                 if static_name not in self._counted_robot_static_objects:
-                    robot_link = name0 if is_robot_0 else name1
-                    # print(f"[Collision] robot_to_static_object: {robot_link} -> {static_name}")
-                    self.collision_metrics["robot_to_static_object"] += 1
-                    self._counted_robot_static_objects.add(static_name)
-                    count_static = True
+                    if self._static_object_has_significant_pose_change(static_name):
+                        robot_link = name0 if is_robot_0 else name1
+                        # print(f"[Collision] robot_to_static_object: {robot_link} -> {static_name}")
+                        self.collision_metrics["robot_to_static_object"] += 1
+                        self._counted_robot_static_objects.add(static_name)
+                        count_static = True
 
             if (is_target_0 and is_static_1) or (is_target_1 and is_static_0):
                 static_name = name1 if is_static_1 else name0
                 if static_name not in self._counted_target_static_objects:
-                    target_name = name0 if is_target_0 else name1
-                    # print(f"[Collision] target_to_static_object: {target_name} -> {static_name}")
-                    self.collision_metrics["target_to_static_object"] += 1
-                    self._counted_target_static_objects.add(static_name)
-                    count_target_static = True
+                    if self._static_object_has_significant_pose_change(static_name):
+                        target_name = name0 if is_target_0 else name1
+                        # print(f"[Collision] target_to_static_object: {target_name} -> {static_name}")
+                        self.collision_metrics["target_to_static_object"] += 1
+                        self._counted_target_static_objects.add(static_name)
+                        count_target_static = True
 
             if count_furniture or count_static or count_target_static:
                 for pt in contact.points:
@@ -1332,6 +1349,8 @@ class Bench_base_task(Base_Task):
 
                 now_right_id += 1
 
+            if getattr(self, 'enable_collision_metrics', False) and hasattr(self, 'robot_link_names'):
+                self._snapshot_static_object_poses()
             self.scene.step()
             self._update_render()
 
