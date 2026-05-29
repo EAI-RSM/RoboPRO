@@ -2,7 +2,10 @@ echo "Installing the necessary packages ..."
 pip install -r script/requirements.txt
 
 echo "Installing pytorch3d ..."
-pip install "git+https://github.com/facebookresearch/pytorch3d.git@stable" --no-build-isolation
+# cd third_party/pytorch3d_simplified
+# pip install -e .
+# cd ../..
+pip install "git+https://github.com/facebookresearch/pytorch3d.git@stable"
 
 echo "Adjusting code in sapien/wrapper/urdf_loader.py ..."
 # location of sapien, like "~/.conda/envs/RoboTwin/lib/python3.10/site-packages/sapien"
@@ -46,11 +49,9 @@ sed -i -E 's/(if np.linalg.norm\(delta_twist\) < 1e-4 )(or collide )(or not with
 
 echo "Installing Curobo ..."
 cd envs
-git clone --branch v0.7.8 --depth 1 https://github.com/NVlabs/curobo.git
+git clone https://github.com/NVlabs/curobo.git
 cd curobo
 pip install -e . --no-build-isolation
-pip install warp-lang==1.12.0
-pip install setuptools==69.5.1
 cd ../..
 
 echo "Installation basic environment complete!"

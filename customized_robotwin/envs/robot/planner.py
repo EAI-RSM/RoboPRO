@@ -565,7 +565,6 @@ except Exception as e:
     traceback.print_exc()
 
 
-
 # ********************** MplibPlanner **********************
 class MplibPlanner:
     # links=None, joints=None
