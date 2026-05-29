@@ -228,6 +228,14 @@ class ModelClient:
 
     def call(self, func_name=None, obs=None):
         response = self._send_recv({"cmd": func_name, "obs": obs})
+        if 'res' not in response:
+            # Server caught an exception and returned {"error", "traceback"}
+            # (see policy_model_server.py). Surface it instead of masking it
+            # behind a KeyError: 'res'.
+            err = response.get('error', '<no error field in response>')
+            tb = response.get('traceback', '')
+            raise RuntimeError(
+                f"Server error during RPC '{func_name}':\n{err}\n--- server traceback ---\n{tb}")
         return response['res']
 
     def __getattr__(self, name):
