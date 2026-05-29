@@ -35,9 +35,9 @@ def filter_instructions(instructions: List[str], episode_params: Dict[str, str])
         arm_params = {key for key in stripped_episode_params.keys() if len(key) == 1 and "a" <= key <= "z"}
         non_arm_params = set(stripped_episode_params.keys()) - arm_params
 
-        # Accept if we have exact match OR if the only missing parameters are arm parameters
-        if set(placeholders) == set(stripped_episode_params.keys()) or (
-                # Special case: accept if the only difference is missing arm parameters
+        # Accept if the instruction has no placeholders, or if we have an exact match.
+        # Also accept instructions with only arm placeholders when episode params include arm metadata.
+        if not placeholders or set(placeholders) == set(stripped_episode_params.keys()) or (
                 arm_params and set(placeholders).union(arm_params) == set(stripped_episode_params.keys()) and
                 not arm_params.intersection(set(placeholders))):
             filtered_instructions.append(instruction)
