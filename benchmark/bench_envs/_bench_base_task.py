@@ -47,7 +47,7 @@ class Bench_base_task(Base_Task):
     COLLISION_FORCE_THRESHOLD_N = 10.0
     # Static object pose thresholds: only count robot/target-to-static collisions when
     # the static object has moved beyond these from the previous step.
-    STATIC_OBJECT_POSITION_THRESHOLD_M = 0.02   # 2 cm
+    STATIC_OBJECT_POSITION_THRESHOLD_M = 0.02   # 1 cm
     STATIC_OBJECT_ORIENTATION_THRESHOLD_RAD = 0.2  # ~11.5 deg
 
     def __init__(self):
@@ -498,7 +498,7 @@ class Bench_base_task(Base_Task):
                 trys += 1
                 continue
 
-            self.cluttered_obj.set_name(f"{obj_name}")
+            self.cluttered_obj.set_name(obj_name)
 
             # manage stability as distractors
             self.stabilize_object(self.cluttered_obj)
@@ -628,7 +628,7 @@ class Bench_base_task(Base_Task):
                 trys += 1
                 continue
 
-            self.cluttered_obj.set_name(f"{obj_name}")
+            self.cluttered_obj.set_name(obj_name)
 
             # manage stability as distractors
             self.stabilize_object(self.cluttered_obj)
@@ -680,13 +680,14 @@ class Bench_base_task(Base_Task):
             "robot_to_static_object": 0,
             "target_to_static_object": 0,
         }
-        # Track which static objects have already been counted (once per episode)
-        self._counted_robot_static_objects: set[str] = set()
-        self._counted_target_static_objects: set[str] = set()
+        # Track which static objects have already been counted (once per episode) — keyed by per_scene_id
+        self._counted_robot_static_objects: set[int] = set()
+        self._counted_target_static_objects: set[int] = set()
         self._counted_furniture_names: set[str] = set()
         self._hit_furniture_names: set[str] = set()
         self.filtered_contacts_for_log = []
-        self.static_object_pose_prev: dict = {}
+        self.static_object_pose_prev: dict[int, tuple] = {}   # per_scene_id -> (pos, quat)
+        self.static_object_pose_start: dict[int, tuple] = {}  # per_scene_id -> (pos, quat), captured once per episode
 
     def _get_target_object_names(self) -> set[str]:
         """Return the names of target objects for this task.
@@ -708,46 +709,74 @@ class Bench_base_task(Base_Task):
         self.furniture_names = set(self.FURNITURE_NAMES)
         self.target_object_names = self._get_target_object_names()
 
-        all_actor_names = {
-            entity.get_name() for entity in self.scene.get_all_actors()
-            if entity.get_name()
-        }
-        
-        self.static_object_names = all_actor_names - (self.furniture_names | self.target_object_names)
+        # Key static objects by per_scene_id — unique per actor, stable across Python object accesses
+        self.static_object_ids: set[int] = set()
+        self._static_id_to_name: dict[int, str] = {}
+        for entity in self.scene.get_all_actors():
+            n = entity.get_name()
+            if not n or n in self.furniture_names or n in self.target_object_names:
+                continue
+            self.static_object_ids.add(entity.per_scene_id)
+            self._static_id_to_name[entity.per_scene_id] = n
 
-    def _static_object_has_significant_pose_change(self, name: str) -> bool:
-        """Return True if the static object has moved/rotated beyond thresholds since the previous step."""
-        prev = self.static_object_pose_prev.get(name)
-        if prev is None:
-            return True  # unknown object, count the collision
-        prev_p, prev_q = prev
-        entity = next((e for e in self.scene.get_all_actors() if e.get_name() == name), None)
-        if entity is None:
-            return True
+    def _static_object_has_significant_pose_change(self, actor_id: int, entity) -> bool:
+        """Return True if cumulative displacement from episode start exceeds thresholds."""
+        start = self.static_object_pose_start.get(actor_id)
+        if start is None:
+            return True  # not yet snapshotted — count the collision
+        start_p, start_q = start
         curr = entity.get_pose()
         curr_p = np.array(curr.p, dtype=np.float64)
         curr_q = np.array(curr.q, dtype=np.float64)
-        pos_delta = float(np.linalg.norm(curr_p - prev_p))
-        qdot = abs(float(np.dot(curr_q, prev_q)))
-        ang_delta = 2 * np.arccos(min(1.0, qdot))
+        cumul_pos = float(np.linalg.norm(curr_p - start_p))
+        qdot = abs(float(np.dot(curr_q, start_q)))
+        cumul_ang = 2 * np.arccos(min(1.0, qdot))
         return (
-            pos_delta >= self.STATIC_OBJECT_POSITION_THRESHOLD_M
-            or ang_delta >= self.STATIC_OBJECT_ORIENTATION_THRESHOLD_RAD
+            cumul_pos >= self.STATIC_OBJECT_POSITION_THRESHOLD_M
+            or cumul_ang >= self.STATIC_OBJECT_ORIENTATION_THRESHOLD_RAD
         )
 
+    def _print_significant_collision(self, actor_id: int, entity, category: str) -> None:
+        """Print displacement stats the first time a (object, category) pair is counted."""
+        display_name = f"{self._static_id_to_name.get(actor_id, entity.get_name())}#{actor_id}"
+        curr_p = np.array(entity.get_pose().p, dtype=np.float64)
+        curr_q = np.array(entity.get_pose().q, dtype=np.float64)
+        start = self.static_object_pose_start.get(actor_id)
+        print(f"[Collision] [SIGNIFICANT] {category}: '{display_name}'")
+        if start is not None:
+            start_p, start_q = start
+            cumul_pos = float(np.linalg.norm(curr_p - start_p))
+            qdot = abs(float(np.dot(curr_q, start_q)))
+            cumul_ang = 2 * np.arccos(min(1.0, qdot))
+            print(f"  start_pos={np.round(start_p, 4)}  curr_pos={np.round(curr_p, 4)}")
+            print(f"  cumul_delta={cumul_pos:.4f} m  cumul_ang={np.degrees(cumul_ang):.2f} deg")
+            print(f"  [context] all static object cumulative displacements from start:")
+            for other_id, (other_start_p, _) in self.static_object_pose_start.items():
+                other_entity = next((e for e in self.scene.get_all_actors() if e.per_scene_id == other_id), None)
+                if other_entity is None:
+                    continue
+                other_curr_p = np.array(other_entity.get_pose().p, dtype=np.float64)
+                other_cumul = float(np.linalg.norm(other_curr_p - other_start_p))
+                marker = " <-- MOVED" if other_cumul >= self.STATIC_OBJECT_POSITION_THRESHOLD_M else ""
+                other_name = f"{self._static_id_to_name.get(other_id, str(other_id))}#{other_id}"
+                print(f"    '{other_name}': start={np.round(other_start_p, 4)}  curr={np.round(other_curr_p, 4)}  cumul={other_cumul:.4f} m{marker}")
+        else:
+            print(f"  curr_pos={np.round(curr_p, 4)}  (no start snapshot — collision before first step)")
+
     def _snapshot_static_object_poses(self):
-        """Snapshot poses of all static objects before scene.step() for pose-change collision detection."""
-        if not hasattr(self, 'static_object_names'):
+        """Snapshot poses of all static objects before scene.step() for cumulative displacement tracking."""
+        if not hasattr(self, 'static_object_ids'):
             return
-        actor_map = {e.get_name(): e for e in self.scene.get_all_actors() if e.get_name()}
-        for name in self.static_object_names:
-            entity = actor_map.get(name)
-            if entity is not None:
-                p = entity.get_pose()
-                self.static_object_pose_prev[name] = (
-                    np.array(p.p, dtype=np.float64),
-                    np.array(p.q, dtype=np.float64),
-                )
+        first_call = len(self.static_object_pose_start) == 0
+        for entity in self.scene.get_all_actors():
+            actor_id = entity.per_scene_id
+            if actor_id not in self.static_object_ids:
+                continue
+            p = entity.get_pose()
+            snapshot = (np.array(p.p, dtype=np.float64), np.array(p.q, dtype=np.float64))
+            self.static_object_pose_prev[actor_id] = snapshot
+            if first_call:
+                self.static_object_pose_start[actor_id] = snapshot
 
     def check_collisions(self):
         """
@@ -764,24 +793,26 @@ class Bench_base_task(Base_Task):
         self.filtered_contacts_for_log = []
 
         for contact in contacts:
-            name0 = contact.bodies[0].entity.name
-            name1 = contact.bodies[1].entity.name
+            entity0 = contact.bodies[0].entity
+            entity1 = contact.bodies[1].entity
+            name0 = entity0.name
+            name1 = entity1.name
 
             has_impulse = any(
                 np.linalg.norm(point.impulse) > self.collision_impulse_threshold
                 for point in contact.points
             )
 
-            is_robot_0 = name0 in self.robot_link_names
-            is_robot_1 = name1 in self.robot_link_names
-            is_gripper_0 = name0 in self.GRIPPER_LINK_NAMES
-            is_gripper_1 = name1 in self.GRIPPER_LINK_NAMES
+            is_robot_0    = name0 in self.robot_link_names
+            is_robot_1    = name1 in self.robot_link_names
+            is_gripper_0  = name0 in self.GRIPPER_LINK_NAMES
+            is_gripper_1  = name1 in self.GRIPPER_LINK_NAMES
             is_furniture_0 = name0 in self.furniture_names
             is_furniture_1 = name1 in self.furniture_names
-            is_target_0 = name0 in self.target_object_names
-            is_target_1 = name1 in self.target_object_names
-            is_static_0 = name0 in self.static_object_names
-            is_static_1 = name1 in self.static_object_names
+            is_target_0   = name0 in self.target_object_names
+            is_target_1   = name1 in self.target_object_names
+            is_static_0   = entity0.per_scene_id in self.static_object_ids
+            is_static_1   = entity1.per_scene_id in self.static_object_ids
 
             count_furniture = False
             count_static = False
@@ -801,25 +832,25 @@ class Bench_base_task(Base_Task):
                         self._counted_furniture_names.add(furniture_name)
                     count_furniture = True
 
-            # Static objects: count only when the object has moved more than threshold
+            # Static objects: count only when cumulative displacement exceeds threshold
             if ((is_robot_0 and is_static_1 and not is_gripper_0) or (is_robot_1 and is_static_0 and not is_gripper_1)):
-                static_name = name1 if is_static_1 else name0
-                if static_name not in self._counted_robot_static_objects:
-                    if self._static_object_has_significant_pose_change(static_name):
-                        robot_link = name0 if is_robot_0 else name1
-                        # print(f"[Collision] robot_to_static_object: {robot_link} -> {static_name}")
+                static_entity = entity1 if is_static_1 else entity0
+                static_id = static_entity.per_scene_id
+                if static_id not in self._counted_robot_static_objects:
+                    if self._static_object_has_significant_pose_change(static_id, static_entity):
+                        self._print_significant_collision(static_id, static_entity, "robot_to_static_object")
                         self.collision_metrics["robot_to_static_object"] += 1
-                        self._counted_robot_static_objects.add(static_name)
+                        self._counted_robot_static_objects.add(static_id)
                         count_static = True
 
             if (is_target_0 and is_static_1) or (is_target_1 and is_static_0):
-                static_name = name1 if is_static_1 else name0
-                if static_name not in self._counted_target_static_objects:
-                    if self._static_object_has_significant_pose_change(static_name):
-                        target_name = name0 if is_target_0 else name1
-                        # print(f"[Collision] target_to_static_object: {target_name} -> {static_name}")
+                static_entity = entity1 if is_static_1 else entity0
+                static_id = static_entity.per_scene_id
+                if static_id not in self._counted_target_static_objects:
+                    if self._static_object_has_significant_pose_change(static_id, static_entity):
+                        self._print_significant_collision(static_id, static_entity, "target_to_static_object")
                         self.collision_metrics["target_to_static_object"] += 1
-                        self._counted_target_static_objects.add(static_name)
+                        self._counted_target_static_objects.add(static_id)
                         count_target_static = True
 
             if count_furniture or count_static or count_target_static:
@@ -854,8 +885,8 @@ class Bench_base_task(Base_Task):
             "is_collision": total > 0,
             "total_collision_count": total,
             "robot_to_furniture_names": sorted(self._hit_furniture_names),
-            "robot_to_static_object_names": sorted(self._counted_robot_static_objects),
-            "target_to_static_object_names": sorted(self._counted_target_static_objects),
+            "robot_to_static_object_names": sorted(f"{getattr(self, '_static_id_to_name', {}).get(i, str(i))}#{i}" for i in self._counted_robot_static_objects),
+            "target_to_static_object_names": sorted(f"{getattr(self, '_static_id_to_name', {}).get(i, str(i))}#{i}" for i in self._counted_target_static_objects),
         }
 
     # =========================================================== Proximity Tracking ===========================================================
@@ -1305,6 +1336,71 @@ class Bench_base_task(Base_Task):
                 Action(arm_tag, "close", target_gripper_pos=gripper_pos),
             ]
 
+    def get_curobo_target(self):
+        """
+        Return (left_ee_target, right_ee_target) for CuRobo escape planning.
+
+        Generic default: finds the primary target object via _get_target_object_names(),
+        then computes a pre-grasp pose for each arm that still has an open gripper
+        (i.e. hasn't grasped anything yet). This covers the most common collision
+        scenario — arm hitting clutter while reaching toward the target object —
+        without any per-task code.
+
+        For the grasped/placement phase (both grippers closed) returns (None, None),
+        which causes the branch to be skipped. Tasks can override for finer control.
+
+        Each target is a pose accepted by robot.left_plan_path / robot.right_plan_path,
+        or None to skip planning that arm.
+        """
+        try:
+            target_names = self._get_target_object_names()
+            # Use wrapped Actor objects from task instance vars (self.bottle, self.cup, etc.)
+            # self.scene.get_all_actors() returns raw SAPIEN Entity objects which lack
+            # iter_contact_points() needed by choose_grasp_pose().
+            target_actors = [
+                v for v in self.__dict__.values()
+                if hasattr(v, 'iter_contact_points') and hasattr(v, 'get_name')
+                and v.get_name() in target_names
+            ]
+            if not target_actors:
+                return None, None
+
+            target_actor = target_actors[0]
+            left_target = right_target = None
+
+            # Pick only the arm closest to the target object.
+            # Planning for all open-gripper arms causes both arms to move on
+            # single-arm tasks where both grippers happen to be open.
+            target_pos  = np.array(target_actor.get_pose().p)
+            left_ee_pos = np.array(self.robot.get_left_ee_pose()[:3])
+            right_ee_pos= np.array(self.robot.get_right_ee_pose()[:3])
+            dist_left   = np.linalg.norm(left_ee_pos  - target_pos)
+            dist_right  = np.linalg.norm(right_ee_pos - target_pos)
+
+            # Use get_grasp_pose (pure geometry, no CuRobo calls) rather than
+            # choose_grasp_pose. choose_grasp_pose internally calls right_plan_path
+            # for every contact point via check_pose — after N×2 CuRobo calls, the
+            # GPU numerical state is exhausted and the explicit plan_path call in
+            # _curobo_escape fails with IK_FAIL even for the same pose.
+            # get_grasp_pose computes the pose geometrically; _curobo_escape makes
+            # the single CuRobo planning call.
+            contact_points = list(target_actor.iter_contact_points())
+            if not contact_points:
+                return None, None
+            first_cp = contact_points[0][0]
+
+            if dist_left <= dist_right and self.robot.is_left_gripper_open():
+                left_target = self.get_grasp_pose(target_actor, arm_tag=ArmTag("left"),
+                                                   contact_point_id=first_cp, pre_dis=0.07)
+            elif self.robot.is_right_gripper_open():
+                right_target = self.get_grasp_pose(target_actor, arm_tag=ArmTag("right"),
+                                                    contact_point_id=first_cp, pre_dis=0.07)
+
+            return left_target, right_target
+        except Exception as e:
+            print(f"[curobo] get_curobo_target failed: {e}")
+            return None, None
+
     def get_place_pose(
         self,
         actor: Actor,
@@ -1595,6 +1691,56 @@ class Bench_base_task(Base_Task):
         if self.render_freq:  # UI
             self.viewer.render()
     
+    def take_dense_action(self, control_seq, save_freq=-1):
+        """Extends base take_dense_action with per-step collision detection."""
+        left_arm     = control_seq["left_arm"]
+        left_gripper = control_seq["left_gripper"]
+        right_arm    = control_seq["right_arm"]
+        right_gripper= control_seq["right_gripper"]
+
+        save_freq = self.save_freq if save_freq == -1 else save_freq
+        if save_freq is not None:
+            self._take_picture()
+
+        max_control_len = 0
+        if left_arm    is not None: max_control_len = max(max_control_len, left_arm["position"].shape[0])
+        if left_gripper is not None: max_control_len = max(max_control_len, left_gripper["num_step"])
+        if right_arm   is not None: max_control_len = max(max_control_len, right_arm["position"].shape[0])
+        if right_gripper is not None: max_control_len = max(max_control_len, right_gripper["num_step"])
+
+        _collision_active = getattr(self, 'enable_collision_metrics', False) and hasattr(self, 'robot_link_names')
+
+        for control_idx in range(max_control_len):
+            if left_arm is not None and control_idx < left_arm["position"].shape[0]:
+                self.robot.set_arm_joints(left_arm["position"][control_idx],
+                                          left_arm["velocity"][control_idx], "left")
+            if left_gripper is not None and control_idx < left_gripper["num_step"]:
+                self.robot.set_gripper(left_gripper["result"][control_idx], "left",
+                                       left_gripper["per_step"])
+            if right_arm is not None and control_idx < right_arm["position"].shape[0]:
+                self.robot.set_arm_joints(right_arm["position"][control_idx],
+                                          right_arm["velocity"][control_idx], "right")
+            if right_gripper is not None and control_idx < right_gripper["num_step"]:
+                self.robot.set_gripper(right_gripper["result"][control_idx], "right",
+                                       right_gripper["per_step"])
+
+            if _collision_active:
+                self._snapshot_static_object_poses()
+            self.scene.step()
+
+            if self.render_freq and control_idx % self.render_freq == 0:
+                self._update_render()
+                self.viewer.render()
+            if save_freq is not None and control_idx % save_freq == 0:
+                self._update_render()
+                self._take_picture()
+            if _collision_active:
+                self.check_collisions()
+
+        if save_freq is not None:
+            self._take_picture()
+        return True
+
     # =========================================================== Extra Curobo Utils ===========================================================
 
     def update_world(self, exclude_obstacles: bool = False):
