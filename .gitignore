@@ -68,6 +68,8 @@ outputs/
 benchmark/assets/
 benchmark_data/*
 !benchmark_data/.gitkeep
-benchmark/collision_test/
+benchmark/test_output/
 benchmark/bench_script/collision_test/
 presentation_material/
+
+customized_robotwin/policy/pi05_modify/

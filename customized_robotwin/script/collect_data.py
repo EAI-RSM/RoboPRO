@@ -268,6 +268,8 @@ def run(TASK_ENV, args):
             info = TASK_ENV.play_once()
             if info is None:
                 info = getattr(TASK_ENV, "info", None) or {}
+            if hasattr(TASK_ENV, "get_proximity_metrics") and getattr(TASK_ENV, "_proximity_enabled", False):
+                info["proximity_metrics"] = TASK_ENV.get_proximity_metrics()
             info_db[f"episode_{episode_idx}"] = info
 
             with open(info_file_path, "w", encoding="utf-8") as file:

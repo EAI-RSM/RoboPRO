@@ -15,6 +15,16 @@ domain_randomization:
   random_light: false
   crazy_random_light_rate: 0
   obstacle_density: 0
+
+  # Not a perturbation: single fixed canonical prompt. This hook is the only
+  # path that bypasses the per-episode instruction templating (which rejects
+  # the placeholder-less plain instruction for tasks with object params like
+  # put_bottle_in_fridge). A 1-entry bank => no language variation.
+  # Absolute path: the client CWD (customized_robotwin) can't resolve a
+  # benchmark/-relative path.
+  language_perturbation:
+    enabled: true
+    instruction_bank: /home/apexs/xuan/project/RoboPRO/benchmark/bench_task_config/instruction_bank_fixed.json
 camera:
   head_camera_type: D435
   wrist_camera_type: D435

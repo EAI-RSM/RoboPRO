@@ -858,6 +858,233 @@ class Bench_base_task(Base_Task):
             "target_to_static_object_names": sorted(self._counted_target_static_objects),
         }
 
+    # =========================================================== Proximity Tracking ===========================================================
+
+    def _init_proximity_tracking(self, config):
+        """
+        Initialize SDF/proximity tracking. Call after collision_list is fully populated.
+        Skips ArticulationActor entries — they use AABB-only distance at runtime.
+        """
+        from envs.utils.actor_utils import ArticulationActor
+
+        self._held_actors = {"left": None, "right": None}
+        self._proximity_enabled = True
+        self._proximity_parts = list(config.get("robot_parts", ["left_ee", "right_ee"]))
+        self._proximity_aabb_threshold = float(config.get("aabb_threshold", 1.0))
+
+        self._proximity_mesh_cache: dict = {}  # actor_name -> scaled trimesh.Trimesh
+
+        for entry in self.collision_list:
+            actor = entry["actor"]
+            if isinstance(actor, ArticulationActor):
+                continue
+
+            collision_path = entry["collision_path"]
+            actor_name = actor.get_name()
+            scale = actor.scale if actor.scale is not None else [1.0, 1.0, 1.0]
+
+            try:
+                if os.path.isdir(collision_path):
+                    files_override = entry.get("files")
+                    if files_override:
+                        obj_files = [
+                            Path(collision_path) / f
+                            for f in files_override
+                            if (Path(collision_path) / f).is_file()
+                        ]
+                    else:
+                        obj_files = sorted(Path(collision_path).glob("*.obj"))
+                    meshes = []
+                    for p in obj_files:
+                        try:
+                            m = trimesh.load(str(p), force="mesh", process=False)
+                            if isinstance(m, trimesh.Scene):
+                                if m.geometry:
+                                    m = trimesh.util.concatenate(list(m.geometry.values()))
+                                else:
+                                    continue
+                            if len(getattr(m, "vertices", [])) > 0 and len(getattr(m, "faces", [])) > 0:
+                                meshes.append(m)
+                        except Exception:
+                            continue
+                    if not meshes:
+                        continue
+                    base_mesh = trimesh.util.concatenate(meshes) if len(meshes) > 1 else meshes[0]
+                else:
+                    base_mesh = trimesh.load(collision_path, force="mesh", process=False)
+                    if isinstance(base_mesh, trimesh.Scene):
+                        if base_mesh.geometry:
+                            base_mesh = trimesh.util.concatenate(list(base_mesh.geometry.values()))
+                        else:
+                            continue
+                    if len(getattr(base_mesh, "vertices", [])) == 0 or len(getattr(base_mesh, "faces", [])) == 0:
+                        continue
+
+                scaled_mesh = base_mesh.copy()
+                scaled_mesh.apply_scale(scale)
+
+                # Pre-warm BVH to avoid first-step latency spike
+                trimesh.proximity.closest_point(scaled_mesh, np.zeros((1, 3)))
+
+                self._proximity_mesh_cache[actor_name] = scaled_mesh
+            except Exception as e:
+                print(f"[Proximity] failed to load mesh for {actor_name}: {e}")
+
+        self._proximity_episode_min = {
+            part: {"min_dist": float("inf"), "delta": np.zeros(3, dtype=np.float32), "closest_name": ""}
+            for part in self._proximity_parts
+        }
+        print(f"[Proximity] ready: parts={self._proximity_parts}, "
+              f"mesh_cache={sorted(self._proximity_mesh_cache.keys())}")
+
+    def _get_robot_part_position(self, part_name) -> np.ndarray | None:
+        """Resolve part name to world-space position array. Returns None if not found."""
+        if part_name == "left_ee":
+            return np.array(self.robot.get_left_ee_pose()[:3])
+        if part_name == "right_ee":
+            return np.array(self.robot.get_right_ee_pose()[:3])
+        if part_name == "left_tcp":
+            return np.array(self.robot.get_left_tcp_pose()[:3])
+        if part_name == "right_tcp":
+            return np.array(self.robot.get_right_tcp_pose()[:3])
+        if part_name.startswith("left_"):
+            link = self.robot.left_entity.find_link_by_name(part_name[5:])
+            return np.array(link.get_pose().p) if link is not None else None
+        if part_name.startswith("right_"):
+            link = self.robot.right_entity.find_link_by_name(part_name[6:])
+            return np.array(link.get_pose().p) if link is not None else None
+        return None
+
+    def _get_aabb_dist_and_closest(self, entity, point: np.ndarray):
+        """
+        Returns (dist, closest_world_pt) for entity.
+        entity is sapien.Entity (actor) or PhysxArticulation.
+        For articulations iterates links (PhysxArticulationLinkComponent) directly.
+        """
+        if hasattr(entity, "get_links"):
+            # PhysxArticulation — iterate links
+            min_dist = float("inf")
+            min_closest = point.copy()
+            for link in entity.get_links():
+                try:
+                    aabb = link.get_global_aabb_fast()
+                    clamped = np.clip(point, aabb[0], aabb[1])
+                    d = float(np.linalg.norm(point - clamped))
+                    if d < min_dist:
+                        min_dist = d
+                        min_closest = clamped
+                except Exception:
+                    continue
+            return min_dist, min_closest
+        else:
+            # sapien.Entity — find physx component
+            physx_comp = next(
+                (c for c in entity.components if hasattr(c, "get_global_aabb_fast")), None
+            )
+            if physx_comp is None:
+                return float("inf"), point.copy()
+            aabb = physx_comp.get_global_aabb_fast()
+            clamped = np.clip(point, aabb[0], aabb[1])
+            d = float(np.linalg.norm(point - clamped))
+            return d, clamped
+
+    def _compute_proximity_step(self) -> dict:
+        """
+        Compute per-step proximity for all configured robot parts.
+        Returns {part_name: {"min_dist": float32, "delta": float32[3]}} or {} if disabled.
+        delta is the vector from the robot part to the closest surface point (world space).
+        """
+        if not getattr(self, "_proximity_enabled", False):
+            return {}
+
+        excluded_names = {n for n in self._held_actors.values() if n is not None}
+        robot_entities = {self.robot.left_entity, self.robot.right_entity}
+
+        # Exclude furniture (ground, table, wall, etc.) — their infinite/oversized AABBs
+        # would always report distance=0 and obscure meaningful proximity to scene objects.
+        actors = [
+            e for e in self.scene.get_all_actors()
+            if e.get_name() not in excluded_names
+            and e.get_name() not in self.FURNITURE_NAMES
+        ]
+        articulations = [a for a in self.scene.get_all_articulations() if a not in robot_entities]
+
+        result = {}
+        for part_name in self._proximity_parts:
+            pos = self._get_robot_part_position(part_name)
+            if pos is None:
+                result[part_name] = {
+                    "min_dist": np.float32(-1.0),
+                    "delta": np.zeros(3, dtype=np.float32),
+                }
+                continue
+
+            min_dist = float("inf")
+            min_closest = pos.copy()
+            min_name = ""
+
+            for entity in actors:
+                aabb_dist, aabb_closest = self._get_aabb_dist_and_closest(entity, pos)
+                cand_dist = aabb_dist
+                cand_closest = aabb_closest
+
+                actor_name = entity.get_name()
+                if aabb_dist < self._proximity_aabb_threshold and actor_name in self._proximity_mesh_cache:
+                    try:
+                        scaled_mesh = self._proximity_mesh_cache[actor_name]
+                        T = entity.get_pose().to_transformation_matrix()
+                        T_inv = np.linalg.inv(T)
+                        local_pt = T_inv[:3, :3] @ pos + T_inv[:3, 3]
+                        closest_pts, dists, _ = trimesh.proximity.closest_point(scaled_mesh, [local_pt])
+                        cand_dist = float(dists[0])
+                        cand_closest = T[:3, :3] @ closest_pts[0] + T[:3, 3]
+                    except Exception:
+                        pass  # fall back to AABB
+
+                if cand_dist < min_dist:
+                    min_dist = cand_dist
+                    min_closest = cand_closest
+                    min_name = actor_name
+
+            for art in articulations:
+                aabb_dist, aabb_closest = self._get_aabb_dist_and_closest(art, pos)
+                if aabb_dist < min_dist:
+                    min_dist = aabb_dist
+                    min_closest = aabb_closest
+                    min_name = art.get_name() if hasattr(art, "get_name") else ""
+
+            if np.isinf(min_dist):
+                min_dist_val = np.float32(-1.0)
+                delta_val = np.zeros(3, dtype=np.float32)
+            else:
+                min_dist_val = np.float32(min_dist)
+                delta_val = np.array(min_closest - pos, dtype=np.float32)
+
+            result[part_name] = {"min_dist": min_dist_val, "delta": delta_val, "closest_name": min_name}
+
+            ep_min = self._proximity_episode_min[part_name]
+            if not np.isinf(min_dist) and (np.isinf(ep_min["min_dist"]) or min_dist < ep_min["min_dist"]):
+                ep_min["min_dist"] = min_dist
+                ep_min["delta"] = delta_val.copy()
+                ep_min["closest_name"] = min_name
+
+        return result
+
+    def get_proximity_metrics(self) -> dict:
+        """Return per-part episode-minimum proximity. inf → -1.0 sentinel."""
+        result = {}
+        for part, data in self._proximity_episode_min.items():
+            m = data["min_dist"]
+            if np.isinf(m):
+                result[part] = {"min_dist": -1.0, "delta": [0.0, 0.0, 0.0], "closest_name": ""}
+            else:
+                result[part] = {
+                    "min_dist": float(m),
+                    "delta": data["delta"].tolist(),
+                    "closest_name": data.get("closest_name", ""),
+                }
+        return result
+
     # =========================================================== Camera ===========================================================
 
     def load_camera(self, **kwags):
@@ -1515,12 +1742,16 @@ class Bench_base_task(Base_Task):
             "scale": actor.scale,
         }
         self.robot.attach_object(object, arms_tag=arms_tag)
+        if hasattr(self, "_held_actors"):
+            self._held_actors[arms_tag] = actor.get_name()
 
     def detach_object(self, arms_tag: str):
         """
         Detach the attached objects from the robot in Curobo Planning.
         """
         self.robot.detach_object(arms_tag=arms_tag)
+        if hasattr(self, "_held_actors"):
+            self._held_actors[arms_tag] = None
     
     def enable_obstacle(self, enable: bool, mesh_names: list[str] = [], obb_names: list[str] = []):
         self.robot.enable_obstacle(enable, mesh_names=mesh_names, obb_names=obb_names)

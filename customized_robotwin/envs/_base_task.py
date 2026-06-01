@@ -529,6 +529,17 @@ class Base_Task(gym.Env):
         if self.data_type.get("pointcloud", False):
             pkl_dic["pointcloud"] = self.cameras.get_pcd(self.data_type.get("conbine", False))
 
+        # proximity (SDF) tracking — only active when _init_proximity_tracking was called
+        _prox_fn = getattr(self, "_compute_proximity_step", None)
+        if _prox_fn is not None:
+            proximity = _prox_fn()
+            if proximity:
+                pkl_dic["proximity"] = {
+                    part: {k: np.float32(v) if np.ndim(v) == 0 else np.array(v, dtype=np.float32)
+                           for k, v in vals.items() if k != "closest_name"}
+                    for part, vals in proximity.items()
+                }
+
         self.now_obs = deepcopy(pkl_dic)
         return pkl_dic
 
