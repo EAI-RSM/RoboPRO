@@ -7,7 +7,19 @@ seed: null
 instruction_type: unseen
 
 # Add Parameters You Need
-train_config_name: null
-model_name: null
-checkpoint_id: 30000
+train_config_name: pi05_aloha_full_base
+model_name: roboreal_all_80tasks
+checkpoint_id: 20000
 pi0_step: 50
+
+# Rollout collection parameters (used by collect_rollout_client.py)
+collect_num: 100
+collect_fixed_seed: false
+action_noise_var: 0.001
+
+# Branching collection (COLLECT_BRANCH_NUM > 0 enables branching mode)
+collect_mode: branching # branching or stitched
+collect_branch_num: 2
+collect_stitch_lookback: 50    # steps before collision to hand off to CuRobo
+collect_stitch_curobo_steps: 100
+collect_branch_step_frac: 0.5        # fraction of task step_lim per branch (0.5 = 300 of 600 steps)
