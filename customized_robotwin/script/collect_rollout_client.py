@@ -179,22 +179,27 @@ def get_camera_config(camera_type):
 
 # ── HDF5 writer ────────────────────────────────────────────────────────────
 
+REWARD_STEP      = -1.0
+REWARD_COLLISION = -10.0
+
 def save_episode_hdf5(buffer, save_dir, ep_idx, instruction, success, collision):
     """Write one rollout episode to HDF5.
 
     Structure:
         obs/{cam}/rgb  — JPEG-encoded frames, shape (T,)
-        state          — float32 (T, 14)
+        state          — float32 (T, state_dim)
+        reward         — float32 (T,)  -1 per step, -10 on collision steps
         attrs: instruction, episode, success, collision
     """
     hdf5_path = Path(save_dir) / f"episode_{ep_idx}.hdf5"
     cam_names = list(buffer[0]['obs'].keys())
     cam_images = {cam: [] for cam in cam_names}
-    states = []
+    states, rewards = [], []
     for frame in buffer:
         for cam in cam_names:
             cam_images[cam].append(frame['obs'][cam])
         states.append(frame['state'])
+        rewards.append(frame.get('reward', REWARD_STEP))
 
     with h5py.File(hdf5_path, 'w') as f:
         f.attrs['instruction'] = np.bytes_(instruction)
@@ -213,7 +218,8 @@ def save_episode_hdf5(buffer, save_dir, ep_idx, instruction, success, collision)
             padded = [d.ljust(max_len, b'\0') for d in encoded]
             obs_grp.create_dataset(f'{cam}/rgb', data=padded, dtype=f'S{max_len}')
 
-        f.create_dataset('state', data=np.array(states, dtype=np.float32))
+        f.create_dataset('state',  data=np.array(states,  dtype=np.float32))
+        f.create_dataset('reward', data=np.array(rewards, dtype=np.float32))
 
     return hdf5_path
 
@@ -658,7 +664,7 @@ def collect_rollouts(task_name, TASK_ENV, args, model, st_seed,
               f"CR \033[95m{collision_count/ep_idx*100:.1f}%\033[0m")
 
     with open(save_dir / "collect_summary.json", "w") as f:
-        json.dump(episode_log, f, indent=2)
+        json.dump(episode_log, f, indent=2, cls=NumpyEncoder)
 
     return episode_log
 
@@ -735,37 +741,42 @@ def collect_rollouts_branching(task_name, TASK_ENV, args, model, st_seed,
         # Override _take_picture so take_dense_action's save_freq loop writes
         # video frames instead of PKL files.  250 Hz ÷ 25 = 10 fps (matches eval).
         _VIDEO_STEP_FREQ = 25
-        def _video_take_picture():
-            obs = TASK_ENV.get_obs()
-            frame = _pick_video_frame(obs.get('observation', {}))
-            if frame is not None:
-                video_frames.append(frame)
+        _branch_prev_col = [0]
 
-        def _rec_obs():
+        def _branch_take_picture():
+            """Called by take_dense_action at save_freq intervals — same cadence as collect_data.py."""
             obs = TASK_ENV.get_obs()
             _, st = _encode_obs(obs)
+            # Check reward: collision since last frame?
+            total = TASK_ENV.get_collision_metrics().get("total_collision_count", 0) if hasattr(TASK_ENV, 'get_collision_metrics') else 0
+            reward = REWARD_COLLISION if total > _branch_prev_col[0] else REWARD_STEP
+            _branch_prev_col[0] = total
             buf.append({
                 'obs':   {cam: obs['observation'][cam]['rgb'].copy()
                           for cam in ('head_camera', 'right_camera', 'left_camera')
                           if cam in obs['observation']},
                 'state': st.copy(),
+                'reward': reward,
             })
+            frame = _pick_video_frame(obs.get('observation', {}))
+            if frame is not None:
+                video_frames.append(frame)
 
         # play_once() drives the robot through take_dense_action (scripted CuRobo
-        # trajectories), never through take_action.  Wrap both so observations are
-        # recorded regardless of which path executes.
+        # trajectories), never through take_action.  Wrap take_action as fallback.
         def _rec_ta(action):
-            _rec_obs()
-            return _orig_ta(action)
+            result = _orig_ta(action)
+            return result
 
         def _rec_tda(control_seq, save_freq=-1):
-            _rec_obs()
             return _orig_tda(control_seq, save_freq=save_freq)
 
-        TASK_ENV.take_action    = _rec_ta
+        TASK_ENV.take_action       = _rec_ta
         TASK_ENV.take_dense_action = _rec_tda
-        TASK_ENV._take_picture  = _video_take_picture
-        TASK_ENV.save_freq      = _VIDEO_STEP_FREQ   # triggers _take_picture in take_dense_action
+        TASK_ENV._take_picture     = _branch_take_picture
+        # Use task config's save_freq (same as collect_data.py) so frame density matches pretraining data
+        _task_save_freq = args.get("save_freq", _VIDEO_STEP_FREQ)
+        TASK_ENV.save_freq = _task_save_freq
 
         ok = False
         try:
@@ -819,8 +830,7 @@ def collect_rollouts_branching(task_name, TASK_ENV, args, model, st_seed,
         model.reset_model()
         TASK_ENV._contrastive_buffer = []
 
-        _first_collision_step = None
-        _prev_col_total       = 0
+        _prev_col_total = 0
         succ                  = False
         _orig_ta              = TASK_ENV.take_action
         _step_cnt             = [0]  # mutable for closure
@@ -830,10 +840,11 @@ def collect_rollouts_branching(task_name, TASK_ENV, args, model, st_seed,
             nonlocal _prev_col_total
             result = _orig_ta(action)
             _step_cnt[0] += 1
-            if _first_collision_step is None and hasattr(TASK_ENV, 'get_collision_metrics'):
+            new_collision = False
+            if hasattr(TASK_ENV, 'get_collision_metrics'):
                 total = TASK_ENV.get_collision_metrics().get("total_collision_count", 0)
                 if total > _prev_col_total:
-                    # store in a list so closure can write it
+                    new_collision = True
                     _collision_info[0] = _step_cnt[0]
                     print(f"[collision] step={_step_cnt[0]}  "
                           f"metrics={TASK_ENV.get_collision_metrics()}")
@@ -846,6 +857,7 @@ def collect_rollouts_branching(task_name, TASK_ENV, args, model, st_seed,
                               for cam in ('head_camera', 'right_camera', 'left_camera')
                               if cam in _obs['observation']},
                     'state': _state.copy(),
+                    'reward': REWARD_COLLISION if new_collision else REWARD_STEP,
                 })
                 frame = _pick_video_frame(_obs.get('observation', {}))
                 if frame is not None:
@@ -874,62 +886,65 @@ def collect_rollouts_branching(task_name, TASK_ENV, args, model, st_seed,
                 collision_count += 1
 
         n_frames = len(TASK_ENV._contrastive_buffer)
-        if n_frames >= 2:
-            save_episode_hdf5(TASK_ENV._contrastive_buffer, data_dir,
-                              ep_idx, instruction, succ, is_collision)
-        _save_video(_primary_video_frames, ep_idx, _video_dir)
-        TASK_ENV._contrastive_buffer = None
-
         _res = "\033[92mSuccess\033[0m" if succ else "\033[91mFail\033[0m"
         _col_step_str = f"  collision_step={_collision_info[0]}" if _collision_info[0] is not None else ""
-        print(f"  ep{ep_idx:04d} seed={now_seed} [primary]  {_res}  "
-              f"frames={n_frames}{_col_step_str}{_col_detail_str(col_metrics)}")
-        episode_log.append(_make_log_entry(ep_idx, now_seed, n_frames, succ,
-                                           is_collision, instruction, col_metrics,
-                                           branch_of=None))
-        if succ: succ_count += 1
-        ep_idx += 1
-
-        # ── CuRobo branches — play_once() from initial scene ─────────────────
-        # Branches run whenever the primary failed OR had a collision.
-        # Each branch calls setup_demo (fresh scene, same seed) then play_once()
-        # with full clutter in CuRobo — exactly like collect_data.py but with
-        # collision detection. No lookback, no state restore.
         _primary_had_collision = _collision_info[0] is not None
-        if (not succ or _primary_had_collision) and n_branches > 0:
-            print(f"Number of Branches: {n_branches}  "
-                  f"(primary {'collision' if _primary_had_collision else 'failure'})")
-            for b in range(n_branches):
-                if ep_idx >= collect_num:
+        _save_primary = (not succ) or _primary_had_collision
+
+        if _save_primary and n_frames >= 2:
+            if not succ and TASK_ENV._contrastive_buffer:
+                # Terminal penalty on last frame of failed episodes
+                TASK_ENV._contrastive_buffer[-1]['reward'] = -100.0
+            save_episode_hdf5(TASK_ENV._contrastive_buffer, data_dir,
+                              ep_idx, instruction, succ, is_collision)
+            _save_video(_primary_video_frames, ep_idx, _video_dir)
+            print(f"  ep{ep_idx:04d} seed={now_seed} [primary]  {_res}  "
+                  f"frames={n_frames}{_col_step_str}{_col_detail_str(col_metrics)}")
+            episode_log.append(_make_log_entry(ep_idx, now_seed, n_frames, succ,
+                                               is_collision, instruction, col_metrics,
+                                               branch_of=None))
+            if succ: succ_count += 1
+            ep_idx += 1
+        else:
+            reason = "clean success — skipped" if not _save_primary else f"only {n_frames} frames"
+            print(f"  seed={now_seed} [primary]  {_res}{_col_step_str}  {reason}")
+        TASK_ENV._contrastive_buffer = None
+
+        # ── CuRobo branch — 1 branch, up to 2 attempts ──────────────────────────
+        if _save_primary:
+            _MAX_BRANCH_ATTEMPTS = 2
+            _MAX_BRANCHES = 1
+            _branches_saved = 0
+            while _branches_saved < _MAX_BRANCHES and ep_idx < collect_num:
+                _branch_attempt = 0
+                _branch_saved = False
+                while not _branch_saved and _branch_attempt < _MAX_BRANCH_ATTEMPTS:
+                    _branch_attempt += 1
+                    TASK_ENV.close_env()
+                    _result_branch = _run_curobo_branch(ep_idx, now_seed)
+                    if not isinstance(_result_branch, tuple) or len(_result_branch) != 5:
+                        raise RuntimeError("[BUG] _run_curobo_branch returned unexpected result")
+                    succ_b, n_frames_b, buf_b, col_b, vframes_b = _result_branch
+                    is_col_b = col_b.get("is_collision", False)
+                    _res_b = "\033[92mSuccess\033[0m" if succ_b else "\033[91mFail\033[0m"
+                    print(f"  [branch {_branches_saved+1}/{_MAX_BRANCHES} attempt {_branch_attempt}] "
+                          f"{_res_b}  frames={n_frames_b}{_col_detail_str(col_b)}")
+                    if succ_b and n_frames_b >= 2:
+                        if is_col_b: collision_count += 1
+                        save_episode_hdf5(buf_b, data_dir, ep_idx, instruction, succ_b, is_col_b)
+                        _save_video(vframes_b, ep_idx, _video_dir)
+                        print(f"  ep{ep_idx:04d} seed={now_seed} [branch {_branches_saved+1}/{_MAX_BRANCHES}]  "
+                              f"{_res_b}  frames={n_frames_b}{_col_detail_str(col_b)}")
+                        episode_log.append(_make_log_entry(ep_idx, now_seed, n_frames_b,
+                                                           succ_b, is_col_b, instruction,
+                                                           col_b, branch_of=ep_idx - 1))
+                        succ_count += 1
+                        ep_idx += 1
+                        _branch_saved = True
+                        _branches_saved += 1
+                if not _branch_saved:
+                    print(f"  [branch {_branches_saved+1}] gave up after {_MAX_BRANCH_ATTEMPTS} attempts — stopping branches for seed={now_seed}")
                     break
-
-                print(f"[branch {b+1:02d}]")
-                TASK_ENV.close_env()
-
-                # Each branch is a fresh play_once() from the same initial scene —
-                # identical to collect_data.py.
-                _result_branch = _run_curobo_branch(ep_idx, now_seed)
-                if not isinstance(_result_branch, tuple) or len(_result_branch) != 5:
-                    raise RuntimeError(f"[BUG] _run_curobo_branch returned {type(_result_branch)} with {len(_result_branch) if isinstance(_result_branch, tuple) else 'N/A'} elements, expected tuple of 5: {_result_branch}")
-                succ_b, n_frames_b, buf_b, col_b, vframes_b = _result_branch
-                is_col_b = col_b.get("is_collision", False)
-                if is_col_b: collision_count += 1
-
-                _res_b = "\033[92mSuccess\033[0m" if succ_b else "\033[91mFail\033[0m"
-                if n_frames_b >= 2:
-                    save_episode_hdf5(buf_b, data_dir,
-                                      ep_idx, instruction, succ_b, is_col_b)
-                    _save_video(vframes_b, ep_idx, _video_dir)
-                    print(f"  ep{ep_idx:04d} seed={now_seed} "
-                          f"[branch {b+1:02d}/{n_branches}]  {_res_b}  "
-                          f"frames={n_frames_b}{_col_detail_str(col_b)}")
-                    episode_log.append(_make_log_entry(ep_idx, now_seed, n_frames_b,
-                                                       succ_b, is_col_b, instruction,
-                                                       col_b, branch_of=ep_idx - b - 1))
-                    if succ_b: succ_count += 1
-                    ep_idx += 1
-                else:
-                    print(f"  [branch {b+1:02d}/{n_branches}] discarded — {n_frames_b} frames")
 
         TASK_ENV.close_env(clear_cache=(ep_idx % clear_cache_freq == 0))
         if not fixed_seed:
@@ -937,12 +952,13 @@ def collect_rollouts_branching(task_name, TASK_ENV, args, model, st_seed,
         if save_seed_fn:
             save_seed_fn(now_seed)
 
-        print(f"  → {ep_idx}/{collect_num} collected | "
-              f"SR \033[95m{succ_count/ep_idx*100:.1f}%\033[0m | "
-              f"CR \033[95m{collision_count/ep_idx*100:.1f}%\033[0m")
+        if ep_idx > 0:
+            print(f"  → {ep_idx}/{collect_num} collected | "
+                f"SR \033[95m{succ_count/ep_idx*100:.1f}%\033[0m | "
+                f"CR \033[95m{collision_count/ep_idx*100:.1f}%\033[0m")
 
     with open(save_dir / "collect_summary.json", "w") as f:
-        json.dump(episode_log, f, indent=2)
+        json.dump(episode_log, f, indent=2, cls=NumpyEncoder)
 
     return episode_log
 
@@ -1047,9 +1063,16 @@ def collect_rollouts_stitched(task_name, TASK_ENV, args, model, st_seed,
         TASK_ENV._contrastive_buffer = []
         video_frames = []
         _orig_ta2 = TASK_ENV.take_action
+        _stitch_prev_col = [0]
 
         def _record_ta(action):
             result = _orig_ta2(action)
+            new_collision = False
+            if hasattr(TASK_ENV, 'get_collision_metrics'):
+                total = TASK_ENV.get_collision_metrics().get("total_collision_count", 0)
+                if total > _stitch_prev_col[0]:
+                    new_collision = True
+                _stitch_prev_col[0] = total
             if TASK_ENV._contrastive_buffer is not None:
                 obs = TASK_ENV.get_obs()
                 _, state = _encode_obs(obs)
@@ -1058,6 +1081,7 @@ def collect_rollouts_stitched(task_name, TASK_ENV, args, model, st_seed,
                               for cam in ('head_camera', 'right_camera', 'left_camera')
                               if cam in obs['observation']},
                     'state': state.copy(),
+                    'reward': REWARD_COLLISION if new_collision else REWARD_STEP,
                 })
                 frame = _pick_video_frame(obs.get('observation', {}))
                 if frame is not None:
@@ -1133,7 +1157,7 @@ def collect_rollouts_stitched(task_name, TASK_ENV, args, model, st_seed,
               f"SR \033[95m{sr:.1f}%\033[0m | CR \033[95m{cr:.1f}%\033[0m")
 
     with open(save_dir / "collect_summary.json", "w") as f:
-        json.dump(episode_log, f, indent=2)
+        json.dump(episode_log, f, indent=2, cls=NumpyEncoder)
 
     return episode_log
 
