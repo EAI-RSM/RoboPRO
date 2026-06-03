@@ -224,9 +224,8 @@ class Office_base_task(Bench_base_task):
         if self.enable_collision_metrics:
             self._build_collision_name_sets()  # build collision name sets for collision metrics
 
-        _proximity_config = kwags.get("proximity_tracking", {})
-        if _proximity_config.get("enabled", False):
-            self._init_proximity_tracking(_proximity_config)
+        if kwags.get("data_type", {}).get("proximity", True):
+            self._init_proximity_tracking(kwags.get("proximity_tracking", {}))
 
         is_stable, unstable_list = self.check_stable()
         if not is_stable:

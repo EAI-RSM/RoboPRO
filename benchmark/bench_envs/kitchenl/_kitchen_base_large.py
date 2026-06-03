@@ -389,9 +389,8 @@ class Kitchen_base_large(Bench_base_task):
         if self.enable_collision_metrics:
             self._build_collision_name_sets()
 
-        _proximity_config = kwags.get("proximity_tracking", {})
-        if _proximity_config.get("enabled", False):
-            self._init_proximity_tracking(_proximity_config)
+        if kwags.get("data_type", {}).get("proximity", True):
+            self._init_proximity_tracking(kwags.get("proximity_tracking", {}))
 
         # Even for a minimal scene, ensure that articulated objects like the drawer
         # are placed in a stable configuration.
