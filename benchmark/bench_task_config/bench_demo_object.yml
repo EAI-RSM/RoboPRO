@@ -46,6 +46,7 @@ data_type:
   qpos: true
   mesh_segmentation: false
   actor_segmentation: false
+  proximity: true
 pcd_down_sample_num: 1024
 pcd_crop: true
 save_path: ./data/bench_data

@@ -12,7 +12,7 @@ model_name: roboreal_all_80tasks
 checkpoint_id: 20000
 pi0_step: 50
 
-# Rollout collection parameters (used by collect_rollout_client.py)
+# Rollout collection parameters (used by collect_rollout_proximity_client.py)
 collect_num: 100
 collect_fixed_seed: false
 action_noise_var: 0.001

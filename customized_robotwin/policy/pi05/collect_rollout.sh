@@ -1,19 +1,27 @@
 #!/bin/bash
-# Dual-env rollout data collection for pi05:
-#   - server: pi05/.venv (uv-managed, openpi+jax)  → server_gpu
-#   - client: RoboTwin conda env (sapien sim)      → client_gpu
+# Rollout data collection for pi05 → rollout_data/ (proximity HDF5 schema).
+# Replaces both collect_rollout.sh and collect_rollout_proximity.sh.
+#
 # Usage:
 #   bash policy/pi05/collect_rollout.sh <task> <task_config> <train_config> <model_name> <checkpoint_id> <seed> <server_gpu>[:<client_gpu>]
 # If client_gpu is omitted, both processes share server_gpu.
 #
-# Env vars (override defaults):
+# ── How to set flags ────────────────────────────────────────────────────────
+# Prefix the command with env vars, or export them before running:
+#
+#   COLLECT_NUM=200 bash policy/pi05/collect_rollout.sh task cfg train model 20000 0 0
+#   COLLECT_BRANCH_NUM=1 COLLECT_NUM=500 bash policy/pi05/collect_rollout.sh ...
+#   COLLECT_SELECTIVE_SAVE=0 bash policy/pi05/collect_rollout.sh ...   # save all episodes
+#   COLLECT_SELECTIVE_SAVE=1 bash policy/pi05/collect_rollout.sh ...   # selective save
+#
+# ── Flags ───────────────────────────────────────────────────────────────────
 #   COLLECT_NUM              — total episodes to save (default 100)
-#   COLLECT_START_SEED       — starting seed override
-#   COLLECT_BRANCH_NUM       — branches per collision seed; 0 = simple rollout (default 0)
-#   COLLECT_BRANCH_LOOKBACK  — comma-separated lookback choices in take_action steps (default "5,10,15")
-#   COLLECT_BRANCH_NOISE_STEPS — noised take_action calls per branch (default 1)
-#   ACTION_NOISE_VAR         — noise variance for branch perturbation (default 0.005)
-#   COLLECT_FIXED_SEED       — if set, skip expert check
+#   COLLECT_START_SEED       — starting seed (default auto-resumed from seed_state file)
+#   COLLECT_BRANCH_NUM       — CuRobo branches per failure/collision; 0 = simple rollout (default 0)
+#   COLLECT_FIXED_SEED       — if set to 1, skip expert feasibility check and reuse the same seed
+#   COLLECT_SELECTIVE_SAVE   — 1: save primary only on fail/collision, branch only on success.
+#                              0 (default): save every episode (success and failure).
+#   COLLECT_MODE             — "" (default) / "stitched": use stitched pi05→CuRobo→pi05 rollout.
 
 set -euo pipefail
 
@@ -45,6 +53,7 @@ export ROBOTWIN_BENCH_TASK="${ROBOTWIN_BENCH_TASK:-}"
 
 
 export CUDA_VISIBLE_DEVICES=${client_gpu}
+export COLLECT_SELECTIVE_SAVE="${COLLECT_SELECTIVE_SAVE:-0}"
 
 cd ../..  # → customized_robotwin/
 
@@ -82,10 +91,10 @@ PI05_VENV="$(pwd)/policy/pi05/.venv"
 SERVER_PID=$!
 trap "echo -e '\033[31m[cleanup] Killing server PID=${SERVER_PID}\033[0m'; kill ${SERVER_PID} 2>/dev/null || true" EXIT
 
-# --- Client (RoboTwin conda env, current process) ---
-echo -e "\033[34m[client] Starting collect_rollout_client on port ${FREE_PORT}\033[0m"
+# --- Client (RoboPRO conda env, current process) ---
+echo -e "\033[34m[client] Starting collect_rollout_proximity_client on port ${FREE_PORT}\033[0m"
 PYTHONWARNINGS=ignore::UserWarning \
-python script/collect_rollout_client.py \
+python script/collect_rollout_proximity_client.py \
     --port ${FREE_PORT} \
     --config policy/${policy_name}/deploy_policy.yml \
     --overrides \

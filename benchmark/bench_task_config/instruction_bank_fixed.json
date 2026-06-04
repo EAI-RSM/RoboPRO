@@ -1,0 +1,4 @@
+{
+  "_comment": "Single fixed canonical instruction per task (no language variation). Used by clean/no-perturbation eval configs via domain_randomization.language_perturbation.instruction_bank. A 1-element pool means np.random.choice always returns the same prompt.",
+  "put_bottle_in_fridge": ["put the bottle in the fridge"]
+}
