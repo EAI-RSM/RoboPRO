@@ -16,6 +16,7 @@ eval_result/
 
 # rollout data
 rollout_data/
+proximity_data/
 
 # Code Generation
 assets/*

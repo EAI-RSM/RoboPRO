@@ -546,7 +546,11 @@ def eval_policy(task_name,
             TASK_ENV._set_eval_video_ffmpeg(ffmpeg)
 
         succ = False
-        model.call(func_name='reset_model')
+        # Route through the proxy (not model.call directly) so the client-side
+        # observation_window mirror is reset to None. Otherwise eval() sees a
+        # stale `observation_window` and skips set_language(), leaving the
+        # server with instruction=None -> "Prompt is required" on episode 2+.
+        model.reset_model()
         while TASK_ENV.take_action_cnt < TASK_ENV.step_lim:
             observation = TASK_ENV.get_obs()
             eval_func(TASK_ENV, model, observation)
