@@ -47,8 +47,8 @@ class Bench_base_task(Base_Task):
     COLLISION_FORCE_THRESHOLD_N = 10.0
     # Static object pose thresholds: only count robot/target-to-static collisions when
     # the static object has moved beyond these from the previous step.
-    STATIC_OBJECT_POSITION_THRESHOLD_M = 0.02   # 1 cm
-    STATIC_OBJECT_ORIENTATION_THRESHOLD_RAD = 0.2  # ~11.5 deg
+    STATIC_OBJECT_POSITION_THRESHOLD_M = 0.01   # 1 cm
+    STATIC_OBJECT_ORIENTATION_THRESHOLD_RAD = 0.1  # ~5.7 deg
 
     def __init__(self):
         pass

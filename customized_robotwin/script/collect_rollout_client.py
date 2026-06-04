@@ -224,6 +224,12 @@ def save_episode_hdf5(buffer, save_dir, ep_idx, instruction, success, collision)
     return hdf5_path
 
 
+def _flush_episode_log(episode_log: list, save_dir) -> None:
+    """Write collect_summary.json after every episode so crashes don't lose metadata."""
+    with open(Path(save_dir) / "collect_summary.json", "w") as f:
+        json.dump(episode_log, f, indent=2, cls=NumpyEncoder)
+
+
 # ── Scene state snapshot / restore ────────────────────────────────────────
 
 def _snapshot_state(TASK_ENV):
@@ -663,9 +669,6 @@ def collect_rollouts(task_name, TASK_ENV, args, model, st_seed,
               f"SR \033[95m{succ_count/ep_idx*100:.1f}%\033[0m | "
               f"CR \033[95m{collision_count/ep_idx*100:.1f}%\033[0m")
 
-    with open(save_dir / "collect_summary.json", "w") as f:
-        json.dump(episode_log, f, indent=2, cls=NumpyEncoder)
-
     return episode_log
 
 
@@ -903,6 +906,7 @@ def collect_rollouts_branching(task_name, TASK_ENV, args, model, st_seed,
             episode_log.append(_make_log_entry(ep_idx, now_seed, n_frames, succ,
                                                is_collision, instruction, col_metrics,
                                                branch_of=None))
+            _flush_episode_log(episode_log, save_dir)
             if succ: succ_count += 1
             ep_idx += 1
         else:
@@ -938,6 +942,7 @@ def collect_rollouts_branching(task_name, TASK_ENV, args, model, st_seed,
                         episode_log.append(_make_log_entry(ep_idx, now_seed, n_frames_b,
                                                            succ_b, is_col_b, instruction,
                                                            col_b, branch_of=ep_idx - 1))
+                        _flush_episode_log(episode_log, save_dir)
                         succ_count += 1
                         ep_idx += 1
                         _branch_saved = True
@@ -956,9 +961,6 @@ def collect_rollouts_branching(task_name, TASK_ENV, args, model, st_seed,
             print(f"  → {ep_idx}/{collect_num} collected | "
                 f"SR \033[95m{succ_count/ep_idx*100:.1f}%\033[0m | "
                 f"CR \033[95m{collision_count/ep_idx*100:.1f}%\033[0m")
-
-    with open(save_dir / "collect_summary.json", "w") as f:
-        json.dump(episode_log, f, indent=2, cls=NumpyEncoder)
 
     return episode_log
 
@@ -1142,6 +1144,7 @@ def collect_rollouts_stitched(task_name, TASK_ENV, args, model, st_seed,
         episode_log.append(_make_log_entry(ep_idx, now_seed, n_frames, succ,
                                            is_collision, instruction, col_metrics,
                                            branch_of=None))
+        _flush_episode_log(episode_log, save_dir)
         if succ:
             succ_count += 1
         ep_idx += 1
@@ -1155,9 +1158,6 @@ def collect_rollouts_stitched(task_name, TASK_ENV, args, model, st_seed,
         cr = collision_count / ep_idx * 100
         print(f"  → {ep_idx}/{collect_num} collected | "
               f"SR \033[95m{sr:.1f}%\033[0m | CR \033[95m{cr:.1f}%\033[0m")
-
-    with open(save_dir / "collect_summary.json", "w") as f:
-        json.dump(episode_log, f, indent=2, cls=NumpyEncoder)
 
     return episode_log
 
