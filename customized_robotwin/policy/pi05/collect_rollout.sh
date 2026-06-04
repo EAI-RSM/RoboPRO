@@ -18,7 +18,7 @@
 #   COLLECT_NUM              — total episodes to save (default 100)
 #   COLLECT_START_SEED       — starting seed (default auto-resumed from seed_state file)
 #   COLLECT_BRANCH_NUM       — CuRobo branches per failure/collision; 0 = simple rollout (default 0)
-#   COLLECT_FIXED_SEED       — if set to 1, skip expert feasibility check and reuse the same seed
+#   COLLECT_EXPERT_CHECK     — if set to 1, run CuRobo expert feasibility check before each episode (slower)
 #   COLLECT_SELECTIVE_SAVE   — 1: save primary only on fail/collision, branch only on success.
 #                              0 (default): save every episode (success and failure).
 #   COLLECT_MODE             — "" (default) / "stitched": use stitched pi05→CuRobo→pi05 rollout.
@@ -50,10 +50,9 @@ export BENCH_ROOT="${BENCH_ROOT:-$(cd "${ROBOTWIN_ROOT}/../benchmark" && pwd)}"
 export ROBOTWIN_BENCH_TASK="${ROBOTWIN_BENCH_TASK:-}"
 
 
-
-
 export CUDA_VISIBLE_DEVICES=${client_gpu}
 export COLLECT_SELECTIVE_SAVE="${COLLECT_SELECTIVE_SAVE:-0}"
+export COLLECT_EXPERT_CHECK="${COLLECT_EXPERT_CHECK:-0}"
 
 cd ../..  # → customized_robotwin/
 

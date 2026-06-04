@@ -39,7 +39,7 @@ Usage (via shell script):
 Env vars:
     COLLECT_NUM              — episodes to collect (default 100)
     COLLECT_START_SEED       — starting seed (default 100000*(1+seed))
-    COLLECT_FIXED_SEED       — skip expert check
+    COLLECT_EXPERT_CHECK     — if set, run expert CuRobo check before each episode (filters invalid seeds; slower)
     COLLECT_BRANCH_NUM       — CuRobo branches per failure (default 0 = simple rollout)
     COLLECT_SELECTIVE_SAVE   — if set, use selective save: primary saved only on fail/collision,
                                branches saved only on success. Default: save everything.
@@ -618,19 +618,19 @@ def collect_rollouts(task_name, TASK_ENV, args, model, st_seed,
     succ_count = 0
     collision_count = 0
     episode_log = []
-    _fs_raw    = args.get('collect_fixed_seed', os.environ.get('COLLECT_FIXED_SEED', ''))
-    fixed_seed = _fs_raw is True or (isinstance(_fs_raw, str) and _fs_raw.lower() not in ('', '0', 'false', 'no', 'none'))
+    _ec_raw      = args.get('expert_check', os.environ.get('COLLECT_EXPERT_CHECK', ''))
+    expert_check = _ec_raw is True or (isinstance(_ec_raw, str) and _ec_raw.lower() not in ('', '0', 'false', 'no', 'none'))
     _ss_raw       = args.get('collect_selective_save', os.environ.get('COLLECT_SELECTIVE_SAVE', ''))
     selective_save = _ss_raw is True or (isinstance(_ss_raw, str) and _ss_raw.lower() not in ('', '0', 'false', 'no', 'none'))
 
     print(f"\033[34mTask: {task_name}  |  Proximity collection  |  {collect_num} episodes"
-          f"{'  |  fixed seed' if fixed_seed else ''}"
+          f"{'  |  expert check' if expert_check else ''}"
           f"{'  |  selective save' if selective_save else ''}\033[0m")
 
     while ep_idx < collect_num:
         args["render_freq"] = 0
 
-        if not fixed_seed:
+        if expert_check:
             try:
                 TASK_ENV.setup_demo(now_ep_num=ep_idx, seed=now_seed, is_test=True, **args)
                 episode_info = TASK_ENV.play_once()
@@ -646,7 +646,7 @@ def collect_rollouts(task_name, TASK_ENV, args, model, st_seed,
                 now_seed += 1; continue
 
         TASK_ENV.setup_demo(now_ep_num=ep_idx, seed=now_seed, is_test=True, **args)
-        if fixed_seed:
+        if not expert_check:
             episode_info = getattr(TASK_ENV, "info", {"info": {}})
 
         episode_info_list = [episode_info["info"]]
@@ -716,8 +716,7 @@ def collect_rollouts(task_name, TASK_ENV, args, model, st_seed,
                 json.dump(episode_log, _f, indent=2)
             ep_idx += 1
         TASK_ENV.close_env(clear_cache=(ep_idx % clear_cache_freq == 0))
-        if not fixed_seed:
-            now_seed += 1
+        now_seed += 1
         if save_seed_fn:
             save_seed_fn(now_seed)
 
@@ -741,8 +740,8 @@ def collect_rollouts_branching(task_name, TASK_ENV, args, model, st_seed,
         return cast(args.get(key, os.environ.get(env_var, default)))
 
     n_branches = _p('collect_branch_num', 'COLLECT_BRANCH_NUM', 0, int)
-    _fs_raw    = args.get('collect_fixed_seed', os.environ.get('COLLECT_FIXED_SEED', ''))
-    fixed_seed = _fs_raw is True or (isinstance(_fs_raw, str) and _fs_raw.lower() not in ('', '0', 'false', 'no', 'none'))
+    _ec_raw      = args.get('expert_check', os.environ.get('COLLECT_EXPERT_CHECK', ''))
+    expert_check = _ec_raw is True or (isinstance(_ec_raw, str) and _ec_raw.lower() not in ('', '0', 'false', 'no', 'none'))
     _ss_raw       = args.get('collect_selective_save', os.environ.get('COLLECT_SELECTIVE_SAVE', ''))
     selective_save = _ss_raw is True or (isinstance(_ss_raw, str) and _ss_raw.lower() not in ('', '0', 'false', 'no', 'none'))
     save_dir = Path(save_dir)
@@ -828,7 +827,7 @@ def collect_rollouts_branching(task_name, TASK_ENV, args, model, st_seed,
     while ep_idx < collect_num:
         args["render_freq"] = 0
 
-        if not fixed_seed:
+        if expert_check:
             print(f"#### Seed value {now_seed} ####")
             _result_check = _run_curobo_branch(ep_idx, now_seed)
             if not isinstance(_result_check, tuple) or len(_result_check) != 5:
@@ -964,8 +963,7 @@ def collect_rollouts_branching(task_name, TASK_ENV, args, model, st_seed,
                     print(f"  [branch {b+1:02d}/{n_branches}] {_res_b}  skipped (selective)")
 
         TASK_ENV.close_env(clear_cache=(ep_idx % clear_cache_freq == 0))
-        if not fixed_seed:
-            now_seed += 1
+        now_seed += 1
         if save_seed_fn:
             save_seed_fn(now_seed)
 
@@ -1239,7 +1237,7 @@ def main(usr_args):
 
     for k in ("collect_branch_num", "collect_branch_lookback", "collect_branch_curobo_steps",
               "collect_stitch_lookback", "collect_stitch_curobo_steps", "collect_mode",
-              "collect_fixed_seed", "action_noise_var", "collect_num"):
+              "expert_check", "action_noise_var", "collect_num"):
         if k in usr_args and k not in args:
             args[k] = usr_args[k]
 

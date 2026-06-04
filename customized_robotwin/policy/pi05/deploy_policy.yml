@@ -14,7 +14,7 @@ pi0_step: 50
 
 # Rollout collection parameters (used by collect_rollout_proximity_client.py)
 collect_num: 100
-collect_fixed_seed: false
+expert_check: false
 action_noise_var: 0.001
 
 # Branching collection (COLLECT_BRANCH_NUM > 0 enables branching mode)
