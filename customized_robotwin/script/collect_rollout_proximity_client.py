@@ -1,13 +1,10 @@
 """
 collect_rollout_proximity_client.py — proximity-aware policy rollout data collection.
 
-Differences from collect_rollout_client.py:
-  - Saves EVERY episode (success AND failure) with a binary label (1/0).
-  - Per-step proximity distance (min_dist) and direction vector (delta) are
-    recorded for each robot part and written to HDF5.
-  - Output goes to proximity_data/ (separate tree from rollout_data/).
-  - Simple rollout mode is fixed: take_action is patched to append every frame
-    to the buffer (the original only captured the initial frame).
+Saves episodes (success and/or failure depending on COLLECT_SELECTIVE_SAVE) with:
+  - Per-step proximity distance (min_dist) and direction vectors written to HDF5.
+  - All four cameras: countertop, right, left, head.
+  - Output goes to rollout_data/{task}/{env_type}/.
 
 HDF5 structure per episode — matches collect_data.py standard exactly, with extra keys marked:
 
@@ -36,14 +33,16 @@ HDF5 structure per episode — matches collect_data.py standard exactly, with ex
         attrs: instruction, episode, success, collision
 
 Usage (via shell script):
-    bash policy/pi05/collect_rollout_proximity.sh <task> <task_config> <train_config> \\
+    bash policy/pi05/collect_rollout.sh <task> <task_config> <train_config> \\
         <model_name> <checkpoint_id> <seed> <server_gpu>[:<client_gpu>]
 
 Env vars:
-    COLLECT_NUM         — episodes to collect (default 100)
-    COLLECT_START_SEED  — starting seed (default 100000*(1+seed))
-    COLLECT_FIXED_SEED  — skip expert check
-    COLLECT_BRANCH_NUM  — CuRobo branches per failure (default 0 = simple rollout)
+    COLLECT_NUM              — episodes to collect (default 100)
+    COLLECT_START_SEED       — starting seed (default 100000*(1+seed))
+    COLLECT_FIXED_SEED       — skip expert check
+    COLLECT_BRANCH_NUM       — CuRobo branches per failure (default 0 = simple rollout)
+    COLLECT_SELECTIVE_SAVE   — if set, use selective save: primary saved only on fail/collision,
+                               branches saved only on success. Default: save everything.
 """
 
 import sys
@@ -209,11 +208,10 @@ def get_camera_config(camera_type):
     return cfg[camera_type]
 
 
-# ── PROXIMITY: helper to grab rgb + depth + endpose + proximity from obs ─
+# ── Frame builder — shared by both formats ────────────────────────────────
 
 def _obs_to_frame(obs, state, action=None):
     """Build a buffer frame dict including depth, endpose, proximity, and action."""
-    # Preserve a stable camera order in saved HDF5 episodes.
     _CAMS = ('countertop_camera', 'right_camera', 'left_camera', 'head_camera')
     frame = {
         'obs':       {cam: obs['observation'][cam]['rgb'].copy()
@@ -221,7 +219,6 @@ def _obs_to_frame(obs, state, action=None):
         'state':     state.copy(),
         'proximity': obs.get('proximity', {}),
     }
-    # Depth (data_type.depth=True)
     depth_frames = {
         cam: obs['observation'][cam]['depth'].copy()
         for cam in _CAMS
@@ -229,11 +226,9 @@ def _obs_to_frame(obs, state, action=None):
     }
     if depth_frames:
         frame['depth'] = depth_frames
-    # EE pose (data_type.endpose=True) — left/right endpose + gripper vals
     endpose = obs.get('endpose', {})
     if endpose:
         frame['endpose'] = {k: np.array(v, dtype=np.float32) for k, v in endpose.items()}
-    # Policy action that produced this obs (noisy commanded joint positions)
     if action is not None:
         frame['action'] = np.asarray(action, dtype=np.float32).copy()
     return frame
@@ -625,9 +620,12 @@ def collect_rollouts(task_name, TASK_ENV, args, model, st_seed,
     episode_log = []
     _fs_raw    = args.get('collect_fixed_seed', os.environ.get('COLLECT_FIXED_SEED', ''))
     fixed_seed = _fs_raw is True or (isinstance(_fs_raw, str) and _fs_raw.lower() not in ('', '0', 'false', 'no', 'none'))
+    _ss_raw       = args.get('collect_selective_save', os.environ.get('COLLECT_SELECTIVE_SAVE', ''))
+    selective_save = _ss_raw is True or (isinstance(_ss_raw, str) and _ss_raw.lower() not in ('', '0', 'false', 'no', 'none'))
 
     print(f"\033[34mTask: {task_name}  |  Proximity collection  |  {collect_num} episodes"
-          f"{'  |  fixed seed' if fixed_seed else ''}\033[0m")
+          f"{'  |  fixed seed' if fixed_seed else ''}"
+          f"{'  |  selective save' if selective_save else ''}\033[0m")
 
     while ep_idx < collect_num:
         args["render_freq"] = 0
@@ -691,9 +689,10 @@ def collect_rollouts(task_name, TASK_ENV, args, model, st_seed,
                 collision_count += 1
 
         n_frames = len(TASK_ENV._contrastive_buffer)
-        # PROXIMITY: always save both success and failure
-        if n_frames >= 2:
-            save_proximity_hdf5(
+        _should_save = (not selective_save) or succ
+        file_idx = None
+        if n_frames >= 2 and _should_save:
+            file_idx = save_proximity_hdf5(
                 TASK_ENV._contrastive_buffer, data_dir,
                 ep_idx, instruction, succ, is_collision,
             )
@@ -702,23 +701,30 @@ def collect_rollouts(task_name, TASK_ENV, args, model, st_seed,
 
         label_str = "\033[92mSuccess\033[0m" if succ else "\033[91mFail\033[0m"
         col_detail = _col_detail_str(col_metrics)
-        print(f"  ep{ep_idx:04d} seed={now_seed} {label_str}  frames={n_frames}{col_detail}")
+        if _should_save:
+            print(f"  ep{file_idx if file_idx is not None else ep_idx:04d} seed={now_seed} {label_str}  frames={n_frames}{col_detail}")
+        else:
+            print(f"  seed={now_seed} {label_str}  frames={n_frames}  skipped (selective)")
 
         if succ:
             succ_count += 1
 
-        episode_log.append(_make_log_entry(ep_idx, now_seed, n_frames, succ,
-                                           is_collision, instruction, col_metrics))
-        ep_idx += 1
+        if _should_save:
+            episode_log.append(_make_log_entry(ep_idx, now_seed, n_frames, succ,
+                                               is_collision, instruction, col_metrics))
+            with open(save_dir / "collect_summary.json", "w") as _f:
+                json.dump(episode_log, _f, indent=2)
+            ep_idx += 1
         TASK_ENV.close_env(clear_cache=(ep_idx % clear_cache_freq == 0))
         if not fixed_seed:
             now_seed += 1
         if save_seed_fn:
             save_seed_fn(now_seed)
 
-        print(f"  → {ep_idx}/{collect_num} collected | "
-              f"SR \033[95m{succ_count/ep_idx*100:.1f}%\033[0m | "
-              f"CR \033[95m{collision_count/ep_idx*100:.1f}%\033[0m")
+        if ep_idx > 0:
+            print(f"  → {ep_idx}/{collect_num} collected | "
+                  f"SR \033[95m{succ_count/ep_idx*100:.1f}%\033[0m | "
+                  f"CR \033[95m{collision_count/ep_idx*100:.1f}%\033[0m")
 
     with open(save_dir / "collect_summary.json", "w") as f:
         json.dump(episode_log, f, indent=2)
@@ -737,6 +743,8 @@ def collect_rollouts_branching(task_name, TASK_ENV, args, model, st_seed,
     n_branches = _p('collect_branch_num', 'COLLECT_BRANCH_NUM', 0, int)
     _fs_raw    = args.get('collect_fixed_seed', os.environ.get('COLLECT_FIXED_SEED', ''))
     fixed_seed = _fs_raw is True or (isinstance(_fs_raw, str) and _fs_raw.lower() not in ('', '0', 'false', 'no', 'none'))
+    _ss_raw       = args.get('collect_selective_save', os.environ.get('COLLECT_SELECTIVE_SAVE', ''))
+    selective_save = _ss_raw is True or (isinstance(_ss_raw, str) and _ss_raw.lower() not in ('', '0', 'false', 'no', 'none'))
     save_dir = Path(save_dir)
     data_dir = save_dir / "data"
     data_dir.mkdir(parents=True, exist_ok=True)
@@ -752,7 +760,8 @@ def collect_rollouts_branching(task_name, TASK_ENV, args, model, st_seed,
     collision_count = 0
     episode_log     = []
 
-    print(f"\033[34mTask: {task_name}  |  Proximity branching  |  {n_branches} branches per failure\033[0m")
+    print(f"\033[34mTask: {task_name}  |  Proximity branching  |  {n_branches} branches per failure"
+          f"{'  |  selective save' if selective_save else ''}\033[0m")
 
     _video_dir = save_dir / "videos" if video_size is not None else None
 
@@ -774,20 +783,20 @@ def collect_rollouts_branching(task_name, TASK_ENV, args, model, st_seed,
         _orig_save_freq    = TASK_ENV.save_freq
 
         _VIDEO_STEP_FREQ = 25
+
         def _video_take_picture():
             obs = TASK_ENV.get_obs()
             frame = _pick_video_frame(obs.get('observation', {}))
             if frame is not None:
                 video_frames.append(frame)
 
-        # PROXIMITY: _rec_obs captures proximity
-        def _rec_obs():
+        def _rec_obs(action=None):
             obs = TASK_ENV.get_obs()
             _, st = _encode_obs(obs)
-            buf.append(_obs_to_frame(obs, st))
+            buf.append(_obs_to_frame(obs, st, action=action))
 
         def _rec_ta(action):
-            _rec_obs()
+            _rec_obs(action=action)
             return _orig_ta(action)
 
         def _rec_tda(control_seq, save_freq=-1):
@@ -852,11 +861,11 @@ def collect_rollouts_branching(task_name, TASK_ENV, args, model, st_seed,
 
         def _primary_take_action(action):
             nonlocal _prev_col_total
-            # Capture obs BEFORE executing (what the policy saw when it chose action)
             if TASK_ENV._contrastive_buffer is not None:
                 _obs = TASK_ENV.get_obs()
                 _, _state = _encode_obs(_obs)
-                TASK_ENV._contrastive_buffer.append(_obs_to_frame(_obs, _state, action=action))
+                TASK_ENV._contrastive_buffer.append(
+                    _obs_to_frame(_obs, _state, action=action))
                 frame = _pick_video_frame(_obs.get('observation', {}))
                 if frame is not None:
                     _primary_video_frames.append(frame)
@@ -892,9 +901,11 @@ def collect_rollouts_branching(task_name, TASK_ENV, args, model, st_seed,
                 collision_count += 1
 
         n_frames = len(TASK_ENV._contrastive_buffer)
-        # PROXIMITY: always save primary (success or failure)
+        _primary_had_collision = _collision_info[0] is not None
+        _save_primary = (not selective_save) or (not succ) or _primary_had_collision
+
         file_idx = None
-        if n_frames >= 2:
+        if n_frames >= 2 and _save_primary:
             file_idx = save_proximity_hdf5(TASK_ENV._contrastive_buffer, data_dir,
                                            ep_idx, instruction, succ, is_collision)
         if file_idx is not None:
@@ -903,14 +914,18 @@ def collect_rollouts_branching(task_name, TASK_ENV, args, model, st_seed,
 
         _res = "\033[92mSuccess\033[0m" if succ else "\033[91mFail\033[0m"
         _col_step_str = f"  collision_step={_collision_info[0]}" if _collision_info[0] is not None else ""
-        print(f"  ep{file_idx if file_idx is not None else ep_idx:04d} seed={now_seed} [primary]  {_res}  "
-              f"frames={n_frames}{_col_step_str}{_col_detail_str(col_metrics)}")
-        episode_log.append(_make_log_entry(ep_idx, now_seed, n_frames, succ,
-                                           is_collision, instruction, col_metrics))
-        if succ: succ_count += 1
-        ep_idx += 1
+        if _save_primary:
+            print(f"  ep{file_idx if file_idx is not None else ep_idx:04d} seed={now_seed} [primary]  {_res}  "
+                  f"frames={n_frames}{_col_step_str}{_col_detail_str(col_metrics)}")
+            episode_log.append(_make_log_entry(ep_idx, now_seed, n_frames, succ,
+                                               is_collision, instruction, col_metrics))
+            with open(save_dir / "collect_summary.json", "w") as _f:
+                json.dump(episode_log, _f, indent=2)
+            if succ: succ_count += 1
+            ep_idx += 1
+        else:
+            print(f"  seed={now_seed} [primary]  {_res}  frames={n_frames}  skipped (selective)")
 
-        _primary_had_collision = _collision_info[0] is not None
         if (not succ or _primary_had_collision) and n_branches > 0:
             print(f"Number of Branches: {n_branches}  "
                   f"(primary {'collision' if _primary_had_collision else 'failure'})")
@@ -929,8 +944,8 @@ def collect_rollouts_branching(task_name, TASK_ENV, args, model, st_seed,
                 if is_col_b: collision_count += 1
 
                 _res_b = "\033[92mSuccess\033[0m" if succ_b else "\033[91mFail\033[0m"
-                # PROXIMITY: always save branches too
-                if n_frames_b >= 2:
+                _save_branch = (not selective_save) or succ_b
+                if n_frames_b >= 2 and _save_branch:
                     file_idx_b = save_proximity_hdf5(buf_b, data_dir,
                                                      ep_idx, instruction, succ_b, is_col_b)
                     _save_video(vframes_b, file_idx_b, _video_dir)
@@ -939,10 +954,14 @@ def collect_rollouts_branching(task_name, TASK_ENV, args, model, st_seed,
                           f"frames={n_frames_b}{_col_detail_str(col_b)}")
                     episode_log.append(_make_log_entry(ep_idx, now_seed, n_frames_b,
                                                        succ_b, is_col_b, instruction, col_b))
+                    with open(save_dir / "collect_summary.json", "w") as _f:
+                        json.dump(episode_log, _f, indent=2)
                     if succ_b: succ_count += 1
                     ep_idx += 1
-                else:
+                elif n_frames_b < 2:
                     print(f"  [branch {b+1:02d}/{n_branches}] discarded — {n_frames_b} frames")
+                else:
+                    print(f"  [branch {b+1:02d}/{n_branches}] {_res_b}  skipped (selective)")
 
         TASK_ENV.close_env(clear_cache=(ep_idx % clear_cache_freq == 0))
         if not fixed_seed:
@@ -950,9 +969,10 @@ def collect_rollouts_branching(task_name, TASK_ENV, args, model, st_seed,
         if save_seed_fn:
             save_seed_fn(now_seed)
 
-        print(f"  → {ep_idx}/{collect_num} collected | "
-              f"SR \033[95m{succ_count/ep_idx*100:.1f}%\033[0m | "
-              f"CR \033[95m{collision_count/ep_idx*100:.1f}%\033[0m")
+        if ep_idx > 0:
+            print(f"  → {ep_idx}/{collect_num} collected | "
+                  f"SR \033[95m{succ_count/ep_idx*100:.1f}%\033[0m | "
+                  f"CR \033[95m{collision_count/ep_idx*100:.1f}%\033[0m")
 
     with open(save_dir / "collect_summary.json", "w") as f:
         json.dump(episode_log, f, indent=2)
@@ -970,6 +990,8 @@ def collect_rollouts_stitched(task_name, TASK_ENV, args, model, st_seed,
 
     lookback     = _p('collect_stitch_lookback',     'COLLECT_STITCH_LOOKBACK',     5,   int)
     curobo_steps = _p('collect_stitch_curobo_steps', 'COLLECT_STITCH_CUROBO_STEPS', 100, int)
+    _ss_raw       = args.get('collect_selective_save', os.environ.get('COLLECT_SELECTIVE_SAVE', ''))
+    selective_save = _ss_raw is True or (isinstance(_ss_raw, str) and _ss_raw.lower() not in ('', '0', 'false', 'no', 'none'))
 
     save_dir = Path(save_dir)
     data_dir = save_dir / "data"
@@ -987,7 +1009,8 @@ def collect_rollouts_stitched(task_name, TASK_ENV, args, model, st_seed,
     collision_count = 0
     episode_log     = []
 
-    print(f"\033[34mTask: {task_name}  |  Proximity stitched (pi05→CuRobo→pi05)  |  lookback={lookback}\033[0m")
+    print(f"\033[34mTask: {task_name}  |  Proximity stitched (pi05→CuRobo→pi05)  |  lookback={lookback}"
+          f"{'  |  selective save' if selective_save else ''}\033[0m")
 
     while ep_idx < collect_num:
         args["render_freq"] = 0
@@ -1095,8 +1118,9 @@ def collect_rollouts_stitched(task_name, TASK_ENV, args, model, st_seed,
                 collision_count += 1
 
         n_frames = len(TASK_ENV._contrastive_buffer)
-        # PROXIMITY: always save (success or failure)
-        if n_frames >= 2:
+        _should_save = (not selective_save) or succ
+        file_idx = None
+        if n_frames >= 2 and _should_save:
             file_idx = save_proximity_hdf5(TASK_ENV._contrastive_buffer, data_dir,
                                            ep_idx, instruction, succ, is_collision)
             _save_video(video_frames, file_idx, _video_dir)
@@ -1104,23 +1128,29 @@ def collect_rollouts_stitched(task_name, TASK_ENV, args, model, st_seed,
         TASK_ENV._contrastive_buffer = None
 
         _res = "\033[92mSuccess\033[0m" if succ else "\033[91mFail\033[0m"
-        print(f"  ep{ep_idx:04d} seed={now_seed} [stitched]  {_res}  "
-              f"frames={n_frames}{_col_detail_str(col_metrics)}")
-        episode_log.append(_make_log_entry(ep_idx, now_seed, n_frames, succ,
-                                           is_collision, instruction, col_metrics))
-        if succ:
-            succ_count += 1
-        ep_idx += 1
+        if _should_save:
+            print(f"  ep{file_idx if file_idx is not None else ep_idx:04d} seed={now_seed} [stitched]  {_res}  "
+                  f"frames={n_frames}{_col_detail_str(col_metrics)}")
+            episode_log.append(_make_log_entry(ep_idx, now_seed, n_frames, succ,
+                                               is_collision, instruction, col_metrics))
+            with open(save_dir / "collect_summary.json", "w") as _f:
+                json.dump(episode_log, _f, indent=2)
+            if succ:
+                succ_count += 1
+            ep_idx += 1
+        else:
+            print(f"  seed={now_seed} [stitched]  {_res}  frames={n_frames}  skipped (selective)")
 
         TASK_ENV.close_env(clear_cache=(ep_idx % clear_cache_freq == 0))
         now_seed += 1
         if save_seed_fn:
             save_seed_fn(now_seed)
 
-        sr = succ_count / ep_idx * 100
-        cr = collision_count / ep_idx * 100
-        print(f"  → {ep_idx}/{collect_num} collected | "
-              f"SR \033[95m{sr:.1f}%\033[0m | CR \033[95m{cr:.1f}%\033[0m")
+        if ep_idx > 0:
+            sr = succ_count / ep_idx * 100
+            cr = collision_count / ep_idx * 100
+            print(f"  → {ep_idx}/{collect_num} collected | "
+                  f"SR \033[95m{sr:.1f}%\033[0m | CR \033[95m{cr:.1f}%\033[0m")
 
     with open(save_dir / "collect_summary.json", "w") as f:
         json.dump(episode_log, f, indent=2)
@@ -1213,9 +1243,8 @@ def main(usr_args):
         if k in usr_args and k not in args:
             args[k] = usr_args[k]
 
-    # Flat output: proximity_data/{task}/clean  or  proximity_data/{task}/cluttered
     env_type = "clean" if "clean" in task_config else "cluttered"
-    save_dir = Path(f"proximity_data/{task_name}/{env_type}")
+    save_dir = Path(f"rollout_data/{task_name}/{env_type}")
     save_dir.mkdir(parents=True, exist_ok=True)
 
     video_size = None
