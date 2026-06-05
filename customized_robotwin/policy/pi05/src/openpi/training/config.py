@@ -579,6 +579,74 @@ _CONFIGS = [
         batch_size=64,
         fsdp_devices=1,  # refer line 359
     ),
+    # pi05 advantage-conditioned training (RECAP / π*0.6 style)
+    # Dataset must have an "advantage" column (float32, 0.0 or 1.0 per timestep).
+    # Set repo_id and weight_loader.params_path to your own values before running.
+    TrainConfig(
+        name="pi05_aloha_advantage",
+        model=pi0_config.Pi0Config(pi05=True),
+        data=LeRobotAlohaDataConfig(
+            repo_id="your_repo_id",            # dataset with "advantage" column
+            action_sequence_keys=("action", "advantage"),  # load advantage as 50-step seq
+            repack_transforms=_transforms.Group(inputs=[
+                _transforms.RepackTransform({
+                    "images": {
+                        "cam_high": "observation.images.cam_high",
+                        "cam_left_wrist": "observation.images.cam_left_wrist",
+                        "cam_right_wrist": "observation.images.cam_right_wrist",
+                    },
+                    "state": "observation.state",
+                    "actions": "action",
+                    "prompt": "prompt",
+                    "advantage": "advantage",   # must be present so RepackTransform preserves it
+                })
+            ]),
+            base_config=DataConfig(
+                prompt_from_task=True,
+            ),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader(
+            "gs://openpi-assets/checkpoints/pi05_base/params"  # replace with your pretrained ckpt
+        ),
+        num_train_steps=20_000,
+        batch_size=64,
+        fsdp_devices=1,
+    ),
+    # pi05 advantage-token conditioning (learned embedding in the action expert suffix)
+    # Uses Pi0Config(advantage_token=True): adds a 3-row embedding table to the model.
+    # Row 0=negative, 1=positive, 2=null/unconditional.
+    # The pretrained checkpoint does not have this embedding; it is randomly initialised.
+    TrainConfig(
+        name="pi05_aloha_advantage_token",
+        model=pi0_config.Pi0Config(pi05=True, advantage_token=True),
+        data=LeRobotAlohaDataConfig(
+            repo_id="your_repo_id",            # dataset with "advantage" column
+            action_sequence_keys=("action", "advantage"),
+            repack_transforms=_transforms.Group(inputs=[
+                _transforms.RepackTransform({
+                    "images": {
+                        "cam_high": "observation.images.cam_high",
+                        "cam_left_wrist": "observation.images.cam_left_wrist",
+                        "cam_right_wrist": "observation.images.cam_right_wrist",
+                    },
+                    "state": "observation.state",
+                    "actions": "action",
+                    "prompt": "prompt",
+                    "advantage": "advantage",
+                })
+            ]),
+            base_config=DataConfig(
+                prompt_from_task=True,
+            ),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader(
+            "gs://openpi-assets/checkpoints/pi05_base/params",
+            missing_regex=".*lora.*|.*advantage_token_embedding.*",
+        ),
+        num_train_steps=20_000,
+        batch_size=64,
+        fsdp_devices=1,
+    ),
     # pi0_base by lora
     TrainConfig(
         name="pi0_base_aloha_robotwin_lora",

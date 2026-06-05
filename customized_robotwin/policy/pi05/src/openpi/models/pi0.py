@@ -99,6 +99,18 @@ class Pi0(_model.BaseModel):
             self.action_time_mlp_out = nnx.Linear(action_expert_config.width, action_expert_config.width, rngs=rngs)
         self.action_out_proj = nnx.Linear(action_expert_config.width, config.action_dim, rngs=rngs)
 
+        # Advantage token embedding (only created when advantage_token=True).
+        # 3 rows: 0=negative, 1=positive, 2=null/unconditional (for dropout + CFG).
+        self.advantage_token = config.advantage_token
+        if config.advantage_token:
+            if not config.pi05:
+                raise ValueError("advantage_token requires pi05=True")
+            self.advantage_token_embedding = nnx.Embed(
+                num_embeddings=3,
+                features=action_expert_config.width,
+                rngs=rngs,
+            )
+
         # This attribute gets automatically set by model.train() and model.eval().
         self.deterministic = True
 
@@ -138,7 +150,11 @@ class Pi0(_model.BaseModel):
 
     @at.typecheck
     def embed_suffix(
-        self, obs: _model.Observation, noisy_actions: _model.Actions, timestep: at.Float[at.Array, " b"]
+        self,
+        obs: _model.Observation,
+        noisy_actions: _model.Actions,
+        timestep: at.Float[at.Array, " b"],
+        advantage_indicator: at.Int[at.Array, " b"] | None = None,
     ) -> tuple[
         at.Float[at.Array, "b s emb"],
         at.Bool[at.Array, "b s"],
@@ -176,9 +192,19 @@ class Pi0(_model.BaseModel):
             action_time_tokens = self.action_time_mlp_out(action_time_tokens)
             action_expert_tokens = action_time_tokens
             adarms_cond = None
+        # Advantage token (optional — only when advantage_token=True and indicator provided).
+        # Prepended as a separate causal group so action tokens can attend to it but
+        # not vice-versa.  See make_attn_mask: group order is prefix(0) → adv(1) → actions(2).
+        if self.advantage_token and advantage_indicator is not None:
+            adv_emb = self.advantage_token_embedding(advantage_indicator)  # [B, width]
+            adv_token = adv_emb[:, None, :]                                # [B, 1, width]
+            tokens.append(adv_token)
+            input_mask.append(jnp.ones((adv_token.shape[0], 1), dtype=jnp.bool_))
+            ar_mask += [True]  # advantage token starts its own group (group 1)
+
         tokens.append(action_expert_tokens)
         input_mask.append(jnp.ones(action_expert_tokens.shape[:2], dtype=jnp.bool_))
-        # image/language/state inputs do not attend to action tokens
+        # image/language/state inputs (and advantage token) do not attend to action tokens
         ar_mask += [True] + ([False] * (self.action_horizon - 1))
         tokens = jnp.concatenate(tokens, axis=1)
         input_mask = jnp.concatenate(input_mask, axis=1)
@@ -187,21 +213,29 @@ class Pi0(_model.BaseModel):
 
     @override
     def compute_loss(
-        self, rng: at.KeyArrayLike, observation: _model.Observation, actions: _model.Actions, *, train: bool = False
+        self,
+        rng: at.KeyArrayLike,
+        observation: _model.Observation,
+        actions: _model.Actions,
+        *,
+        train: bool = False,
+        advantage_indicator: at.Int[at.Array, " b"] | None = None,
     ) -> at.Float[at.Array, "*b ah"]:
         preprocess_rng, noise_rng, time_rng = jax.random.split(rng, 3)
         observation = _model.preprocess_observation(preprocess_rng, observation, train=train)
 
-        batch_shape = actions.shape[:-2]
-        noise = jax.random.normal(noise_rng, actions.shape)
+        batch_shape = actions.shape[:-2] # batch shape (B,)
+        noise = jax.random.normal(noise_rng, actions.shape) # shape = (B, 50, 32)
         time = jax.random.beta(time_rng, 1.5, 1, batch_shape) * 0.999 + 0.001
-        time_expanded = time[..., None, None]
+        time_expanded = time[..., None, None] # shape = (B, 1, 1)
         x_t = time_expanded * noise + (1 - time_expanded) * actions
         u_t = noise - actions
 
         # one big forward pass of prefix + suffix at once
         prefix_tokens, prefix_mask, prefix_ar_mask = self.embed_prefix(observation)
-        suffix_tokens, suffix_mask, suffix_ar_mask, adarms_cond = self.embed_suffix(observation, x_t, time)
+        suffix_tokens, suffix_mask, suffix_ar_mask, adarms_cond = self.embed_suffix(
+            observation, x_t, time, advantage_indicator=advantage_indicator
+        )
         input_mask = jnp.concatenate([prefix_mask, suffix_mask], axis=1)
         ar_mask = jnp.concatenate([prefix_ar_mask, suffix_ar_mask], axis=0)
         attn_mask = make_attn_mask(input_mask, ar_mask)
@@ -221,6 +255,7 @@ class Pi0(_model.BaseModel):
         *,
         num_steps: int | at.Int[at.Array, ""] = 10,
         noise: at.Float[at.Array, "b ah ad"] | None = None,
+        advantage_indicator: at.Int[at.Array, " b"] | None = None,
     ) -> _model.Actions:
         observation = _model.preprocess_observation(None, observation, train=False)
         # note that we use the convention more common in diffusion literature, where t=1 is noise and t=0 is the target
@@ -239,7 +274,8 @@ class Pi0(_model.BaseModel):
         def step(carry):
             x_t, time = carry
             suffix_tokens, suffix_mask, suffix_ar_mask, adarms_cond = self.embed_suffix(
-                observation, x_t, jnp.broadcast_to(time, batch_size)
+                observation, x_t, jnp.broadcast_to(time, batch_size),
+                advantage_indicator=advantage_indicator,
             )
             # `suffix_attn_mask` is shape (b, suffix_len, suffix_len) indicating how the suffix tokens can attend to each
             # other

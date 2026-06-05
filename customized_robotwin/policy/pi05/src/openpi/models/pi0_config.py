@@ -29,6 +29,11 @@ class Pi0Config(_model.BaseModelConfig):
     # - the state input is part of the discrete language tokens rather than a continuous input that is part of the suffix
     # - the action expert uses adaRMSNorm to inject the flow matching timestep
     pi05: bool = False
+    # When True, a learned 3-row embedding table is added to the action expert suffix.
+    # Row 0 = negative advantage, row 1 = positive advantage, row 2 = null/unconditional.
+    # Requires pi05=True.  The embedding token is prepended to the action tokens so that
+    # action tokens can attend to it via the cross-group attention in make_attn_mask.
+    advantage_token: bool = False
     # This config option is not used directly by the model, but it is read by the ModelTransformFactory.
     discrete_state_input: bool = None  # type: ignore
 
