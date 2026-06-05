@@ -299,7 +299,7 @@ def main():
     task_name = args.task_name
     task_config = args.task_config
     run_prefix = f"{task_name}_{task_config}"
-    output_dir = Path(args.output_dir) if args.output_dir else bench_root / "collision_test"
+    output_dir = Path(args.output_dir) if args.output_dir else bench_root / "test_output" / "collision"
     output_dir.mkdir(parents=True, exist_ok=True)
 
     # Load config
