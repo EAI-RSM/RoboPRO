@@ -22,7 +22,6 @@ Run from `customized_robotwin/policy/pi05/`:
 ```bash
 ROBOTWIN_BENCH_TASK=bench \
 COLLECT_NUM=1 \
-COLLECT_FIXED_SEED=1 \
 COLLECT_BRANCH_NUM=1 \
 bash collect_rollout.sh \
   <task_name> <task_config> \
@@ -32,7 +31,7 @@ bash collect_rollout.sh \
 ### Example — 5 tasks × 10 cluttered density levels (d6–d15)
 
 ```bash
-ROBOTWIN_BENCH_TASK=bench COLLECT_NUM=1 COLLECT_FIXED_SEED=1 COLLECT_BRANCH_NUM=1 \
+ROBOTWIN_BENCH_TASK=bench COLLECT_NUM=1 COLLECT_BRANCH_NUM=1 \
 bash -c '
 TASKS=(put_bottle_in_fridge pick_bottle_from_fridge put_bottle_in_basket
        put_sauce_can_in_cabinet pick_can_from_cabinet)
@@ -54,7 +53,7 @@ done'
 | Var | Default | Description |
 |---|---|---|
 | `COLLECT_NUM` | 100 | Episodes to collect per task/config |
-| `COLLECT_FIXED_SEED` | unset | If set, skip expert check (faster) |
+| `COLLECT_EXPERT_CHECK` | 0 | If set to 1, run CuRobo expert feasibility check before each episode (slower) |
 | `COLLECT_BRANCH_NUM` | 0 | CuRobo branches per failure; **must be ≥ 1** to populate the buffer |
 | `COLLECT_START_SEED` | auto | Override starting seed |
 | `ACTION_NOISE_VAR` | 0.001 | Gaussian noise variance on arm joints |

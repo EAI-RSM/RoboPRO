@@ -535,8 +535,7 @@ class Base_Task(gym.Env):
                 proximity = _prox_fn()
                 if proximity:
                     pkl_dic["proximity"] = {
-                        part: {k: np.float32(v) if np.ndim(v) == 0 else np.array(v, dtype=np.float32)
-                               for k, v in vals.items() if k != "closest_name"}
+                        part: vals
                         for part, vals in proximity.items()
                     }
 

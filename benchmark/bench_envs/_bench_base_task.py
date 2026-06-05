@@ -965,8 +965,24 @@ class Bench_base_task(Base_Task):
             part: {"min_dist": float("inf"), "delta": np.zeros(3, dtype=np.float32), "closest_name": ""}
             for part in self._proximity_parts
         }
+
+        # Snapshot the candidate set once after all actors are loaded so the pool
+        # is stable throughout the episode — no objects appear or disappear unexpectedly.
+        # Held-object exclusion is applied per-step in _compute_proximity_step.
+        robot_entities = {self.robot.left_entity, self.robot.right_entity}
+        self._proximity_actor_candidates = [
+            e for e in self.scene.get_all_actors()
+            if e.get_name() not in self.FURNITURE_NAMES
+        ]
+        self._proximity_art_candidates = [
+            a for a in self.scene.get_all_articulations()
+            if a not in robot_entities
+        ]
+
         print(f"[Proximity] ready: parts={self._proximity_parts}, "
-              f"mesh_cache={sorted(self._proximity_mesh_cache.keys())}")
+              f"mesh_cache={sorted(self._proximity_mesh_cache.keys())}, "
+              f"candidates={len(self._proximity_actor_candidates)} actors + "
+              f"{len(self._proximity_art_candidates)} articulations")
 
     def _get_robot_part_position(self, part_name) -> np.ndarray | None:
         """Resolve part name to world-space position array. Returns None if not found."""
@@ -1022,43 +1038,40 @@ class Bench_base_task(Base_Task):
     def _compute_proximity_step(self) -> dict:
         """
         Compute per-step proximity for all configured robot parts.
-        Returns {part_name: {"min_dist": float32, "delta": float32[3]}} or {} if disabled.
-        delta is the vector from the robot part to the closest surface point (world space).
+        Returns {part_name: {"top_k_dist": float32[3], "top_k_delta": float32[3,3],
+                             "top_k_names": list[str]}} or {} if disabled.
+        top_k_dist[i] is distance to the i-th closest object (-1.0 sentinel if unavailable).
+        top_k_delta[i] is the vector from the robot part to the i-th closest surface point (world space).
+        Results are sorted ascending by distance; up to 3 objects are returned (padded with -1/zeros if fewer).
         """
         if not getattr(self, "_proximity_enabled", False):
             return {}
 
+        # Use the fixed candidate set snapshotted at episode init (stable pool).
+        # Exclude currently held objects — they're in the gripper and would dominate
+        # a weighted-average consumer with dist≈0.
         excluded_names = {n for n in self._held_actors.values() if n is not None}
-        robot_entities = {self.robot.left_entity, self.robot.right_entity}
-
-        # Exclude furniture (ground, table, wall, etc.) — their infinite/oversized AABBs
-        # would always report distance=0 and obscure meaningful proximity to scene objects.
-        actors = [
-            e for e in self.scene.get_all_actors()
-            if e.get_name() not in excluded_names
-            and e.get_name() not in self.FURNITURE_NAMES
-        ]
-        articulations = [a for a in self.scene.get_all_articulations() if a not in robot_entities]
+        actors = [e for e in self._proximity_actor_candidates if e.get_name() not in excluded_names]
+        articulations = self._proximity_art_candidates
 
         result = {}
         for part_name in self._proximity_parts:
             pos = self._get_robot_part_position(part_name)
             if pos is None:
                 result[part_name] = {
-                    "min_dist": np.float32(-1.0),
-                    "delta": np.zeros(3, dtype=np.float32),
+                    "top_k_dist":  np.full(3, -1.0, dtype=np.float32),
+                    "top_k_delta": np.zeros((3, 3), dtype=np.float32),
+                    "top_k_names": ["", "", ""],
                 }
                 continue
 
-            min_dist = float("inf")
-            min_closest = pos.copy()
-            min_name = ""
+            # Collect (dist, closest_surface_pt, name) for every scene object.
+            candidates = []
 
             for entity in actors:
                 aabb_dist, aabb_closest = self._get_aabb_dist_and_closest(entity, pos)
                 cand_dist = aabb_dist
                 cand_closest = aabb_closest
-
                 actor_name = entity.get_name()
                 if aabb_dist < self._proximity_aabb_threshold and actor_name in self._proximity_mesh_cache:
                     try:
@@ -1071,33 +1084,41 @@ class Bench_base_task(Base_Task):
                         cand_closest = T[:3, :3] @ closest_pts[0] + T[:3, 3]
                     except Exception:
                         pass  # fall back to AABB
-
-                if cand_dist < min_dist:
-                    min_dist = cand_dist
-                    min_closest = cand_closest
-                    min_name = actor_name
+                candidates.append((cand_dist, cand_closest, actor_name))
 
             for art in articulations:
                 aabb_dist, aabb_closest = self._get_aabb_dist_and_closest(art, pos)
-                if aabb_dist < min_dist:
-                    min_dist = aabb_dist
-                    min_closest = aabb_closest
-                    min_name = art.get_name() if hasattr(art, "get_name") else ""
+                art_name = art.get_name() if hasattr(art, "get_name") else ""
+                candidates.append((aabb_dist, aabb_closest, art_name))
 
-            if np.isinf(min_dist):
-                min_dist_val = np.float32(-1.0)
-                delta_val = np.zeros(3, dtype=np.float32)
-            else:
-                min_dist_val = np.float32(min_dist)
-                delta_val = np.array(min_closest - pos, dtype=np.float32)
+            # Sort by distance ascending; keep top-3.
+            candidates.sort(key=lambda x: x[0])
+            top3 = candidates[:3]
+            while len(top3) < 3:
+                top3.append((float("inf"), pos.copy(), ""))
 
-            result[part_name] = {"min_dist": min_dist_val, "delta": delta_val, "closest_name": min_name}
+            top_k_dist = np.array(
+                [c[0] if not np.isinf(c[0]) else -1.0 for c in top3], dtype=np.float32
+            )
+            top_k_delta = np.array(
+                [c[1] - pos if not np.isinf(c[0]) else np.zeros(3) for c in top3],
+                dtype=np.float32,
+            )  # shape (3, 3)
+            top_k_names = [c[2] for c in top3]
 
+            result[part_name] = {
+                "top_k_dist":  top_k_dist,
+                "top_k_delta": top_k_delta,
+                "top_k_names": top_k_names,
+            }
+
+            # Episode-min tracking uses the closest object (index 0) for get_proximity_metrics().
             ep_min = self._proximity_episode_min[part_name]
+            min_dist = candidates[0][0] if candidates else float("inf")
             if not np.isinf(min_dist) and (np.isinf(ep_min["min_dist"]) or min_dist < ep_min["min_dist"]):
                 ep_min["min_dist"] = min_dist
-                ep_min["delta"] = delta_val.copy()
-                ep_min["closest_name"] = min_name
+                ep_min["delta"] = top_k_delta[0].copy()
+                ep_min["closest_name"] = top_k_names[0]
 
         return result
 

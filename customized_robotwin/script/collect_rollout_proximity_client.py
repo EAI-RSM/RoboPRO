@@ -20,8 +20,9 @@ HDF5 structure per episode — matches collect_data.py standard exactly, with ex
         endpose/left_gripper           f32   (T,)
         endpose/right_endpose          f32   (T, 7)
         endpose/right_gripper          f32   (T,)
-        proximity/{part}/min_dist      f32   (T,)
-        proximity/{part}/delta         f32   (T, 3)
+        proximity/{part}/dist          f32   (T, 3)    distances to top-3 closest objects
+        proximity/{part}/delta         f32   (T, 3, 3) direction vectors to top-3 objects
+        proximity/{part}/names         str   (T, 3)    object names for top-3 objects
 
     Extra keys (not in standard):
         action/left_arm                f32   (T, 6)   policy command at obs[t]
@@ -255,8 +256,8 @@ def save_proximity_hdf5(buffer, save_dir, ep_idx, instruction, success, collisio
         endpose/left_gripper           — float32               (T,)
         endpose/right_endpose          — float32               (T, 7)
         endpose/right_gripper          — float32               (T,)
-        proximity/{part}/min_dist      — float32               (T,)
-        proximity/{part}/delta         — float32               (T, 3)
+        proximity/{part}/dist          — float32               (T, 3)   top-3 distances
+        proximity/{part}/delta         — float32               (T, 3, 3) top-3 direction vectors
 
     Extra keys (not in standard):
         action/left_arm                — float32               (T, 6)   policy command
@@ -291,9 +292,10 @@ def save_proximity_hdf5(buffer, save_dir, ep_idx, instruction, success, collisio
             endpose_accum.setdefault(k, []).append(v)
         for part, vals in frame.get('proximity', {}).items():
             if part not in prox_accum:
-                prox_accum[part] = {'min_dist': [], 'delta': []}
-            prox_accum[part]['min_dist'].append(vals['min_dist'])
-            prox_accum[part]['delta'].append(vals['delta'])
+                prox_accum[part] = {'dist': [], 'delta': [], 'names': []}
+            prox_accum[part]['dist'].append(vals['top_k_dist'])    # (3,) per step
+            prox_accum[part]['delta'].append(vals['top_k_delta'])  # (3, 3) per step
+            prox_accum[part]['names'].append(vals['top_k_names'])  # list[str] per step
         for cam, depth_arr in frame.get('depth', {}).items():
             cam_depths.setdefault(cam, []).append(depth_arr)
 
@@ -349,8 +351,10 @@ def save_proximity_hdf5(buffer, save_dir, ep_idx, instruction, success, collisio
             prox_grp = f.create_group('proximity')
             for part, arrays in prox_accum.items():
                 pg = prox_grp.create_group(part)
-                pg.create_dataset('min_dist', data=np.array(arrays['min_dist'], dtype=np.float32))
-                pg.create_dataset('delta',    data=np.array(arrays['delta'],    dtype=np.float32))
+                pg.create_dataset('dist',  data=np.array(arrays['dist'],  dtype=np.float32))  # (T, 3)
+                pg.create_dataset('delta', data=np.array(arrays['delta'], dtype=np.float32))  # (T, 3, 3)
+                pg.create_dataset('names', data=np.array(arrays['names'], dtype=object),
+                                  dtype=h5py.string_dtype())                                  # (T, 3)
 
         # ── extra keys (not in standard) ─────────────────────────────────
         if actions_arr is not None:

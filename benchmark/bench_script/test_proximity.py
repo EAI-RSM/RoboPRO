@@ -157,9 +157,14 @@ def patch_take_picture(env, proximity_log, frame_list, class_compute_proximity):
         if prox:
             entry = {
                 part: {
-                    "min_dist": float(vals["min_dist"]),
-                    "delta": vals["delta"].tolist() if hasattr(vals["delta"], "tolist") else list(vals["delta"]),
-                    "closest_name": vals.get("closest_name", ""),
+                    "top_k": [
+                        {
+                            "dist":  float(vals["top_k_dist"][i]),
+                            "delta": vals["top_k_delta"][i].tolist(),
+                            "name":  vals["top_k_names"][i],
+                        }
+                        for i in range(len(vals["top_k_names"]))
+                    ]
                 }
                 for part, vals in prox.items()
             }
@@ -237,14 +242,15 @@ def run_episode(env, cfg, ep_idx, output_dir, run_prefix, class_compute_proximit
     if proximity_log:
         parts = list(proximity_log[0].keys())
         n_show = min(10, len(proximity_log))
-        print(f"\n  Per-step proximity (first {n_show} of {len(proximity_log)}):")
-        header = f"  {'step':>6}" + "".join(f"  {p+':min_dist':>16}  {p+':closest':>20}" for p in parts)
+        print(f"\n  Per-step proximity (first {n_show} of {len(proximity_log)}, top-1 shown):")
+        header = f"  {'step':>6}" + "".join(f"  {p+':dist[0]':>16}  {p+':name[0]':>20}" for p in parts)
         print(header)
         for i, entry in enumerate(proximity_log[:n_show]):
             row = f"  {i:>6}"
             for p in parts:
-                d = entry.get(p, {}).get("min_dist", -1.0)
-                n = entry.get(p, {}).get("closest_name", "")
+                top_k = entry.get(p, {}).get("top_k", [{}])
+                d = top_k[0].get("dist", -1.0) if top_k else -1.0
+                n = top_k[0].get("name", "")  if top_k else ""
                 row += f"  {d:>16.4f}  {n:>20}"
             print(row)
         if len(proximity_log) > n_show:
@@ -268,11 +274,13 @@ def run_episode(env, cfg, ep_idx, output_dir, run_prefix, class_compute_proximit
             lines = [f"step {idx}/{len(frame_list)-1}"]
             prox = proximity_log[idx] if idx < len(proximity_log) else {}
             for p in parts_in_log:
-                d = prox.get(p, {}).get("min_dist", -1.0)
-                name = prox.get(p, {}).get("closest_name", "")
-                delta = prox.get(p, {}).get("delta", [0.0, 0.0, 0.0])
-                lines.append(f"{p}: {d:.3f}m -> {name}")
-                lines.append(f"  d=({delta[0]:+.3f},{delta[1]:+.3f},{delta[2]:+.3f})")
+                top_k = prox.get(p, {}).get("top_k", [])
+                for rank, obj in enumerate(top_k):
+                    d = obj.get("dist", -1.0)
+                    name = obj.get("name", "")
+                    delta = obj.get("delta", [0.0, 0.0, 0.0])
+                    lines.append(f"{p}[{rank}]: {d:.3f}m -> {name}")
+                    lines.append(f"  d=({delta[0]:+.3f},{delta[1]:+.3f},{delta[2]:+.3f})")
             # Draw semi-transparent background box
             line_h, pad = 22, 6
             box_h = len(lines) * line_h + pad * 2

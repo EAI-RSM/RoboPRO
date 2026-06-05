@@ -1,0 +1,23 @@
+{
+  "left_ee": {
+    "min_dist": 0.410150311092088,
+    "delta": [
+      0.08160477876663208,
+      0.2925521433353424,
+      0.2756395936012268
+    ],
+    "closest_name": "cabinet"
+  },
+  "right_ee": {
+    "min_dist": 0.05607154965400696,
+    "delta": [
+      0.0,
+      0.05607154965400696,
+      0.0
+    ],
+    "closest_name": "cabinet"
+  },
+  "task_success": true,
+  "episode": 0,
+  "seed": 0
+}
