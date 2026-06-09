@@ -1,0 +1,54 @@
+[project]
+name = "robopro"
+version = "0.1.0"
+description = "Perturbation-Resilient Obstacle-awareness — bimanual manipulation policy robustness benchmark"
+requires-python = ">=3.10,<3.11"
+dependencies = [
+    # Core sim stack
+    "torch==2.4.1",
+    "torchvision==0.19.1",
+    "sapien==3.0.0b1",
+    "mplib==0.2.1",
+    "gymnasium==0.29.1",
+    "transforms3d==0.4.2",
+    "scipy==1.10.1",
+    # Motion planning
+    "nvidia-curobo",
+    "warp-lang==1.12.0",
+    # 3D / vision
+    "pytorch3d",
+    "trimesh==4.4.3",
+    "open3d==0.18.0",
+    "imageio==2.34.2",
+    "imageio-ffmpeg",
+    "av",
+    "matplotlib",
+    "moviepy",
+    # Storage
+    "h5py",
+    "zarr",
+    # ML / HF / logging
+    "huggingface-hub==0.25.0",
+    "wandb",
+    "openai",
+    "azure==4.0.0",
+    "azure-ai-inference",
+    "pydantic",
+    "termcolor",
+    "pyglet<2",
+    # Build/runtime shims
+    "setuptools==69.5.1",
+    "tomli",
+]
+
+[tool.uv]
+package = false
+no-build-isolation-package = ["pytorch3d", "nvidia-curobo"]
+
+[tool.uv.sources]
+pytorch3d = { git = "https://github.com/facebookresearch/pytorch3d.git", rev = "stable" }
+nvidia-curobo = { path = "customized_robotwin/envs/curobo", editable = true }
+
+[tool.uv.extra-build-dependencies]
+pytorch3d = ["torch==2.4.1", "wheel", "ninja", "setuptools"]
+nvidia-curobo = ["torch==2.4.1", "wheel", "tomli", "setuptools==69.5.1", "setuptools-scm"]
