@@ -73,3 +73,6 @@ benchmark/bench_script/collision_test/
 presentation_material/
 
 customized_robotwin/policy/pi05_modify/
+roboreal_data/
+lerobot/
+rollout_data/
