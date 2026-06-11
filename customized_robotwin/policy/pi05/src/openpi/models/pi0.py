@@ -247,6 +247,56 @@ class Pi0(_model.BaseModel):
 
         return jnp.mean(jnp.square(v_t - u_t), axis=-1)
 
+    def compute_clean_prediction(
+        self,
+        rng: at.KeyArrayLike,
+        observation: _model.Observation,
+        actions: _model.Actions,
+        *,
+        t_col: float = 0.1,
+        advantage_indicator: at.Int[at.Array, " b"] | None = None,
+    ) -> at.Float[at.Array, "b ah ad"]:
+        """One-step clean action prediction for the collision critic.
+
+        Adds t_col noise, runs one denoiser forward pass, returns
+        x̂_0 = x_t − t·v_t.  Gradient flows through v_t into policy weights.
+
+        t_col must be in (0, 1) so the gradient ∂x̂_0/∂v_t = −t is nonzero.
+        Use ~0.1: small enough that x̂_0 ≈ clean action, large enough for a
+        useful gradient signal.
+
+        Args:
+            rng:     JAX random key.
+            observation: policy observation.
+            actions: [B, H, DoF] ground-truth actions (anchor for x_t).
+            t_col:   noise level, default 0.1.
+        Returns:
+            q_clean: [B, H, DoF]  estimated clean actions (differentiable).
+        """
+        preprocess_rng, noise_rng = jax.random.split(rng, 2)
+        observation = _model.preprocess_observation(preprocess_rng, observation, train=True)
+
+        batch_shape = actions.shape[:-2]
+        noise = jax.random.normal(noise_rng, actions.shape)
+        time = jnp.full(batch_shape, t_col)
+        time_expanded = time[..., None, None]
+        x_t = time_expanded * noise + (1 - time_expanded) * actions
+
+        prefix_tokens, prefix_mask, prefix_ar_mask = self.embed_prefix(observation)
+        suffix_tokens, suffix_mask, suffix_ar_mask, adarms_cond = self.embed_suffix(
+            observation, x_t, time, advantage_indicator=advantage_indicator
+        )
+        input_mask = jnp.concatenate([prefix_mask, suffix_mask], axis=1)
+        ar_mask = jnp.concatenate([prefix_ar_mask, suffix_ar_mask], axis=0)
+        attn_mask = make_attn_mask(input_mask, ar_mask)
+        positions = jnp.cumsum(input_mask, axis=1) - 1
+        (_, suffix_out), _ = self.PaliGemma.llm(
+            [prefix_tokens, suffix_tokens], mask=attn_mask, positions=positions, adarms_cond=[None, adarms_cond]
+        )
+        v_t = self.action_out_proj(suffix_out[:, -self.action_horizon :])
+
+        return x_t - time_expanded * v_t  # x̂_0 = x_t − t·v_t
+
     @override
     def sample_actions(
         self,

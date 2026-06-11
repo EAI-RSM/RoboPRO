@@ -97,7 +97,9 @@ class Policy(BasePolicy):
         if self._is_pytorch_model:
             outputs = jax.tree.map(lambda x: np.asarray(x[0, ...].detach().cpu()), outputs)
         else:
-            outputs = jax.tree.map(lambda x: np.asarray(x[0, ...]), outputs)
+            # np.array (copy) not np.asarray: output transforms mutate in place,
+            # and views of JAX arrays are read-only.
+            outputs = jax.tree.map(lambda x: np.array(x[0, ...]), outputs)
 
         outputs = self._output_transform(outputs)
         outputs["policy_timing"] = {
