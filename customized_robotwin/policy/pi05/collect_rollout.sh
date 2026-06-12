@@ -53,8 +53,11 @@ export ROBOTWIN_BENCH_TASK="${ROBOTWIN_BENCH_TASK:-}"
 export CUDA_VISIBLE_DEVICES=${client_gpu}
 export COLLECT_SELECTIVE_SAVE="${COLLECT_SELECTIVE_SAVE:-0}"
 export COLLECT_EXPERT_CHECK="${COLLECT_EXPERT_CHECK:-0}"
+# Data collection never writes guidance debug artifacts (sdf_debug/), even if
+# the caller's shell has SDF_DEBUG_VIZ exported from an eval session.
+export SDF_DEBUG_VIZ=0
 
-cd ../..  # → customized_robotwin/
+cd "${ROBOTWIN_ROOT}"  # → customized_robotwin/ regardless of caller cwd
 
 FREE_PORT=$(python3 - << 'EOF'
 import socket
@@ -74,6 +77,7 @@ PI05_VENV="$(pwd)/policy/pi05/.venv"
     export PYTHONWARNINGS=ignore::UserWarning
     export XLA_PYTHON_CLIENT_PREALLOCATE=false
     export XLA_PYTHON_CLIENT_MEM_FRACTION=0.85
+    export XLA_FLAGS="--xla_gpu_enable_triton_gemm=false"
     exec "${PI05_VENV}/bin/python" script/policy_model_server.py \
         --port ${FREE_PORT} \
         --config policy/${policy_name}/deploy_policy.yml \

@@ -680,14 +680,39 @@ class Bench_base_task(Base_Task):
             "robot_to_static_object": 0,
             "target_to_static_object": 0,
         }
-        # Track which static objects have already been counted (once per episode) — keyed by per_scene_id
-        self._counted_robot_static_objects: set[int] = set()
-        self._counted_target_static_objects: set[int] = set()
+        # Displacement-driven counting state: a collision IS a static object
+        # moving from its initial pose; contacts only attribute it.
+        self._static_last_toucher: dict[int, str] = {}   # per_scene_id -> "robot"|"target"
+        self._counted_displaced_ids: set[int] = set()    # counted once per episode
+        self._displaced_categories: dict[int, str] = {}  # per_scene_id -> counted category
         self._counted_furniture_names: set[str] = set()
         self._hit_furniture_names: set[str] = set()
         self.filtered_contacts_for_log = []
         self.static_object_pose_prev: dict[int, tuple] = {}   # per_scene_id -> (pos, quat)
         self.static_object_pose_start: dict[int, tuple] = {}  # per_scene_id -> (pos, quat), captured once per episode
+        # Optional jsonl streams for dataset collection (start_metric_streams):
+        # contacts = every robot/target<->static pair per step (zero-impulse
+        # included); collisions = displacement-metric events.
+        self._contact_stream = None
+        self._collision_stream = None
+        self._metric_step = -1
+
+    def start_metric_streams(self, contacts_path, collisions_path):
+        """Open per-episode jsonl streams for contacts and collision events."""
+        self.stop_metric_streams()
+        self._contact_stream   = open(contacts_path, "w")
+        self._collision_stream = open(collisions_path, "w")
+        self._metric_step = -1
+
+    def stop_metric_streams(self):
+        for attr in ("_contact_stream", "_collision_stream"):
+            fh = getattr(self, attr, None)
+            if fh is not None:
+                try:
+                    fh.close()
+                except Exception:
+                    pass
+            setattr(self, attr, None)
 
     def _get_target_object_names(self) -> set[str]:
         """Return the names of target objects for this task.
@@ -742,7 +767,8 @@ class Bench_base_task(Base_Task):
         curr_p = np.array(entity.get_pose().p, dtype=np.float64)
         curr_q = np.array(entity.get_pose().q, dtype=np.float64)
         start = self.static_object_pose_start.get(actor_id)
-        print(f"[Collision] [SIGNIFICANT] {category}: '{display_name}'")
+        step = getattr(self, 'take_action_cnt', -1)
+        print(f"[Collision] [SIGNIFICANT] t={step}  {category}: '{display_name}'")
         if start is not None:
             start_p, start_q = start
             cumul_pos = float(np.linalg.norm(curr_p - start_p))
@@ -750,16 +776,6 @@ class Bench_base_task(Base_Task):
             cumul_ang = 2 * np.arccos(min(1.0, qdot))
             print(f"  start_pos={np.round(start_p, 4)}  curr_pos={np.round(curr_p, 4)}")
             print(f"  cumul_delta={cumul_pos:.4f} m  cumul_ang={np.degrees(cumul_ang):.2f} deg")
-            print(f"  [context] all static object cumulative displacements from start:")
-            for other_id, (other_start_p, _) in self.static_object_pose_start.items():
-                other_entity = next((e for e in self.scene.get_all_actors() if e.per_scene_id == other_id), None)
-                if other_entity is None:
-                    continue
-                other_curr_p = np.array(other_entity.get_pose().p, dtype=np.float64)
-                other_cumul = float(np.linalg.norm(other_curr_p - other_start_p))
-                marker = " <-- MOVED" if other_cumul >= self.STATIC_OBJECT_POSITION_THRESHOLD_M else ""
-                other_name = f"{self._static_id_to_name.get(other_id, str(other_id))}#{other_id}"
-                print(f"    '{other_name}': start={np.round(other_start_p, 4)}  curr={np.round(other_curr_p, 4)}  cumul={other_cumul:.4f} m{marker}")
         else:
             print(f"  curr_pos={np.round(curr_p, 4)}  (no start snapshot — collision before first step)")
 
@@ -791,6 +807,8 @@ class Bench_base_task(Base_Task):
         """
         contacts = self.scene.get_contacts()
         self.filtered_contacts_for_log = []
+        self._metric_step = getattr(self, "_metric_step", -1) + 1
+        _stream_pairs = []   # [link/target, "obj#id", impulse, [x,y,z]] per contact point
 
         for contact in contacts:
             entity0 = contact.bodies[0].entity
@@ -832,26 +850,33 @@ class Bench_base_task(Base_Task):
                         self._counted_furniture_names.add(furniture_name)
                     count_furniture = True
 
-            # Static objects: count only when cumulative displacement exceeds threshold
-            if ((is_robot_0 and is_static_1 and not is_gripper_0) or (is_robot_1 and is_static_0 and not is_gripper_1)):
+            # Static objects: contacts only RECORD the most recent toucher —
+            # counting is displacement-driven (sweep below).  Gripper links
+            # COUNT here: targets are excluded from static_object_ids, so a
+            # gripper↔static contact is a bump, never an expected grasp.
+            if (is_robot_0 and is_static_1) or (is_robot_1 and is_static_0):
                 static_entity = entity1 if is_static_1 else entity0
-                static_id = static_entity.per_scene_id
-                if static_id not in self._counted_robot_static_objects:
-                    if self._static_object_has_significant_pose_change(static_id, static_entity):
-                        self._print_significant_collision(static_id, static_entity, "robot_to_static_object")
-                        self.collision_metrics["robot_to_static_object"] += 1
-                        self._counted_robot_static_objects.add(static_id)
-                        count_static = True
+                self._static_last_toucher[static_entity.per_scene_id] = "robot"
+                count_static = True
 
             if (is_target_0 and is_static_1) or (is_target_1 and is_static_0):
                 static_entity = entity1 if is_static_1 else entity0
-                static_id = static_entity.per_scene_id
-                if static_id not in self._counted_target_static_objects:
-                    if self._static_object_has_significant_pose_change(static_id, static_entity):
-                        self._print_significant_collision(static_id, static_entity, "target_to_static_object")
-                        self.collision_metrics["target_to_static_object"] += 1
-                        self._counted_target_static_objects.add(static_id)
-                        count_target_static = True
+                self._static_last_toucher[static_entity.per_scene_id] = "target"
+                count_target_static = True
+
+            # Dataset stream: every robot/target<->static contact POINT,
+            # zero-impulse resting pairs included ("force" is a label, not a
+            # collection filter).
+            if self._contact_stream is not None and (count_static or count_target_static):
+                static_entity = entity1 if is_static_1 else entity0
+                toucher_name  = name0 if (is_robot_0 or is_target_0) else name1
+                obj_key = f"{static_entity.get_name()}#{static_entity.per_scene_id}"
+                for pt in contact.points:
+                    _stream_pairs.append([
+                        toucher_name, obj_key,
+                        round(float(np.linalg.norm(pt.impulse)), 6),
+                        [round(float(x), 4) for x in pt.position],
+                    ])
 
             if count_furniture or count_static or count_target_static:
                 for pt in contact.points:
@@ -872,21 +897,69 @@ class Bench_base_task(Base_Task):
                             "position": [float(x) for x in pt.position],
                         })
 
+        if self._contact_stream is not None and _stream_pairs:
+            _max_imp = max(p[2] for p in _stream_pairs)
+            self._contact_stream.write(json.dumps({
+                "t": self._metric_step,
+                "ta": int(getattr(self, "take_action_cnt", -1)),
+                "pairs": _stream_pairs,
+                "max_impulse": _max_imp,
+                "force": _max_imp > 1e-3,
+            }) + "\n")
+
+        # Displacement-driven counting: a static object whose cumulative pose
+        # change from episode start crosses the thresholds is a collision —
+        # whether or not anything touches it at that moment (slow topples
+        # complete after contact ends) — but ONLY if the robot or the held
+        # target touched it at some point this episode.  Never-touched movers
+        # are physics settling creep, not collisions (identical pose drift
+        # shows up across paired rollouts regardless of robot motion), and
+        # object→object chain reactions are deliberately not recorded.
+        for entity in self.scene.get_all_actors():
+            sid = entity.per_scene_id
+            if (sid not in self.static_object_ids
+                    or sid in self._counted_displaced_ids
+                    or self.static_object_pose_start.get(sid) is None):
+                continue
+            toucher = self._static_last_toucher.get(sid)
+            if toucher is None:
+                continue
+            if self._static_object_has_significant_pose_change(sid, entity):
+                category = {"robot": "robot_to_static_object",
+                            "target": "target_to_static_object"}[toucher]
+                self.collision_metrics[category] = \
+                    self.collision_metrics.get(category, 0) + 1
+                self._counted_displaced_ids.add(sid)
+                self._displaced_categories[sid] = category
+                self._print_significant_collision(sid, entity, category)
+                if self._collision_stream is not None:
+                    start_p, start_q = self.static_object_pose_start[sid]
+                    curr = entity.get_pose()
+                    cum_p = float(np.linalg.norm(np.asarray(curr.p) - start_p))
+                    qdot  = abs(float(np.dot(np.asarray(curr.q), start_q)))
+                    cum_a = float(np.degrees(2 * np.arccos(min(1.0, qdot))))
+                    self._collision_stream.write(json.dumps({
+                        "t": self._metric_step,
+                        "ta": int(getattr(self, "take_action_cnt", -1)),
+                        "category": category,
+                        "object": f"{self._static_id_to_name.get(sid, '?')}#{sid}",
+                        "cumul_delta_m": round(cum_p, 4),
+                        "cumul_ang_deg": round(cum_a, 2),
+                        "last_toucher": toucher,
+                    }) + "\n")
 
     def get_collision_metrics(self):
         """Return a copy of current collision metrics dict."""
-        total = (
-            self.collision_metrics["robot_to_furniture"]
-            + self.collision_metrics["robot_to_static_object"]
-            + self.collision_metrics["target_to_static_object"]
-        )
+        total = sum(self.collision_metrics.values())
         return {
             **self.collision_metrics,
             "is_collision": total > 0,
             "total_collision_count": total,
             "robot_to_furniture_names": sorted(self._hit_furniture_names),
-            "robot_to_static_object_names": sorted(f"{getattr(self, '_static_id_to_name', {}).get(i, str(i))}#{i}" for i in self._counted_robot_static_objects),
-            "target_to_static_object_names": sorted(f"{getattr(self, '_static_id_to_name', {}).get(i, str(i))}#{i}" for i in self._counted_target_static_objects),
+            **{f"{cat}_names": sorted(
+                   f"{getattr(self, '_static_id_to_name', {}).get(i, str(i))}#{i}"
+                   for i, c in self._displaced_categories.items() if c == cat)
+               for cat in ("robot_to_static_object", "target_to_static_object")},
         }
 
     # =========================================================== Proximity Tracking ===========================================================
@@ -1500,7 +1573,7 @@ class Bench_base_task(Base_Task):
         eval_video_freq = 1  # fixed
         if (self.eval_video_path is not None and self.take_action_cnt % eval_video_freq == 0):
             obs = self.now_obs.get("observation", {})
-            for _cam in ("demo_camera", "countertop_camera", "head_camera"):
+            for _cam in ("countertop_camera", "demo_camera", "head_camera"):
                 if _cam in obs:
                     self.eval_video_ffmpeg.stdin.write(obs[_cam]["rgb"].tobytes())
                     break
@@ -1684,7 +1757,11 @@ class Bench_base_task(Base_Task):
                 self.eval_success = True
                 self.get_obs() # update obs
                 if (self.eval_video_path is not None):
-                    self.eval_video_ffmpeg.stdin.write(self.now_obs["observation"]["head_camera"]["rgb"].tobytes())
+                    obs = self.now_obs.get("observation", {})
+                    for _cam in ("countertop_camera", "demo_camera", "head_camera"):
+                        if _cam in obs:
+                            self.eval_video_ffmpeg.stdin.write(obs[_cam]["rgb"].tobytes())
+                            break
                 return
 
         self._update_render()

@@ -17,6 +17,7 @@ eval_result/
 # rollout data
 rollout_data/
 proximity_data/
+collision_dataset/
 
 # Code Generation
 assets/*

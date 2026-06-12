@@ -74,6 +74,7 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
+import trimesh
 
 from generate_episode_instructions import generate_episode_descriptions
 
@@ -210,8 +211,172 @@ def get_camera_config(camera_type):
 
 # ── Frame builder — shared by both formats ────────────────────────────────
 
-def _obs_to_frame(obs, state, action=None):
-    """Build a buffer frame dict including depth, endpose, proximity, and action."""
+_TOP_K_OBSTACLES       = 3     # obstacles to record per link
+_CUROBO_SAVE_FREQ      = 15   # 250Hz physics / 15 ≈ 17fps — matches pi05 take_action rate
+_MESH_REFINE_THRESHOLD = 0.3  # only do trimesh refinement when AABB dist < this (m)
+_N_AABB_CANDIDATES     = 10   # top-N AABB candidates to consider for trimesh refinement
+
+# Only track the 16 policy-controlled arm links (fl/fr, joints 1-8).
+# lr/rr arms are passive (∂pos/∂policy_joints = 0); cameras and base/wheel links excluded.
+_ARM_LINK_NAMES = frozenset({
+    'fl_link1', 'fl_link2', 'fl_link3', 'fl_link4',
+    'fl_link5', 'fl_link6', 'fl_link7', 'fl_link8',
+    'fr_link1', 'fr_link2', 'fr_link3', 'fr_link4',
+    'fr_link5', 'fr_link6', 'fr_link7', 'fr_link8',
+})
+
+def _compute_link_distances(task_env):
+    """Two-phase distance from each robot link center to the top-K closest obstacles.
+
+    Phase 1 — vectorized AABB:
+        Batch point-to-AABB for every obstacle in the scene.  Fast O(M) pre-filter
+        that identifies the closest candidates.
+
+    Phase 2 — trimesh refinement:
+        For any AABB candidate within _MESH_REFINE_THRESHOLD, refine with
+        trimesh.proximity.closest_point on the actor's actual collision mesh
+        (if present in task_env._proximity_mesh_cache).  This is the same two-phase
+        approach used by _compute_proximity_step in _bench_base_task.py and gives the
+        true surface-to-surface distance instead of the conservative AABB gap.
+        Falls back to AABB when no mesh is cached (articulations, uncached actors).
+
+    Excluded from obstacle set:
+        ground / table / wall — arm legitimately sweeps near these
+        task target objects   — intentionally touched during grasping
+
+    Returns:
+        {link_name: {'dists': (K,) float32, 'deltas': (K, 3) float32}}
+        Sorted ascending by distance.  Padded with dist=99 / delta=0 for missing slots.
+        delta points FROM the link center TOWARD the nearest surface point.
+    """
+    robot = task_env.robot
+    links = list(robot.left_entity.get_links())
+    if robot.right_entity is not robot.left_entity:
+        links += list(robot.right_entity.get_links())
+    links = [lk for lk in links if lk.get_name() in _ARM_LINK_NAMES]
+    if not links:
+        return {}
+
+    robot_entities = {robot.left_entity, robot.right_entity}
+    mesh_cache     = getattr(task_env, '_proximity_mesh_cache', {})
+
+    _exclude_names = frozenset({"ground", "table", "wall"}) | frozenset(
+        getattr(task_env, 'target_object_names', set())
+    )
+
+    # ── Build obstacle list ───────────────────────────────────────────────
+    # Actors: static scene objects — may have mesh cache entry for trimesh refinement.
+    # obstacle_actors: list of (actor, name, aabb_min(3,), aabb_max(3,))
+    obstacle_actors = []
+    for actor in task_env.scene.get_all_actors():
+        name = actor.get_name()
+        if name in _exclude_names:
+            continue
+        for comp in actor.get_components():
+            if hasattr(comp, 'get_global_aabb_fast'):
+                try:
+                    aabb = comp.get_global_aabb_fast()
+                    obstacle_actors.append((
+                        actor, name,
+                        np.array(aabb[0], dtype=np.float32),
+                        np.array(aabb[1], dtype=np.float32),
+                    ))
+                except RuntimeError:
+                    pass
+                break
+
+    # Non-robot articulations: no mesh cache available, AABB-only.
+    aabb_only_mins, aabb_only_maxs = [], []
+    for art in task_env.scene.get_all_articulations():
+        if art in robot_entities:
+            continue
+        for art_link in art.get_links():
+            if not art_link.collision_shapes:
+                continue
+            for comp in art_link.entity.get_components():
+                if hasattr(comp, 'get_global_aabb_fast'):
+                    try:
+                        aabb = comp.get_global_aabb_fast()
+                        aabb_only_mins.append(np.array(aabb[0], dtype=np.float32))
+                        aabb_only_maxs.append(np.array(aabb[1], dtype=np.float32))
+                    except RuntimeError:
+                        pass
+                    break
+
+    K = _TOP_K_OBSTACLES
+    _pad = lambda: (np.full(K, 99.0, dtype=np.float32), np.zeros((K, 3), dtype=np.float32))
+
+    if not obstacle_actors and not aabb_only_mins:
+        return {lk.get_name(): {'dists': _pad()[0], 'deltas': _pad()[1]}
+                for lk in links if lk.collision_shapes}
+
+    # Pre-build flat AABB arrays for vectorized batch — actors first, then AABB-only.
+    n_actor = len(obstacle_actors)
+    all_mins = np.array(
+        [o[2] for o in obstacle_actors] + aabb_only_mins, dtype=np.float32)  # (M, 3)
+    all_maxs = np.array(
+        [o[3] for o in obstacle_actors] + aabb_only_maxs, dtype=np.float32)  # (M, 3)
+    M = len(all_mins)
+    N_CAND = min(_N_AABB_CANDIDATES, M)
+
+    result = {}
+    for lk in links:
+        if not lk.collision_shapes:
+            continue
+        try:
+            link_center = np.array(lk.get_pose().p, dtype=np.float64)  # float64 for trimesh
+        except Exception:
+            continue
+
+        lc32 = link_center.astype(np.float32)
+
+        # Phase 1: vectorized point-to-AABB for all obstacles
+        clamped    = np.clip(lc32, all_mins, all_maxs)   # (M, 3)
+        delta_aabb = clamped - lc32                        # (M, 3) toward obstacle surface
+        dists_aabb = np.linalg.norm(delta_aabb, axis=1)   # (M,)
+
+        cand_idx    = np.argsort(dists_aabb)[:N_CAND]
+        final_dists  = dists_aabb[cand_idx].copy().astype(np.float64)
+        final_deltas = delta_aabb[cand_idx].copy().astype(np.float64)
+
+        # Phase 2: trimesh refinement for actor candidates within threshold
+        for ci, oi in enumerate(cand_idx):
+            if dists_aabb[oi] >= _MESH_REFINE_THRESHOLD:
+                break  # sorted ascending — nothing further qualifies
+            if oi >= n_actor:
+                continue  # AABB-only obstacle, no mesh
+            actor, name, _, _ = obstacle_actors[oi]
+            if name not in mesh_cache:
+                continue
+            try:
+                mesh  = mesh_cache[name]
+                T     = actor.get_pose().to_transformation_matrix()
+                T_inv = np.linalg.inv(T)
+                local_pt = T_inv[:3, :3] @ link_center + T_inv[:3, 3]
+                closest_pts, mesh_dists, _ = trimesh.proximity.closest_point(mesh, [local_pt])
+                closest_world = T[:3, :3] @ closest_pts[0] + T[:3, 3]
+                final_dists[ci]  = float(mesh_dists[0])
+                final_deltas[ci] = closest_world - link_center
+            except Exception:
+                pass  # keep AABB result on any error
+
+        # Re-sort after refinement (trimesh may change ranking), keep top-K
+        order      = np.argsort(final_dists)[:K]
+        top_dists  = final_dists[order].astype(np.float32)
+        top_deltas = final_deltas[order].astype(np.float32)
+
+        if len(top_dists) < K:
+            pad = K - len(top_dists)
+            top_dists  = np.concatenate([top_dists,  np.full(pad,       99.0, dtype=np.float32)])
+            top_deltas = np.concatenate([top_deltas, np.zeros((pad, 3),       dtype=np.float32)])
+
+        result[lk.get_name()] = {'dists': top_dists, 'deltas': top_deltas}
+
+    return result
+
+
+def _obs_to_frame(obs, state, action=None, task_env=None):
+    """Build a buffer frame dict including depth, endpose, proximity, pcd, link_dists, and action."""
     _CAMS = ('countertop_camera', 'right_camera', 'left_camera', 'head_camera')
     frame = {
         'obs':       {cam: obs['observation'][cam]['rgb'].copy()
@@ -231,12 +396,40 @@ def _obs_to_frame(obs, state, action=None):
         frame['endpose'] = {k: np.array(v, dtype=np.float32) for k, v in endpose.items()}
     if action is not None:
         frame['action'] = np.asarray(action, dtype=np.float32).copy()
+
+    # Per-link distances via simulator AABB — independent of point cloud
+    if task_env is not None:
+        frame['link_dists'] = _compute_link_distances(task_env)
+
+    # Per-step scene state: object poses keyed by per_scene_id + articulation
+    # joint states.  Objects MOVE mid-episode (uniquely per run) — this is the
+    # generator the relabel pass needs to keep clearance labels correct after
+    # displacement (scene/seed_N stores only the INITIAL state).
+    if task_env is not None:
+        try:
+            frame['object_poses'] = {
+                int(a.per_scene_id): np.concatenate(
+                    [np.asarray(a.get_pose().p, dtype=np.float32),
+                     np.asarray(a.get_pose().q, dtype=np.float32)])
+                for a in task_env.scene.get_all_actors()
+            }
+            robot = task_env.robot
+            _robot_ents = {robot.left_entity, robot.right_entity}
+            frame['articulation_qpos'] = {
+                j: np.asarray(art.get_qpos(), dtype=np.float32).ravel()
+                for j, art in enumerate(task_env.scene.get_all_articulations())
+                if art not in _robot_ents
+            }
+        except Exception:
+            pass
+
     return frame
 
 
 # ── PROXIMITY: HDF5 writer with label + proximity datasets ────────────────
 
-def save_proximity_hdf5(buffer, save_dir, ep_idx, instruction, success, collision):
+def save_proximity_hdf5(buffer, save_dir, ep_idx, instruction, success, collision, collector="pi05",
+                        extra_attrs=None, filename=None):
     """Write one rollout episode to HDF5.
 
     Always saved regardless of success/failure.
@@ -269,10 +462,13 @@ def save_proximity_hdf5(buffer, save_dir, ep_idx, instruction, success, collisio
     """
     # Auto-detect next available index so multiple runs into the same folder continue cleanly
     data_path = Path(save_dir)
-    existing  = [int(p.stem.split('_')[1]) for p in data_path.glob("episode_*.hdf5")
-                 if p.stem.split('_')[1].isdigit()]
-    file_idx  = max(existing, default=-1) + 1
-    hdf5_path = data_path / f"episode_{file_idx}.hdf5"
+    if filename is not None:
+        hdf5_path = data_path / filename          # caller-controlled (overwrites on rerun)
+    else:
+        existing  = [int(p.stem.split('_')[1]) for p in data_path.glob("episode_*.hdf5")
+                     if p.stem.split('_')[1].isdigit()]
+        file_idx  = max(existing, default=-1) + 1
+        hdf5_path = data_path / f"episode_{file_idx}.hdf5"
     cam_names      = list(buffer[0]['obs'].keys())
     cam_images     = {cam: [] for cam in cam_names}
     cam_depths     = {}
@@ -305,6 +501,9 @@ def save_proximity_hdf5(buffer, save_dir, ep_idx, instruction, success, collisio
         f.attrs['episode']     = ep_idx
         f.attrs['success']     = success
         f.attrs['collision']   = collision
+        f.attrs['collector']   = np.bytes_(collector)   # 'pi05' | 'curobo' | 'curobo_unaware' | 'stitched'
+        for k, v in (extra_attrs or {}).items():
+            f.attrs[k] = np.bytes_(v) if isinstance(v, str) else v
 
         # ── observation (matches standard key name) ───────────────────────
         obs_grp = f.create_group('observation')
@@ -352,6 +551,31 @@ def save_proximity_hdf5(buffer, save_dir, ep_idx, instruction, success, collisio
                 pg.create_dataset('min_dist', data=np.array(arrays['min_dist'], dtype=np.float32))
                 pg.create_dataset('delta',    data=np.array(arrays['delta'],    dtype=np.float32))
 
+
+        # ── per-link top-K distances (dist + delta) ──────────────────────────
+        ld_list  = [fr.get('link_dists', {}) for fr in buffer]
+        first_ld = next((ld for ld in ld_list if ld), {})
+        if first_ld:
+            ln    = list(first_ld.keys())
+            T_buf = len(buffer)
+            K     = _TOP_K_OBSTACLES
+            dist_arr  = np.full((T_buf, len(ln), K),    99.0, dtype=np.float32)
+            delta_arr = np.zeros((T_buf, len(ln), K, 3),      dtype=np.float32)
+            for t, ld in enumerate(ld_list):
+                for j, name in enumerate(ln):
+                    if name in ld:
+                        dist_arr[t, j]  = ld[name]['dists']    # (K,)
+                        delta_arr[t, j] = ld[name]['deltas']   # (K, 3)
+            ld_grp = f.create_group('link_distances')
+            ld_grp.create_dataset('dist',  data=dist_arr)   # (T, N_links, K)
+            ld_grp.create_dataset('delta', data=delta_arr)  # (T, N_links, K, 3)
+            ld_grp.attrs['link_names'] = [n.encode() for n in ln]
+            ld_grp.attrs['top_k']      = K
+
+        # ── per-step collision flag ──────────────────────────────────────
+        coll_steps = np.array([fr.get('collision_step', False) for fr in buffer], dtype=bool)
+        f.create_dataset('collision_per_step', data=coll_steps)
+
         # ── extra keys (not in standard) ─────────────────────────────────
         if actions_arr is not None:
             ac_grp = f.create_group('action')
@@ -363,7 +587,25 @@ def save_proximity_hdf5(buffer, save_dir, ep_idx, instruction, success, collisio
 
         f.create_dataset('label', data=np.int8(1 if success else 0))
 
-    return file_idx  # caller uses this index for consistent video naming
+        # ── per-step scene state (object pose track + articulation qpos) ──
+        op = [fr.get('object_poses') for fr in buffer]
+        if op and all(o is not None for o in op):
+            ids = sorted(op[0].keys())
+            if all(sorted(o.keys()) == ids for o in op):
+                grp = f.create_group('object_poses')
+                grp.create_dataset('ids', data=np.asarray(ids, dtype=np.int32))
+                grp.create_dataset('pose', data=np.stack(
+                    [np.stack([o[i] for i in ids]) for o in op]))   # (T, n, 7) p+q(wxyz)
+        aq = [fr.get('articulation_qpos') for fr in buffer]
+        if aq and all(a is not None for a in aq) and aq[0]:
+            grp = f.create_group('articulation_qpos')
+            for j in sorted(aq[0].keys()):
+                try:
+                    grp.create_dataset(f'art_{j}', data=np.stack([a[j] for a in aq]))
+                except Exception:
+                    pass
+
+    return hdf5_path  # callers derive video names / index entries from the path
 
 
 # ── Scene state snapshot / restore ────────────────────────────────────────
@@ -377,11 +619,18 @@ def _snapshot_state(TASK_ENV):
         'left_qvel': robot.left_entity.get_qvel().copy(),
         'left_ee_pose':  robot.get_left_ee_pose(),
         'right_ee_pose': robot.get_right_ee_pose(),
-        'actors': [(a.get_name(), a.get_pose()) for a in TASK_ENV.scene.get_all_actors()],
+        # Keyed by per_scene_id — actor NAMES are duplicated in cluttered
+        # scenes (three '108_block', ...) and a name-keyed map silently
+        # restores all duplicates onto one entity.
+        'actors': [(a.per_scene_id, a.get_pose())
+                   for a in TASK_ENV.scene.get_all_actors()],
+        # Articulations: keyed by index in the (robot-filtered) enumeration —
+        # stable within an episode, immune to duplicate names.
         'articulations': [
-            (art.get_name(), art.get_qpos().copy(), art.get_qvel().copy())
-            for art in TASK_ENV.scene.get_all_articulations()
-            if art not in _robot_entities
+            (i, art.get_qpos().copy(), art.get_qvel().copy())
+            for i, art in enumerate(
+                art for art in TASK_ENV.scene.get_all_articulations()
+                if art not in _robot_entities)
         ],
     }
     if robot.right_entity is not robot.left_entity:
@@ -407,9 +656,9 @@ def _restore_state(TASK_ENV, snap):
                 joint.set_drive_target(qpos[i])
                 joint.set_drive_velocity_target(0.0)
 
-    actor_map = {a.get_name(): a for a in TASK_ENV.scene.get_all_actors()}
-    for name, pose in snap['actors']:
-        actor = actor_map.get(name)
+    actor_map = {a.per_scene_id: a for a in TASK_ENV.scene.get_all_actors()}
+    for sid, pose in snap['actors']:
+        actor = actor_map.get(sid)
         if actor is None:
             continue
         try:
@@ -424,18 +673,19 @@ def _restore_state(TASK_ENV, snap):
             if not moved:
                 actor.set_pose(pose)
         except Exception as e:
-            print(f"[restore_state] Warning: could not restore actor '{name}': {e}")
+            print(f"[restore_state] Warning: could not restore actor #{sid}: {e}")
 
-    art_map = {art.get_name(): art for art in TASK_ENV.scene.get_all_articulations()}
-    for name, qpos, qvel in snap.get('articulations', []):
-        art = art_map.get(name)
-        if art is None:
+    _robot_entities = {TASK_ENV.robot.left_entity, TASK_ENV.robot.right_entity}
+    arts = [art for art in TASK_ENV.scene.get_all_articulations()
+            if art not in _robot_entities]
+    for i, qpos, qvel in snap.get('articulations', []):
+        if i >= len(arts):
             continue
         try:
-            art.set_qpos(qpos)
-            art.set_qvel(qvel)
+            arts[i].set_qpos(qpos)
+            arts[i].set_qvel(qvel)
         except Exception as e:
-            print(f"[restore_state] Warning: could not restore articulation '{name}': {e}")
+            print(f"[restore_state] Warning: could not restore articulation [{i}]: {e}")
 
     TASK_ENV.take_action_cnt = snap['take_action_cnt']
     TASK_ENV.eval_success = False
@@ -468,17 +718,19 @@ def _pick_video_frame(obs_dict):
     return None
 
 
-def _save_video(video_frames, ep_num, video_dir):
+def _save_video(video_frames, ep_ref, video_dir):
+    """ep_ref: hdf5 path (video named after its stem) or a bare episode index."""
     if not video_frames or video_dir is None:
         return
+    name = Path(ep_ref).stem if isinstance(ep_ref, (Path, str)) else f"episode{ep_ref}"
     Path(video_dir).mkdir(parents=True, exist_ok=True)
     try:
         from envs.utils.images_to_video import images_to_video
         images_to_video(np.stack(video_frames),
-                        str(Path(video_dir) / f"episode{ep_num}.mp4"),
+                        str(Path(video_dir) / f"{name}.mp4"),
                         fps=_VIDEO_FPS)
     except Exception as e:
-        print(f"[video] ep{ep_num} failed: {e}")
+        print(f"[video] {name} failed: {e}")
 
 
 # ── CuRobo collision-avoidance escape ─────────────────────────────────────
@@ -537,7 +789,7 @@ def _curobo_escape(TASK_ENV, n_steps, encode_obs_fn, buffer, model,
     # PROXIMITY: initial obs includes proximity
     obs0 = TASK_ENV.get_obs()
     rgb0, state0 = encode_obs_fn(obs0)
-    buffer.append(_obs_to_frame(obs0, state0))
+    buffer.append(_obs_to_frame(obs0, state0, task_env=TASK_ENV))
     model.set_language(TASK_ENV.get_instruction())
     model.update_observation_window(rgb0, state0)
 
@@ -575,7 +827,7 @@ def _curobo_escape(TASK_ENV, n_steps, encode_obs_fn, buffer, model,
             rgb_n, state_n = encode_obs_fn(obs_n)
             model.update_observation_window(rgb_n, state_n)
             # PROXIMITY: capture proximity at each recorded CuRobo step
-            buffer.append(_obs_to_frame(obs_n, state_n))
+            buffer.append(_obs_to_frame(obs_n, state_n, task_env=TASK_ENV))
             if video_buf is not None:
                 frame = _pick_video_frame(obs_n.get('observation', {}))
                 if frame is not None:
@@ -608,10 +860,6 @@ def collect_rollouts(task_name, TASK_ENV, args, model, st_seed,
     clear_cache_freq = args["clear_cache_freq"]
 
     from policy.pi05.deploy_policy import encode_obs as _encode_obs
-
-    _noise_var = float(args.get("action_noise_var", os.environ.get("ACTION_NOISE_VAR", 0.001)))
-    _noise_std = np.sqrt(_noise_var)
-    print(f"\033[33mAction noise: N(0, {_noise_std:.4f}) (var={_noise_std**2:.4f})\033[0m")
 
     now_seed = st_seed
     ep_idx = 0
@@ -661,13 +909,12 @@ def collect_rollouts(task_name, TASK_ENV, args, model, st_seed,
         # pairs the policy's input with its command — no orphaned initial frame.
         _orig_take_action = TASK_ENV.take_action
         def _record_take_action(action):
-            noisy = np.asarray(action, dtype=np.float32).copy()
-            noisy[[*range(6), *range(7, 13)]] += np.random.normal(0, _noise_std, size=12).astype(np.float32)
+            action = np.asarray(action, dtype=np.float32)
             if TASK_ENV._contrastive_buffer is not None:
                 _obs = TASK_ENV.get_obs()           # obs the policy saw
                 _, _state = _encode_obs(_obs)
-                TASK_ENV._contrastive_buffer.append(_obs_to_frame(_obs, _state, action=noisy))
-            return _orig_take_action(noisy)
+                TASK_ENV._contrastive_buffer.append(_obs_to_frame(_obs, _state, action=action, task_env=TASK_ENV))
+            return _orig_take_action(action)
         TASK_ENV.take_action = _record_take_action
 
         succ = False
@@ -694,7 +941,7 @@ def collect_rollouts(task_name, TASK_ENV, args, model, st_seed,
         if n_frames >= 2 and _should_save:
             file_idx = save_proximity_hdf5(
                 TASK_ENV._contrastive_buffer, data_dir,
-                ep_idx, instruction, succ, is_collision,
+                ep_idx, instruction, succ, is_collision, collector="pi05",
             )
         # (simple mode has no separate video save)
         TASK_ENV._contrastive_buffer = None
@@ -702,7 +949,8 @@ def collect_rollouts(task_name, TASK_ENV, args, model, st_seed,
         label_str = "\033[92mSuccess\033[0m" if succ else "\033[91mFail\033[0m"
         col_detail = _col_detail_str(col_metrics)
         if _should_save:
-            print(f"  ep{file_idx if file_idx is not None else ep_idx:04d} seed={now_seed} {label_str}  frames={n_frames}{col_detail}")
+            _tag = Path(file_idx).stem if file_idx is not None else f"{ep_idx:04d}"
+            print(f"  ep{_tag} seed={now_seed} {label_str}  frames={n_frames}{col_detail}")
         else:
             print(f"  seed={now_seed} {label_str}  frames={n_frames}  skipped (selective)")
 
@@ -792,7 +1040,7 @@ def collect_rollouts_branching(task_name, TASK_ENV, args, model, st_seed,
         def _rec_obs(action=None):
             obs = TASK_ENV.get_obs()
             _, st = _encode_obs(obs)
-            buf.append(_obs_to_frame(obs, st, action=action))
+            buf.append(_obs_to_frame(obs, st, action=action, task_env=TASK_ENV))
 
         def _rec_ta(action):
             _rec_obs(action=action)
@@ -864,7 +1112,7 @@ def collect_rollouts_branching(task_name, TASK_ENV, args, model, st_seed,
                 _obs = TASK_ENV.get_obs()
                 _, _state = _encode_obs(_obs)
                 TASK_ENV._contrastive_buffer.append(
-                    _obs_to_frame(_obs, _state, action=action))
+                    _obs_to_frame(_obs, _state, action=action, task_env=TASK_ENV))
                 frame = _pick_video_frame(_obs.get('observation', {}))
                 if frame is not None:
                     _primary_video_frames.append(frame)
@@ -906,7 +1154,7 @@ def collect_rollouts_branching(task_name, TASK_ENV, args, model, st_seed,
         file_idx = None
         if n_frames >= 2 and _save_primary:
             file_idx = save_proximity_hdf5(TASK_ENV._contrastive_buffer, data_dir,
-                                           ep_idx, instruction, succ, is_collision)
+                                           ep_idx, instruction, succ, is_collision, collector="pi05")
         if file_idx is not None:
             _save_video(_primary_video_frames, file_idx, _video_dir)
         TASK_ENV._contrastive_buffer = None
@@ -914,7 +1162,8 @@ def collect_rollouts_branching(task_name, TASK_ENV, args, model, st_seed,
         _res = "\033[92mSuccess\033[0m" if succ else "\033[91mFail\033[0m"
         _col_step_str = f"  collision_step={_collision_info[0]}" if _collision_info[0] is not None else ""
         if _save_primary:
-            print(f"  ep{file_idx if file_idx is not None else ep_idx:04d} seed={now_seed} [primary]  {_res}  "
+            _tag = Path(file_idx).stem if file_idx is not None else f"{ep_idx:04d}"
+            print(f"  ep{_tag} seed={now_seed} [primary]  {_res}  "
                   f"frames={n_frames}{_col_step_str}{_col_detail_str(col_metrics)}")
             episode_log.append(_make_log_entry(ep_idx, now_seed, n_frames, succ,
                                                is_collision, instruction, col_metrics))
@@ -946,7 +1195,7 @@ def collect_rollouts_branching(task_name, TASK_ENV, args, model, st_seed,
                 _save_branch = (not selective_save) or succ_b
                 if n_frames_b >= 2 and _save_branch:
                     file_idx_b = save_proximity_hdf5(buf_b, data_dir,
-                                                     ep_idx, instruction, succ_b, is_col_b)
+                                                     ep_idx, instruction, succ_b, is_col_b, collector="curobo")
                     _save_video(vframes_b, file_idx_b, _video_dir)
                     print(f"  ep{ep_idx:04d} seed={now_seed} "
                           f"[branch {b+1:02d}/{n_branches}]  {_res_b}  "
@@ -1073,7 +1322,7 @@ def collect_rollouts_stitched(task_name, TASK_ENV, args, model, st_seed,
             if TASK_ENV._contrastive_buffer is not None:
                 obs = TASK_ENV.get_obs()
                 _, state = _encode_obs(obs)
-                TASK_ENV._contrastive_buffer.append(_obs_to_frame(obs, state, action=action))
+                TASK_ENV._contrastive_buffer.append(_obs_to_frame(obs, state, action=action, task_env=TASK_ENV))
                 frame = _pick_video_frame(obs.get('observation', {}))
                 if frame is not None:
                     video_frames.append(frame)
@@ -1120,14 +1369,15 @@ def collect_rollouts_stitched(task_name, TASK_ENV, args, model, st_seed,
         file_idx = None
         if n_frames >= 2 and _should_save:
             file_idx = save_proximity_hdf5(TASK_ENV._contrastive_buffer, data_dir,
-                                           ep_idx, instruction, succ, is_collision)
+                                           ep_idx, instruction, succ, is_collision, collector="stitched")
             _save_video(video_frames, file_idx, _video_dir)
 
         TASK_ENV._contrastive_buffer = None
 
         _res = "\033[92mSuccess\033[0m" if succ else "\033[91mFail\033[0m"
         if _should_save:
-            print(f"  ep{file_idx if file_idx is not None else ep_idx:04d} seed={now_seed} [stitched]  {_res}  "
+            _tag = Path(file_idx).stem if file_idx is not None else f"{ep_idx:04d}"
+            print(f"  ep{_tag} seed={now_seed} [stitched]  {_res}  "
                   f"frames={n_frames}{_col_detail_str(col_metrics)}")
             episode_log.append(_make_log_entry(ep_idx, now_seed, n_frames, succ,
                                                is_collision, instruction, col_metrics))
@@ -1157,6 +1407,411 @@ def collect_rollouts_stitched(task_name, TASK_ENV, args, model, st_seed,
 
 
 # ── Shared helpers ─────────────────────────────────────────────────────────
+
+def _append_index(save_dir, entry):
+    """One line per saved episode — the dataset's primary index (see
+    data_generation_documentation.md)."""
+    with open(Path(save_dir) / "index.jsonl", "a") as f:
+        f.write(json.dumps(entry) + "\n")
+
+
+def _run_curobo_leg(TASK_ENV, args, now_seed, ep_num, exclude_clutter,
+                    instruction_type, encode_obs, instruction=None,
+                    metric_paths=None, post_setup=None):
+    """One CuRobo planner episode on now_seed.
+
+    exclude_clutter=False → clutter in the planner collision world
+                            (collision-aware expert, dataset source A);
+    exclude_clutter=True  → planner ignores clutter
+                            (collision-unaware, dataset source C).
+    Returns dict(buf, vframes, ok, col, is_col, instruction) or None when
+    setup fails.  Caller saves the HDF5 and closes the env.
+    """
+    tag = "curobo-unaware" if exclude_clutter else "curobo"
+    args["enable_collision_metrics"] = True
+    try:
+        TASK_ENV.setup_demo(now_ep_num=ep_num, seed=now_seed, is_test=True, **args)
+        TASK_ENV.eval_video_path = None
+        TASK_ENV.plan_success = True
+        if hasattr(TASK_ENV, 'update_world'):
+            if exclude_clutter:
+                TASK_ENV.update_world(exclude_obstacles=True)
+            else:
+                TASK_ENV.update_world()
+    except Exception as e:
+        print(f"  seed={now_seed} [{tag}] setup failed: {e}")
+        TASK_ENV.close_env()
+        return None
+
+    if post_setup is not None:
+        post_setup(TASK_ENV)
+
+    if instruction is None:
+        episode_info = getattr(TASK_ENV, "info", {"info": {}})
+        results      = generate_episode_descriptions(
+            args["task_name"], [episode_info["info"]], 1)
+        instruction  = np.random.choice(
+            results[0].get(instruction_type, results[0].get("seen", [""])))
+
+    buf, vframes = [], []
+    _orig_ta, _orig_tda = TASK_ENV.take_action, TASK_ENV.take_dense_action
+    _orig_pic, _orig_sf = TASK_ENV._take_picture, TASK_ENV.save_freq
+    _last_col = [0]
+
+    def _capture():
+        obs = TASK_ENV.get_obs()
+        _, st = encode_obs(obs)
+        buf.append(_obs_to_frame(obs, st, action=None, task_env=TASK_ENV))
+        if hasattr(TASK_ENV, 'get_collision_metrics'):
+            cur = TASK_ENV.get_collision_metrics().get("total_collision_count", 0)
+            buf[-1]['collision_step'] = (cur > _last_col[0])
+            _last_col[0] = cur
+        else:
+            buf[-1]['collision_step'] = False
+        fr = _pick_video_frame(obs.get('observation', {}))
+        if fr is not None: vframes.append(fr)
+
+    TASK_ENV.take_action       = lambda action, _o=_orig_ta: _o(action)
+    TASK_ENV.take_dense_action = lambda cs, *_, _o=_orig_tda: _o(cs, save_freq=_CUROBO_SAVE_FREQ)
+    TASK_ENV._take_picture     = _capture
+    TASK_ENV.save_freq         = _CUROBO_SAVE_FREQ
+
+    if metric_paths is not None and hasattr(TASK_ENV, 'start_metric_streams'):
+        TASK_ENV.start_metric_streams(*[str(p) for p in metric_paths])
+
+    ok = False
+    try:
+        TASK_ENV.play_once()
+        ok = TASK_ENV.plan_success and TASK_ENV.check_success()
+    except Exception as e:
+        print(f"  [{tag}] play_once() error: {e}")
+    finally:
+        if hasattr(TASK_ENV, 'stop_metric_streams'):
+            TASK_ENV.stop_metric_streams()
+        TASK_ENV.take_action       = _orig_ta
+        TASK_ENV.take_dense_action = _orig_tda
+        TASK_ENV._take_picture     = _orig_pic
+        TASK_ENV.save_freq         = _orig_sf
+
+    col, is_col = {}, False
+    if hasattr(TASK_ENV, 'get_collision_metrics'):
+        col    = TASK_ENV.get_collision_metrics()
+        is_col = col.get("is_collision", False)
+    return {"buf": buf, "vframes": vframes, "ok": ok, "col": col,
+            "is_col": is_col, "instruction": instruction}
+
+
+def collect_rollouts_paired(task_name, TASK_ENV, args, model, st_seed,
+                            collect_num=10, save_dir=None, instruction_type="seen",
+                            video_size=None, save_seed_fn=None):
+    """Triplet collection on each seed (see data_generation_documentation.md):
+
+        A. CuRobo, clutter IN the collision world  (planner_collision_aware)
+        B. pi05 policy rollout                     (pi05_base)
+        C. CuRobo, clutter NOT in the world        (planner_collision_unaware)
+
+    A runs first; seeds where it produces no trajectory are skipped entirely,
+    guaranteeing every saved triplet has a valid expert rollout.  B and C are
+    always saved regardless of outcome.  Per seed this also exports the scene
+    record (scene/seed_N/) and per-episode contact/collision jsonl streams
+    (metrics/), plus one fk_basis.npz per dataset.
+    collect_num = number of seeds → up to collect_num*3 HDF5 files.
+
+    Layout: one folder per source (episode_seed<N>.hdf5 + .info.json each):
+        <save_dir>/curobo_collision_free/   planner_collision_aware
+        <save_dir>/pi05_rollout/            pi05_base
+        <save_dir>/curobo_collision/        planner_collision_unaware
+    """
+    save_dir = Path(save_dir)
+    _SRC_DIRS = {
+        "planner_collision_aware":   save_dir / "curobo_collision_free",
+        "pi05_base":                 save_dir / "pi05_rollout",
+        "planner_collision_unaware": save_dir / "curobo_collision",
+    }
+    for _d in _SRC_DIRS.values():
+        _d.mkdir(parents=True, exist_ok=True)
+    _video_dir = save_dir / "videos" if video_size is not None else None
+
+    eval_func        = eval_function_decorator(args["policy_name"], "eval")
+    args["eval_mode"] = True
+    clear_cache_freq = args["clear_cache_freq"]
+    from policy.pi05.deploy_policy import encode_obs as _encode_obs
+
+    now_seed    = st_seed
+    seed_idx    = 0
+    episode_log = []
+    pi05_succ = pi05_coll = curobo_succ = curobo_coll = 0
+    # STRICT TRIPLETS (default): legs B & C run only on seeds where the
+    # collision-aware expert (leg A) succeeded — all three sources always share
+    # the same seed/scene.  Opt-in COLLECT_ON_EXPERT_FAIL=1 additionally
+    # collects pi05 + collision-unaware legs on expert-blocked seeds (the
+    # contact-rich scenes), flagged and not counted toward collect_num.
+    _on_expert_fail = os.environ.get("COLLECT_ON_EXPERT_FAIL", "0").lower() \
+        in ("1", "true", "yes")
+    attempts, max_attempts = 0, max(collect_num * 20, 20)
+
+    print(f"\033[34mTask: {task_name}  |  Paired (CuRobo first → pi05)  |  {collect_num} seeds\033[0m")
+
+    while seed_idx < collect_num:
+        attempts += 1
+        if attempts > max_attempts:
+            print(f"\033[31m[paired] giving up after {max_attempts} seed attempts "
+                  f"({seed_idx}/{collect_num} valid triplets)\033[0m")
+            break
+        args["render_freq"] = 0
+        scene_dir   = save_dir / "scene" / f"seed_{now_seed}"
+        fk_path     = save_dir / "fk_basis.npz"
+        _scene_rel  = f"scene/seed_{now_seed}"
+
+        def _export_scene_once(env, _sd=scene_dir, _fk=fk_path, _seed=now_seed):
+            try:
+                from differentiable_proximity import export_scene, serialize_fk_and_spheres
+                _sd.mkdir(parents=True, exist_ok=True)
+                h = export_scene(env, str(_sd))
+                if not _fk.exists():
+                    serialize_fk_and_spheres(env, str(_fk))
+                print(f"  seed={_seed} scene exported ({h[:10]})")
+            except Exception as e:
+                print(f"  seed={_seed} scene export FAILED: {e}")
+
+        def _mpaths(source, _seed=now_seed):
+            md = _SRC_DIRS[source] / "metrics"
+            md.mkdir(parents=True, exist_ok=True)
+            return (md / f"seed{_seed}_contacts.jsonl",
+                    md / f"seed{_seed}_collisions.jsonl")
+
+        def _discard_seed_artifacts(_sd=scene_dir, _seed=now_seed):
+            """Skipped seeds leave no trace: scene export + metric streams are
+            written at setup, before the planner can fail — remove them."""
+            import shutil
+            if _sd.exists():
+                shutil.rmtree(_sd, ignore_errors=True)
+            for d in _SRC_DIRS.values():
+                for p in (d / "metrics").glob(f"seed{_seed}_*"):
+                    try:
+                        p.unlink()
+                    except OSError:
+                        pass
+
+        def _index_entry(file_path, source, ep, succ, is_col, n_frames,
+                         col_metrics=None):
+            entry = {
+                "file": str(Path(file_path).relative_to(save_dir)),
+                "seed": int(now_seed),
+                "source": source, "episode": int(ep),
+                "success": bool(succ), "collision": bool(is_col),
+                "n_frames": int(n_frames), "scene_dir": _scene_rel,
+                "contacts": str((_SRC_DIRS[source] / "metrics" /
+                                 f"seed{now_seed}_contacts.jsonl").relative_to(save_dir)),
+                "collisions": str((_SRC_DIRS[source] / "metrics" /
+                                   f"seed{now_seed}_collisions.jsonl").relative_to(save_dir)),
+                "instruction": str(instruction),
+            }
+            _append_index(save_dir, entry)
+            # Per-episode info json, written IMMEDIATELY after the episode so a
+            # killed run loses nothing (collect_summary.json only flushes per seed).
+            info = dict(entry)
+            if col_metrics:
+                info["collision_metrics"] = col_metrics
+            with open(Path(file_path).with_suffix(".info.json"), "w") as fo:
+                json.dump(info, fo, indent=1, default=str)
+
+        # ── Leg A: collision-AWARE CuRobo (skip seed if no trajectory) ───────
+        legA = _run_curobo_leg(TASK_ENV, args, now_seed, seed_idx * 3,
+                               exclude_clutter=False,
+                               instruction_type=instruction_type,
+                               encode_obs=_encode_obs,
+                               metric_paths=_mpaths("planner_collision_aware"),
+                               post_setup=_export_scene_once)
+        if legA is None:
+            _discard_seed_artifacts()
+            now_seed += 1
+            if save_seed_fn: save_seed_fn(now_seed)
+            continue
+        buf_c, ok_c      = legA["buf"], legA["ok"]
+        instruction      = legA["instruction"]
+        col_c, is_col_c  = legA["col"], legA["is_col"]
+        expert_ok = len(buf_c) >= 2 and ok_c
+
+        if expert_ok:
+            col_frames_c  = [i for i, fr in enumerate(buf_c) if fr.get('collision_step', False)]
+            n_col_steps_c = len(col_frames_c)
+            file_c = save_proximity_hdf5(buf_c, _SRC_DIRS["planner_collision_aware"],
+                                         seed_idx * 3, instruction, ok_c, is_col_c,
+                                         collector="curobo",
+                                         extra_attrs={"seed": int(now_seed),
+                                                      "source": "planner_collision_aware",
+                                                      "scene_dir": _scene_rel},
+                                         filename=f"episode_seed{now_seed}.hdf5")
+            if _video_dir and legA["vframes"]:
+                _save_video(legA["vframes"], file_c, _SRC_DIRS["planner_collision_aware"] / "videos")
+            TASK_ENV.close_env(clear_cache=False)
+            _index_entry(file_c, "planner_collision_aware", seed_idx * 3, ok_c, is_col_c,
+                         len(buf_c), col_metrics=col_c)
+
+            _r1 = "\033[92mSuccess\033[0m" if ok_c else "\033[91mFail\033[0m"
+            _col_ts_c = f"  col_timesteps={col_frames_c}" if col_frames_c else ""
+            print(f"  seed={now_seed} [curobo] {_r1}  frames={len(buf_c)}  col_steps={n_col_steps_c}{_col_detail_str(col_c)}{_col_ts_c}")
+            if ok_c:    curobo_succ += 1
+            if is_col_c: curobo_coll += 1
+        else:
+            reason = "no trajectory" if len(buf_c) < 2 else f"Fail  frames={len(buf_c)}"
+            TASK_ENV.close_env(clear_cache=False)
+            if not _on_expert_fail:
+                print(f"  seed={now_seed} [curobo] {reason} — skipping seed")
+                _discard_seed_artifacts()
+                now_seed += 1
+                if save_seed_fn: save_seed_fn(now_seed)
+                continue
+            # Expert-blocked scene: exactly where the collision-unaware planner
+            # WILL plow through clutter — collect legs B & C anyway (flagged).
+            print(f"  seed={now_seed} [curobo] {reason} — expert-blocked scene: "
+                  f"collecting pi05 + collision-unaware legs (contact-rich)")
+            if len(buf_c) >= 2:   # failed expert attempt is still data — save flagged
+                file_c = save_proximity_hdf5(buf_c, _SRC_DIRS["planner_collision_aware"],
+                                             seed_idx * 3, instruction, False, is_col_c,
+                                             collector="curobo",
+                                             extra_attrs={"seed": int(now_seed),
+                                                          "source": "planner_collision_aware",
+                                                          "scene_dir": _scene_rel,
+                                                          "expert_blocked": True},
+                                             filename=f"episode_seed{now_seed}.hdf5")
+                _index_entry(file_c, "planner_collision_aware", seed_idx * 3, False,
+                             is_col_c, len(buf_c), col_metrics=col_c)
+
+        # ── Leg B: pi05 rollout (same seed, always save) ──────────────────────
+        try:
+            TASK_ENV.setup_demo(now_ep_num=seed_idx * 3 + 1, seed=now_seed, is_test=True, **args)
+            TASK_ENV.eval_video_path = None   # disable native ffmpeg recording
+        except Exception as e:
+            print(f"  seed={now_seed} [pi05] setup failed: {e} — saving curobo only")
+            TASK_ENV.close_env()
+            episode_log.append(_make_log_entry(seed_idx * 3, now_seed, len(buf_c),
+                                               ok_c, is_col_c, instruction, col_c))
+            with open(save_dir / "collect_summary.json", "w") as _f:
+                json.dump(episode_log, _f, indent=2)
+            now_seed += 1; seed_idx += 1
+            if save_seed_fn: save_seed_fn(now_seed)
+            continue
+
+        TASK_ENV.set_instruction(instruction=instruction)
+        model.reset_model()
+        TASK_ENV._contrastive_buffer = []
+        if hasattr(TASK_ENV, 'start_metric_streams'):
+            TASK_ENV.start_metric_streams(*[str(p) for p in _mpaths("pi05_base")])
+
+        _orig_ta = TASK_ENV.take_action
+        succ_pi05 = False
+        vframes_p = []
+        _last_col_count = [0]  # cumulative collision count from previous action step
+
+        def _rec_pi05(action, _orig=_orig_ta):
+            action = np.asarray(action, dtype=np.float32)
+            if TASK_ENV._contrastive_buffer is not None:
+                _obs = TASK_ENV.get_obs()
+                _, _state = _encode_obs(_obs)
+                TASK_ENV._contrastive_buffer.append(
+                    _obs_to_frame(_obs, _state, action=action, task_env=TASK_ENV))
+                fr = _pick_video_frame(_obs.get('observation', {}))
+                if fr is not None: vframes_p.append(fr)
+            result = _orig(action)
+            # Tag the frame with whether any collision occurred during this action step.
+            # We compare cumulative total_collision_count before vs after take_action —
+            # this catches collisions in any sub-step, not just the last one (filtered_contacts_for_log
+            # is reset each sub-step so only the last sub-step's contacts would be visible there).
+            if TASK_ENV._contrastive_buffer and hasattr(TASK_ENV, 'get_collision_metrics'):
+                cur_count = TASK_ENV.get_collision_metrics().get("total_collision_count", 0)
+                TASK_ENV._contrastive_buffer[-1]['collision_step'] = (cur_count > _last_col_count[0])
+                _last_col_count[0] = cur_count
+            return result
+
+        TASK_ENV.take_action = _rec_pi05
+        while TASK_ENV.take_action_cnt < TASK_ENV.step_lim:
+            eval_func(TASK_ENV, model, TASK_ENV.get_obs())
+            if TASK_ENV.eval_success:
+                succ_pi05 = True; break
+        TASK_ENV.take_action = _orig_ta
+        if hasattr(TASK_ENV, 'stop_metric_streams'):
+            TASK_ENV.stop_metric_streams()
+
+        col_pi05 = {}; is_col_pi05 = False
+        if hasattr(TASK_ENV, 'get_collision_metrics'):
+            col_pi05    = TASK_ENV.get_collision_metrics()
+            is_col_pi05 = col_pi05.get("is_collision", False)
+
+        n_pi05 = len(TASK_ENV._contrastive_buffer)
+        col_frames_pi05  = [i for i, fr in enumerate(TASK_ENV._contrastive_buffer) if fr.get('collision_step', False)]
+        n_col_steps_pi05 = len(col_frames_pi05)
+        file_p = None
+        if n_pi05 >= 2:
+            file_p = save_proximity_hdf5(
+                TASK_ENV._contrastive_buffer, _SRC_DIRS["pi05_base"],
+                seed_idx * 3 + 1, instruction, succ_pi05, is_col_pi05, collector="pi05",
+                extra_attrs={"seed": int(now_seed), "source": "pi05_base",
+                             "scene_dir": _scene_rel},
+                filename=f"episode_seed{now_seed}.hdf5")
+        if _video_dir and vframes_p and file_p is not None:
+            _save_video(vframes_p, file_p, _SRC_DIRS["pi05_base"] / "videos")
+        TASK_ENV._contrastive_buffer = None
+        TASK_ENV.close_env(clear_cache=(seed_idx % clear_cache_freq == 0))
+        if file_p is not None:
+            _index_entry(file_p, "pi05_base", seed_idx * 3 + 1, succ_pi05, is_col_pi05,
+                         n_pi05, col_metrics=col_pi05)
+
+        _r0 = "\033[92mSuccess\033[0m" if succ_pi05 else "\033[91mFail\033[0m"
+        _col_ts_p = f"  col_timesteps={col_frames_pi05}" if col_frames_pi05 else ""
+        print(f"  seed={now_seed} [pi05]   {_r0}  frames={n_pi05}  col_steps={n_col_steps_pi05}{_col_detail_str(col_pi05)}{_col_ts_p}")
+        if succ_pi05:    pi05_succ += 1
+        if is_col_pi05:  pi05_coll += 1
+
+        # ── Leg C: collision-UNAWARE CuRobo (same seed, planner ignores clutter;
+        #    contact-rich negatives — always saved, never gates the seed) ──────
+        legC = _run_curobo_leg(TASK_ENV, args, now_seed, seed_idx * 3 + 2,
+                               exclude_clutter=True,
+                               instruction_type=instruction_type,
+                               encode_obs=_encode_obs,
+                               instruction=instruction,
+                               metric_paths=_mpaths("planner_collision_unaware"))
+        ok_u = is_col_u = False; n_u = 0; col_u = {}
+        if legC is not None:
+            buf_u, ok_u = legC["buf"], legC["ok"]
+            col_u, is_col_u = legC["col"], legC["is_col"]
+            n_u = len(buf_u)
+            if n_u >= 2:
+                file_u = save_proximity_hdf5(buf_u, _SRC_DIRS["planner_collision_unaware"],
+                                             seed_idx * 3 + 2, instruction, ok_u, is_col_u,
+                                             collector="curobo_unaware",
+                                             extra_attrs={"seed": int(now_seed),
+                                                          "source": "planner_collision_unaware",
+                                                          "scene_dir": _scene_rel},
+                                             filename=f"episode_seed{now_seed}.hdf5")
+                if _video_dir and legC["vframes"]:
+                    _save_video(legC["vframes"], file_u, _SRC_DIRS["planner_collision_unaware"] / "videos")
+                _index_entry(file_u, "planner_collision_unaware", seed_idx * 3 + 2,
+                             ok_u, is_col_u, n_u, col_metrics=col_u)
+            TASK_ENV.close_env(clear_cache=False)
+            _r2 = "\033[92mSuccess\033[0m" if ok_u else "\033[91mFail\033[0m"
+            print(f"  seed={now_seed} [curobo-unaware] {_r2}  frames={n_u}{_col_detail_str(col_u)}")
+
+        episode_log.append(_make_log_entry(seed_idx * 3,     now_seed, len(buf_c),  ok_c,      is_col_c,    instruction, col_c))
+        episode_log.append(_make_log_entry(seed_idx * 3 + 1, now_seed, n_pi05,      succ_pi05, is_col_pi05, instruction, col_pi05))
+        episode_log.append(_make_log_entry(seed_idx * 3 + 2, now_seed, n_u,         ok_u,      is_col_u,    instruction, col_u))
+        with open(save_dir / "collect_summary.json", "w") as _f:
+            json.dump(episode_log, _f, indent=2)
+
+        now_seed += 1
+        if expert_ok:
+            seed_idx += 1
+        if save_seed_fn: save_seed_fn(now_seed)
+        if seed_idx > 0:
+            print(f"  → {seed_idx}/{collect_num} seeds | "
+                  f"curobo SR \033[95m{curobo_succ/seed_idx*100:.1f}%\033[0m  "
+                  f"pi05 SR \033[95m{pi05_succ/seed_idx*100:.1f}%\033[0m")
+
+    with open(save_dir / "collect_summary.json", "w") as f:
+        json.dump(episode_log, f, indent=2)
+    return episode_log
+
 
 def _col_detail_str(col_metrics):
     if not col_metrics.get("is_collision"):
@@ -1242,7 +1897,10 @@ def main(usr_args):
             args[k] = usr_args[k]
 
     env_type = "clean" if "clean" in task_config else "cluttered"
-    save_dir = Path(f"rollout_data/{task_name}/{env_type}")
+    # Paired (triplet) collection goes to its own dataset root, NOT rollout_data.
+    _mode_early = os.environ.get("COLLECT_MODE", usr_args.get("collect_mode", args.get("collect_mode", "")))
+    _root = "collision_dataset" if _mode_early == "paired" else "rollout_data"
+    save_dir = Path(f"{_root}/{task_name}/{env_type}")
     save_dir.mkdir(parents=True, exist_ok=True)
 
     video_size = None
@@ -1276,10 +1934,13 @@ def main(usr_args):
     def _save_seed(seed):
         _seed_state_file.write_text(str(seed))
 
-    _branch_num   = int(args.get("collect_branch_num", os.environ.get("COLLECT_BRANCH_NUM", 0)))
-    _collect_mode = args.get("collect_mode", os.environ.get("COLLECT_MODE", ""))
+    # Env vars take priority over YAML config so shell scripts can override the defaults
+    _branch_num   = int(os.environ.get("COLLECT_BRANCH_NUM", args.get("collect_branch_num", 0)))
+    _collect_mode = os.environ.get("COLLECT_MODE", args.get("collect_mode", ""))
     if _collect_mode == "stitched":
         _collect_fn = collect_rollouts_stitched
+    elif _collect_mode == "paired":
+        _collect_fn = collect_rollouts_paired
     elif _branch_num > 0:
         _collect_fn = collect_rollouts_branching
     else:
