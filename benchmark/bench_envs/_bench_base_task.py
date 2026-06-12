@@ -1093,12 +1093,12 @@ class Bench_base_task(Base_Task):
             return None, []
 
         if pre_grasp_pose == grasp_pose:
-            return arm_tag, [
+            actions = [
                 Action(arm_tag, "move", target_pose=pre_grasp_pose),
                 Action(arm_tag, "close", target_gripper_pos=gripper_pos),
             ]
         else:
-            return arm_tag, [
+            actions = [
                 Action(arm_tag, "move", target_pose=pre_grasp_pose),
                 Action(
                     arm_tag,
@@ -1108,6 +1108,12 @@ class Bench_base_task(Base_Task):
                 ),
                 Action(arm_tag, "close", target_gripper_pos=gripper_pos),
             ]
+        # Targeted-collection hook: the grasp poses are now locked into
+        # `actions` but not yet planned/executed (bench_envs/targeted).
+        targeted = getattr(self, "targeted", None)
+        if targeted is not None:
+            targeted.notify("after_grasp_plan", self)
+        return arm_tag, actions
 
     def get_curobo_target(self):
         """
@@ -1517,13 +1523,22 @@ class Bench_base_task(Base_Task):
     # =========================================================== Extra Curobo Utils ===========================================================
 
     def update_world(self, exclude_obstacles: bool = False):
-        """Updates CuRobo Collision World Model with new collision objects"""
+        """Updates CuRobo Collision World Model with new collision objects.
+
+        When a targeted-collection runtime is attached (env.targeted, see
+        bench_envs/targeted/runtime.py) it is consulted on every call: actors
+        it excludes stay out of the planner world and shifted actors keep
+        reporting their pre-shift pose — persistent desync across mid-episode
+        re-calls. Without it, behavior is unchanged."""
+        targeted = getattr(self, "targeted", None)
         collision_dict = {"mesh": {}, "cuboid": {}}
         if self.collision_list:
             for info in self.collision_list:
                 if exclude_obstacles and info.get("is_obstacle", False):
                     continue
                 actor = info["actor"]
+                if targeted is not None and targeted.is_excluded(actor):
+                    continue
                 collision_path = info["collision_path"]
                 if os.path.isdir(collision_path): # if actor is made from multiple obj files
                     name_prefix = actor.get_name()
@@ -1538,6 +1553,8 @@ class Bench_base_task(Base_Task):
                         pose = info["pose"]
                     else:
                         pose = actor.get_pose()
+                        if targeted is not None:
+                            pose = targeted.override_pose(actor, pose)
                     np_pose = np.concatenate([pose.p, pose.q]).tolist()
                     convex_collision_dict = self.collision_dict_from_convex_obj_dir(
                         collision_path,
@@ -1554,6 +1571,8 @@ class Bench_base_task(Base_Task):
                         pose = info["pose"]
                     else:
                         pose = actor.get_pose()
+                        if targeted is not None:
+                            pose = targeted.override_pose(actor, pose)
                     np_pose = np.concatenate([pose.p, pose.q]).tolist()
                     collision_dict["mesh"][f"{actor.get_name()}_{np_pose}_{self.seed}"] = {
                             "file_path": collision_path,
