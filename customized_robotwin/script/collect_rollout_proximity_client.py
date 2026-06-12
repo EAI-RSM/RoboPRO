@@ -1415,6 +1415,36 @@ def _append_index(save_dir, entry):
         f.write(json.dumps(entry) + "\n")
 
 
+def _spawn_contact_pairs(task_env, thresh=1e-3):
+    """Robot-link <-> static-object impulse contacts in the just-settled scene.
+
+    Non-empty means the scene spawned with clutter resting against the robot
+    (gravity-support impulse ~ m*g*dt per step, e.g. ~0.04 N*s for a kettle) —
+    a scene artifact, not robot behaviour. Zero-impulse proximity pairs are
+    ignored. Targets are excluded via static_object_ids, same as the metrics.
+    """
+    robot_links = getattr(task_env, 'robot_link_names', set())
+    static_ids  = getattr(task_env, 'static_object_ids', set())
+    hits = []
+    for contact in task_env.scene.get_contacts():
+        e0 = contact.bodies[0].entity
+        e1 = contact.bodies[1].entity
+        is_r0 = e0.name in robot_links
+        is_r1 = e1.name in robot_links
+        is_s0 = getattr(e0, 'per_scene_id', None) in static_ids
+        is_s1 = getattr(e1, 'per_scene_id', None) in static_ids
+        if not ((is_r0 and is_s1) or (is_r1 and is_s0)):
+            continue
+        imp = max((float(np.linalg.norm(p.impulse)) for p in contact.points),
+                  default=0.0)
+        if imp > thresh:
+            link = e0.name if is_r0 else e1.name
+            obj = e1 if is_s1 else e0
+            hits.append((link, f"{obj.get_name()}#{obj.per_scene_id}",
+                         round(imp, 4)))
+    return hits
+
+
 def _run_curobo_leg(TASK_ENV, args, now_seed, ep_num, exclude_clutter,
                     instruction_type, encode_obs, instruction=None,
                     metric_paths=None, post_setup=None):
@@ -1442,6 +1472,18 @@ def _run_curobo_leg(TASK_ENV, args, now_seed, ep_num, exclude_clutter,
         print(f"  seed={now_seed} [{tag}] setup failed: {e}")
         TASK_ENV.close_env()
         return None
+
+    # Spawn-contact gate (leg A only — same scene for all legs): if the settled
+    # scene already rests clutter against the robot, the whole episode logs
+    # persistent phantom contact (e.g. seed 100084: kettle on fl_link6/7 for
+    # 100% of the episode). Always skip such seeds entirely.
+    if not exclude_clutter:
+        _spawn_hits = _spawn_contact_pairs(TASK_ENV)
+        if _spawn_hits:
+            print(f"  seed={now_seed} [{tag}] spawn-contact artifact "
+                  f"{_spawn_hits} — skipping seed")
+            TASK_ENV.close_env()
+            return None
 
     if post_setup is not None:
         post_setup(TASK_ENV)
