@@ -18,7 +18,9 @@ git clone https://anonymous.4open.science/r/RoboPRO-EDE0
 cd RoboPRO
 ```
 
-### 1. Conda env
+### 1. Choose an environment manager
+
+#### Option A. Conda env
 
 ```bash
 conda create -n robopro python=3.10 -y
@@ -28,7 +30,18 @@ conda env config vars set -n robopro PYTHONNOUSERSITE=1
 conda activate robopro
 ```
 
-### 2. Python deps
+#### Option B. uv env
+
+```bash
+uv venv --python 3.10
+source .venv/bin/activate
+# Keep the env isolated from ~/.local/lib site-packages:
+export PYTHONNOUSERSITE=1
+```
+
+### 2. Install Python dependencies
+
+#### Option A. Conda workflow
 
 ```bash
 cd customized_robotwin
@@ -36,14 +49,22 @@ pip install -r script/requirements.txt
 pip install setuptools==69.5.1       # provides pkg_resources for sapien
 pip install "git+https://github.com/facebookresearch/pytorch3d.git@stable" --no-build-isolation
 bash script/_install.sh              # patches sapien urdf_loader + mplib planner
+cd ..
 ```
 
 `script/_install.sh` also clones CuRobo v0.7.8 into `envs/curobo/` and pip-installs it editable, then re-pins `warp-lang==1.12.0` and `setuptools==69.5.1`. If you keep `scipy==1.10.1` from `requirements.txt`, `scikit-image` will print a version-conflict warning — harmless.
 
+#### Option B. uv workflow
+
+```bash
+bash scripts/install/bootstrap_uv.sh
+```
+
+This bootstraps `.venv` from the root `pyproject.toml` and `uv.lock`, then runs the post-install patches and clones CuRobo v0.7.8 into `customized_robotwin/envs/curobo/` as an editable install. The uv path does not install `customized_robotwin/script/requirements.txt` directly, so any dependency added there must also be mirrored in `pyproject.toml`. If you keep `scipy==1.10.1`, `scikit-image` may print a version-conflict warning during install — harmless.
+
 ### 3. Assets (~15 GB)
 
 ```bash
-cd ..                                # back to repo root
 python scripts/install/download_assets.py
 ```
 
@@ -60,9 +81,7 @@ Generate the local-path curobo configs from the shipped templates, and patch the
 ```bash
 ASSETS_PATH="$(pwd)/benchmark"
 cd benchmark/assets/embodiments/aloha-agilex
-for side in left right; do
-  sed "s|\${ASSETS_PATH}|$ASSETS_PATH|g" curobo_${side}_tmp.yml > curobo_${side}.yml
-done
+ASSETS_PATH="$ASSETS_PATH" python -c 'from pathlib import Path; import os; assets_path = os.environ["ASSETS_PATH"]; [Path(f"curobo_{side}.yml").write_text(Path(f"curobo_{side}_tmp.yml").read_text(encoding="utf-8").replace("${ASSETS_PATH}", assets_path), encoding="utf-8") for side in ("left", "right")]'
 cd -
 python scripts/install/patch_aloha_curobo.py
 ```
@@ -137,9 +156,9 @@ Eval rolls a trained checkpoint out against a `(task, config)` pair and writes a
 **Mode A — single-process** (policy + sim share one Python env, e.g. when openpi is conda-installable alongside SAPIEN):
 
 ```bash
-bash policy/pi05/eval.sh <task_name> <task_config> <train_config_name> <model_name> <seed> <gpu_id>
+bash policy/pi05/eval.sh <task_name> <task_config> <train_config_name> <model_name> <checkpoint_id> <ckpt_setting> <seed> <gpu_id>
 # Example:
-bash policy/pi05/eval.sh put_mouse_on_pad bench_demo_office_clean my_office_train pi05_ckpt 0 0
+bash policy/pi05/eval.sh put_mouse_on_pad bench_demo_office_clean my_office_train pi05_ckpt 30000 pi05_ckpt_30000 0 0
 ```
 
 **Mode B — dual-env / dual-process** (recommended for pi05 since openpi+jax need an isolated uv venv at `policy/pi05/.venv/`):
