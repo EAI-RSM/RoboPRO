@@ -363,3 +363,45 @@ class Pi0(_model.BaseModel):
 
         x_0, _ = jax.lax.while_loop(cond, step, (noise, 1.0))
         return x_0
+
+    # ------------------------------------------------------------------
+    # Velocity field exposure for adjoint-matching (train_adjoint.py)
+    # ------------------------------------------------------------------
+    # The adjoint unroll needs v(obs, x_t, t) callable repeatedly.  Since LoRA
+    # lives only on the action expert, the PaliGemma prefix (images/text) is
+    # base-only and identical for slow/fast — so encode it ONCE and reuse the
+    # KV cache (stop-grad: the adjoint differentiates only w.r.t. the action).
+
+    def prefill_prefix_kv(self, observation: _model.Observation, *, train: bool = False):
+        """Encode the prefix once. Returns (observation_pp, kv_cache, prefix_mask)."""
+        observation = _model.preprocess_observation(None, observation, train=train)
+        prefix_tokens, prefix_mask, prefix_ar_mask = self.embed_prefix(observation)
+        prefix_attn_mask = make_attn_mask(prefix_mask, prefix_ar_mask)
+        positions = jnp.cumsum(prefix_mask, axis=1) - 1
+        _, kv_cache = self.PaliGemma.llm([prefix_tokens, None], mask=prefix_attn_mask, positions=positions)
+        return observation, kv_cache, prefix_mask
+
+    def compute_velocity_cached(
+        self,
+        observation: _model.Observation,
+        kv_cache,
+        prefix_mask: at.Array,
+        x_t: at.Float[at.Array, "b ah ad"],
+        time: at.Float[at.Array, " b"],
+    ) -> at.Float[at.Array, "b ah ad"]:
+        """One denoiser pass given a cached prefix -> velocity v_t (pi05 t-convention,
+        t=1 noise -> t=0 data).  Mirrors the step in sample_actions.  Differentiable
+        w.r.t. x_t (adjoint VJP) and the action-expert (LoRA) params.
+
+        ``observation`` must already be preprocessed (from prefill_prefix_kv).
+        """
+        suffix_tokens, suffix_mask, suffix_ar_mask, adarms_cond = self.embed_suffix(observation, x_t, time)
+        suffix_attn_mask = make_attn_mask(suffix_mask, suffix_ar_mask)
+        prefix_attn_mask = einops.repeat(prefix_mask, "b p -> b s p", s=suffix_tokens.shape[1])
+        full_attn_mask = jnp.concatenate([prefix_attn_mask, suffix_attn_mask], axis=-1)
+        positions = jnp.sum(prefix_mask, axis=-1)[:, None] + jnp.cumsum(suffix_mask, axis=-1) - 1
+        (_, suffix_out), _ = self.PaliGemma.llm(
+            [None, suffix_tokens], mask=full_attn_mask, positions=positions,
+            kv_cache=kv_cache, adarms_cond=[None, adarms_cond],
+        )
+        return self.action_out_proj(suffix_out[:, -self.action_horizon:])

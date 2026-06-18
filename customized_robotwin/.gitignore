@@ -28,6 +28,8 @@ policy/weights/*
 
 envs/curobo/*
 
+sdf_debug/
+
 .vscode
 /config.json
 

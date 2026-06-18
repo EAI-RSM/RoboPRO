@@ -586,7 +586,7 @@ _CONFIGS = [
         name="pi05_aloha_advantage",
         model=pi0_config.Pi0Config(pi05=True),
         data=LeRobotAlohaDataConfig(
-            repo_id="your_repo_id",            # dataset with "advantage" column
+            repo_id="local/kitchenl_d15_combined",            # dataset with "advantage" column
             action_sequence_keys=("action", "advantage"),  # load advantage as 50-step seq
             repack_transforms=_transforms.Group(inputs=[
                 _transforms.RepackTransform({
@@ -612,6 +612,78 @@ _CONFIGS = [
         batch_size=64,
         fsdp_devices=1,
     ),
+    # pi05 collision-critic finetune (train_collision.py) on the CLEANED
+    # collision dataset (wrong-object-grasp episodes excluded).  Same as
+    # pi05_aloha_advantage PLUS the precomputed link_distances columns, and a
+    # weight_loader pointing at the step-20000 base checkpoint to post-train from.
+    TrainConfig(
+        name="pi05_aloha_collision",
+        model=pi0_config.Pi0Config(pi05=True),
+        data=LeRobotAlohaDataConfig(
+            repo_id="local/kitchenl_d15_collision_clean",   # built by convert_collision_to_lerobot.py
+            action_sequence_keys=("action", "advantage",
+                                  "link_distances.dist", "link_distances.delta"),
+            repack_transforms=_transforms.Group(inputs=[
+                _transforms.RepackTransform({
+                    "images": {
+                        "cam_high": "observation.images.cam_high",
+                        "cam_left_wrist": "observation.images.cam_left_wrist",
+                        "cam_right_wrist": "observation.images.cam_right_wrist",
+                    },
+                    "state": "observation.state",
+                    "actions": "action",
+                    "prompt": "prompt",
+                    "advantage": "advantage",
+                    # preserved so the collision loader can surface dists/deltas
+                    "link_distances.dist": "link_distances.dist",
+                    "link_distances.delta": "link_distances.delta",
+                })
+            ]),
+            base_config=DataConfig(
+                prompt_from_task=True,
+            ),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader(
+            # ws2 step-20000 base policy to post-train from (absolute path on ws2).
+            "/home/user/xuan/project/RoboPRO/customized_robotwin/policy/pi05/"
+            "checkpoints/pi05_aloha_full_base/roboreal_all_80tasks/20000/params"
+        ),
+        num_train_steps=30_000,   # 20000 base + ~10000 collision finetune
+        batch_size=32,
+        fsdp_devices=1,
+    ),
+    # pi05 adjoint-matching finetune (train_adjoint.py): LoRA "fast" field trained
+    # by Adjoint Matching toward the differentiable proximity reward, base does BC.
+    # Dataset = convert_collision_am_to_lerobot.py output (obs/action + per-frame
+    # obstacle_points column). LoRA on the action expert -> trains only LoRA params.
+    TrainConfig(
+        name="pi05_aloha_adjoint",
+        model=pi0_config.Pi0Config(pi05=True, action_expert_variant="gemma_300m_lora"),
+        data=LeRobotAlohaDataConfig(
+            repo_id="local/kitchenl_d15_am",            # built by convert_collision_am_to_lerobot.py
+            # obstacle_points is a PER-FRAME feature (not windowed) -> NOT in action_sequence_keys.
+            repack_transforms=_transforms.Group(inputs=[
+                _transforms.RepackTransform({
+                    "images": {
+                        "cam_high": "observation.images.cam_high",
+                        "cam_left_wrist": "observation.images.cam_left_wrist",
+                        "cam_right_wrist": "observation.images.cam_right_wrist",
+                    },
+                    "state": "observation.state",
+                    "actions": "action",
+                    "prompt": "prompt",
+                    "obstacle_points": "obstacle_points",   # preserved -> AlohaInputs passthrough -> batch
+                })
+            ]),
+            base_config=DataConfig(prompt_from_task=True),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader(
+            "gs://openpi-assets/checkpoints/pi05_base/params"  # replace with your base ckpt
+        ),
+        num_train_steps=30_000,
+        batch_size=32,
+        fsdp_devices=1,
+    ),
     # pi05 advantage-token conditioning (learned embedding in the action expert suffix)
     # Uses Pi0Config(advantage_token=True): adds a 3-row embedding table to the model.
     # Row 0=negative, 1=positive, 2=null/unconditional.
@@ -620,7 +692,7 @@ _CONFIGS = [
         name="pi05_aloha_advantage_token",
         model=pi0_config.Pi0Config(pi05=True, advantage_token=True),
         data=LeRobotAlohaDataConfig(
-            repo_id="your_repo_id",            # dataset with "advantage" column
+            repo_id="local/kitchenl_d15_combined",
             action_sequence_keys=("action", "advantage"),
             repack_transforms=_transforms.Group(inputs=[
                 _transforms.RepackTransform({
@@ -640,11 +712,44 @@ _CONFIGS = [
             ),
         ),
         weight_loader=weight_loaders.CheckpointWeightLoader(
-            "gs://openpi-assets/checkpoints/pi05_base/params",
+            "checkpoints/pi05_aloha_full_base/roboreal_all_80tasks/20000/params",
             missing_regex=".*lora.*|.*advantage_token_embedding.*",
         ),
         num_train_steps=20_000,
-        batch_size=64,
+        batch_size=2,
+        fsdp_devices=1,
+    ),
+    # Positive-data-only baseline (204 hard-success eps). Standard pi05 model
+    # (no advantage conditioning); trained via train_advantage.py + POSITIVE_HARVEST=1.
+    # Defined here so the policy server can serve the transferred 50000 checkpoint.
+    TrainConfig(
+        name="pi05_aloha_positive_strict",
+        model=pi0_config.Pi0Config(pi05=True),
+        data=LeRobotAlohaDataConfig(
+            repo_id="kitchenl_d15_positive",
+            action_sequence_keys=("action", "advantage"),
+            repack_transforms=_transforms.Group(inputs=[
+                _transforms.RepackTransform({
+                    "images": {
+                        "cam_high": "observation.images.cam_high",
+                        "cam_left_wrist": "observation.images.cam_left_wrist",
+                        "cam_right_wrist": "observation.images.cam_right_wrist",
+                    },
+                    "state": "observation.state",
+                    "actions": "action",
+                    "prompt": "prompt",
+                    "advantage": "advantage",
+                })
+            ]),
+            base_config=DataConfig(
+                prompt_from_task=True,
+            ),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader(
+            "checkpoints/pi05_aloha_full_base/roboreal_all_80tasks/20000/params",
+        ),
+        num_train_steps=50_000,
+        batch_size=32,
         fsdp_devices=1,
     ),
     # pi0_base by lora

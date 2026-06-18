@@ -68,6 +68,11 @@ dev = [
 ]
 
 
+[tool.uv]
+# evdev>=1.7 references keycodes (KEY_REFRESH_RATE_TOGGLE etc.) added in kernel 6.3+,
+# which older systems (e.g. Compute Canada) don't have in /usr/include/linux/input.h.
+override-dependencies = ["evdev<1.7"]
+
 [tool.uv.sources]
 openpi-client = { workspace = true }
 lerobot = { git = "https://github.com/huggingface/lerobot", rev = "a445d9c9da6bea99a8972daa4fe1fdd053d711d2" }
