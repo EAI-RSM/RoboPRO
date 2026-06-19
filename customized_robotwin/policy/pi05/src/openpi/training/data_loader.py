@@ -127,6 +127,43 @@ class FakeDataset(Dataset):
         return self._num_samples
 
 
+def cast_embedded_image_columns(dataset: lerobot_dataset.LeRobotDataset) -> lerobot_dataset.LeRobotDataset:
+    """Loader-side fix for datasets whose camera columns were written as embedded
+    ``struct<bytes, path>`` instead of a ``datasets.Image()`` feature.
+
+    Such columns load as raw ``{"bytes": ..., "path": ...}`` dicts, so LeRobot's
+    ``hf_transform_to_torch`` hits ``torch.tensor(dict)`` and dies with
+    ``RuntimeError: Could not infer dtype of dict``. We re-type them to
+    ``datasets.Image()`` in memory (the embedded PNG bytes are already valid), so they
+    decode to PIL on access. This is a no-op for datasets that already use Image()/video
+    features, so it is safe to apply unconditionally to every LeRobot dataset we load.
+    """
+    import datasets as hf_datasets
+    from lerobot.common.datasets.utils import hf_transform_to_torch
+
+    hf = getattr(dataset, "hf_dataset", None)
+    if hf is None:
+        return dataset
+    new_features = dict(hf.features)
+    changed = []
+    for key, feat in hf.features.items():
+        try:
+            embedded_image = set(feat.keys()) == {"bytes", "path"}
+        except (AttributeError, TypeError):
+            embedded_image = False
+        if embedded_image:
+            new_features[key] = hf_datasets.Image()
+            changed.append(key)
+    if changed:
+        logging.getLogger(__name__).info(
+            "cast_embedded_image_columns: re-typing %s to datasets.Image()", changed
+        )
+        hf = hf.cast(hf_datasets.Features(new_features))
+        hf.set_transform(hf_transform_to_torch)
+        dataset.hf_dataset = hf
+    return dataset
+
+
 def create_torch_dataset(
     data_config: _config.DataConfig, action_horizon: int, model_config: _model.BaseModelConfig
 ) -> Dataset:
@@ -144,6 +181,7 @@ def create_torch_dataset(
             key: [t / dataset_meta.fps for t in range(action_horizon)] for key in data_config.action_sequence_keys
         },
     )
+    dataset = cast_embedded_image_columns(dataset)
 
     if data_config.prompt_from_task:
         dataset = TransformedDataset(dataset, [_transforms.PromptFromLeRobotTask(dataset_meta.tasks)])

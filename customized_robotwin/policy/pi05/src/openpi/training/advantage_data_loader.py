@@ -143,13 +143,19 @@ def create_advantage_torch_dataset(
             [_transforms.PromptFromLeRobotTask(dataset_meta.tasks)],
         )
 
-    norm_stats = data_config.norm_stats or {}
+    if data_config.norm_stats is None:
+        raise ValueError(
+            f"Norm stats not found for asset_id={data_config.asset_id!r}. Training without "
+            "normalization is almost certainly unintended. Run "
+            "`uv run scripts/compute_norm_stats.py --config-name <config>` first."
+        )
+    norm_stats = data_config.norm_stats
 
     transforms = [
         *data_config.repack_transforms.inputs,
+        AdvantageConditionTransform(dropout_rate=advantage_dropout),  # must run before AlohaInputs drops "advantage"
         *data_config.data_transforms.inputs,
         _transforms.Normalize(norm_stats, use_quantiles=data_config.use_quantile_norm),
-        AdvantageConditionTransform(dropout_rate=advantage_dropout),
         *data_config.model_transforms.inputs,
     ]
 
@@ -201,11 +207,21 @@ class AdvantageDataLoaderImpl(_data_loader.DataLoader):
     def data_config(self) -> _config.DataConfig:
         return self._data_config
 
-    def __iter__(self) -> Iterator[tuple[_model.Observation, jax.Array, jax.Array]]:
+    def __iter__(self) -> Iterator[tuple]:
+        """Yields ``(obs, actions, action_mask)``, or, when the dataset carries
+        precomputed per-link proximity (collision-critic finetune),
+        ``(obs, actions, action_mask, dists, deltas)`` with
+        ``dists [B, H, 16, 3]`` and ``deltas [B, H, 16, 3, 3]``."""
         for batch in self._raw:
             action_mask = batch["action_mask"]  # [B, H] bool, already sharded
             obs = _model.Observation.from_dict(batch)
-            yield obs, batch["actions"], action_mask
+            if "link_distances.dist" in batch:
+                B, H = action_mask.shape[0], action_mask.shape[1]
+                dists = batch["link_distances.dist"].reshape(B, H, 16, 3)
+                deltas = batch["link_distances.delta"].reshape(B, H, 16, 3, 3)
+                yield obs, batch["actions"], action_mask, dists, deltas
+            else:
+                yield obs, batch["actions"], action_mask
 
 
 def create_advantage_data_loader(
@@ -284,6 +300,17 @@ def create_advantage_data_loader(
 # Token-mode: advantage as a learned embedding in the action expert suffix
 # ---------------------------------------------------------------------------
 
+
+@dataclasses.dataclass(frozen=True)
+class _InjectFakeAdvantage(_transforms.DataTransformFn):
+    """Injects a constant all-positive advantage column for fake/smoke-test data."""
+    action_horizon: int
+
+    def __call__(self, data: dict) -> dict:
+        data["advantage"] = np.ones(self.action_horizon, dtype=np.float32)
+        return data
+
+
 @dataclasses.dataclass(frozen=True)
 class AdvantageTokenTransform(_transforms.DataTransformFn):
     """Produces an integer advantage_indicator for the model's embedding table.
@@ -341,7 +368,13 @@ def create_advantage_token_dataset(
     if repo_id is None:
         raise ValueError("repo_id is required for advantage training.")
     if repo_id == "fake":
-        return _data_loader.FakeDataset(model_config, num_samples=1024)
+        # FakeDataset doesn't include 'advantage'; inject it before AdvantageTokenTransform.
+        fake = _data_loader.FakeDataset(model_config, num_samples=1024)
+        return _data_loader.TransformedDataset(
+            fake,
+            [_InjectFakeAdvantage(action_horizon=action_horizon),
+             AdvantageTokenTransform(dropout_rate=advantage_dropout)],
+        )
 
     dataset_meta = lerobot_dataset.LeRobotDatasetMetadata(repo_id)
 
@@ -359,13 +392,19 @@ def create_advantage_token_dataset(
             [_transforms.PromptFromLeRobotTask(dataset_meta.tasks)],
         )
 
-    norm_stats = data_config.norm_stats or {}
+    if data_config.norm_stats is None:
+        raise ValueError(
+            f"Norm stats not found for asset_id={data_config.asset_id!r}. Training without "
+            "normalization is almost certainly unintended. Run "
+            "`uv run scripts/compute_norm_stats.py --config-name <config>` first."
+        )
+    norm_stats = data_config.norm_stats
 
     transforms = [
         *data_config.repack_transforms.inputs,
+        AdvantageTokenTransform(dropout_rate=advantage_dropout),  # must run before AlohaInputs drops "advantage"
         *data_config.data_transforms.inputs,
         _transforms.Normalize(norm_stats, use_quantiles=data_config.use_quantile_norm),
-        AdvantageTokenTransform(dropout_rate=advantage_dropout),
         *data_config.model_transforms.inputs,
     ]
 

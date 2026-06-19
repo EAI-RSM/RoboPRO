@@ -51,6 +51,7 @@ def create_adjoint_torch_dataset(
             for key in data_config.action_sequence_keys
         },
     )
+    dataset = _data_loader.cast_embedded_image_columns(dataset)
     if data_config.prompt_from_task:
         dataset = _data_loader.TransformedDataset(
             dataset, [_transforms.PromptFromLeRobotTask(dataset_meta.tasks)]

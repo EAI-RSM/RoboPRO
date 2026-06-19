@@ -54,6 +54,7 @@ import openpi.training.checkpoints as _checkpoints
 import openpi.training.config as _config
 import openpi.training.optimizer as _optimizer
 import openpi.training.sharding as sharding
+import openpi.training.weight_loaders as weight_loaders
 import openpi.training.utils as training_utils
 from openpi.training.adjoint_data_loader import create_adjoint_data_loader
 from openpi.training.adjoint_matching import AdjointConfig, adjoint_loss
@@ -71,8 +72,15 @@ class AdjointTrainArgs:
     lam_adj: float = 1.0                     # adjoint-matching loss weight
     lam_bc: float = 1.0                      # BC flow-loss weight (keep task competence; 0 = pure AM)
     inv_temp: float = 1.0                    # reward-gradient strength (1/KL-temperature)
-    flow_steps: int = 4                      # SDE steps for the adjoint unroll (cost driver)
-    margin: float = 0.03                     # proximity hinge margin (m)
+    flow_steps: int = 10                     # SDE steps for the adjoint unroll (matches pi05 / QAM)
+    margin: float = 0.05                     # proximity hinge margin (m): perturb policy when clearance < 5cm
+
+    # Overrides applied to the named config (so it can be retargeted from CLI/sbatch).
+    data_repo_id: str | None = None          # -> config.data.repo_id
+    weight_loader_path: str | None = None    # -> CheckpointWeightLoader(params dir)
+    batch_size: int | None = None
+    num_train_steps: int | None = None
+    fsdp_devices: int | None = None
 
     wandb_enabled: bool = True
     overwrite: bool = False
@@ -211,6 +219,17 @@ def main(args: AdjointTrainArgs):
     logging.info(f"Running on: {platform.node()}  args={args}")
     config = _config.get_config(args.config_name)
     config = dataclasses.replace(config, exp_name=args.exp_name, overwrite=args.overwrite)
+    # Optional CLI/sbatch overrides of the named config.
+    if args.data_repo_id is not None:
+        config = dataclasses.replace(config, data=dataclasses.replace(config.data, repo_id=args.data_repo_id))
+    if args.weight_loader_path is not None:
+        config = dataclasses.replace(config, weight_loader=weight_loaders.CheckpointWeightLoader(args.weight_loader_path))
+    if args.batch_size is not None:
+        config = dataclasses.replace(config, batch_size=args.batch_size)
+    if args.num_train_steps is not None:
+        config = dataclasses.replace(config, num_train_steps=args.num_train_steps)
+    if args.fsdp_devices is not None:
+        config = dataclasses.replace(config, fsdp_devices=args.fsdp_devices)
 
     ckpt_dir = config.checkpoint_dir
     ckpt_dir.mkdir(parents=True, exist_ok=True)

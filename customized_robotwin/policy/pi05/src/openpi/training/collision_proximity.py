@@ -81,7 +81,7 @@ def _nearest_dist_batched(centers: jnp.ndarray, P: jnp.ndarray, b_block: int) ->
 def make_proximity_cost(
     fk_basis_path: str,
     *,
-    margin: float = 0.03,
+    margin: float = 0.05,   # perturb the policy when clearance < 5cm
     depth_gain: float = 1.0,
     beta: float = 1.0,
     b_block: int = 8,

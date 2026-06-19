@@ -33,7 +33,7 @@ import jax.numpy as jnp
 
 @dataclasses.dataclass(frozen=True)
 class AdjointConfig:
-    flow_steps: int = 4          # SDE steps for the adjoint unroll (cost driver)
+    flow_steps: int = 10         # SDE steps for the adjoint unroll (matches pi05 sample_actions / QAM)
     inv_temp: float = 1.0        # reward-gradient strength (1/KL-temperature)
     residual: bool = False       # False: v_fast is the full field (LoRA); True: v_fast is a residual
 
