@@ -2,8 +2,7 @@
 
 Extracted so it can be reused by:
   * scripts/convert_collision_am_to_lerobot.py  (obstacle-point prep)
-  * scripts/relabel_actions_smooth.py           (offline smooth relabel — deprecated)
-  * the ONLINE action-chunk perturbation used during training (train-time relabel)
+  * the ONLINE action-chunk perturbation used during training (online_relabel.py)
 
 The optimization (`smooth_push`) is identical to the offline smooth relabel: at the
 spheres in contact, push their clearance out to a depth-scaled target, while keeping

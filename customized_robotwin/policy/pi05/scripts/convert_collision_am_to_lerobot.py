@@ -36,10 +36,8 @@ import numpy as np
 import tqdm
 from lerobot.common.datasets.lerobot_dataset import HF_LEROBOT_HOME, LeRobotDataset
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-from relabel_actions_jax import load_obstacle_points, prefilter_points, voxel_downsample  # noqa: E402
-
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+from openpi.training.collision_relabel import load_obstacle_points, prefilter_points, voxel_downsample  # noqa: E402
 from openpi.training.collision_fk import make_sphere_fn  # noqa: E402
 
 CAM_MAP = {"head_camera": "cam_high", "left_camera": "cam_left_wrist", "right_camera": "cam_right_wrist"}
@@ -81,9 +79,11 @@ def episode_obstacle_points(ep_path: Path, scene_root: Path, sphere_fn, margin, 
         return pad_or_subsample(np.empty((0, 3), np.float32), M, rng)
     P = load_obstacle_points(scene_dir, {"target", "container", "furniture", "skipped"})
     if len(P):
-        centers0 = np.asarray(sphere_fn(jnp.asarray(q0)))
-        buffer = float(0.30 + margin)
-        P = prefilter_points(P, centers0, buffer)
+        # Keep the FULL clutter scene at 2cm voxel — no trajectory-proximity pruning.
+        # The AM reward scores the policy's GENERATED future action chunks, which can
+        # leave the recorded swept volume, so it needs the complete scene geometry — not
+        # just points near the recorded path. M=4096 holds every scene losslessly
+        # (global max ~3642 voxel points across all seeds), so we never subsample.
         P = voxel_downsample(P, 0.02)
     return pad_or_subsample(P, M, rng)
 
@@ -94,6 +94,8 @@ def load_demo(ep_path: Path):
         raw = f.attrs.get("instruction", b"")
         instr = raw.decode("utf-8") if isinstance(raw, (bytes, np.bytes_)) else str(raw)
         success = bool(f.attrs.get("success", False))
+        contact = (np.asarray(f["collision_per_step"][:]).astype(np.float32)
+                   if "collision_per_step" in f else np.zeros(len(state), np.float32))
         images = {}
         for hcam, lcam in CAM_MAP.items():
             key = f"observation/{hcam}/rgb"
@@ -105,7 +107,7 @@ def load_demo(ep_path: Path):
                     img = cv2.resize(img, (640, 480)) if img is not None else np.zeros((480, 640, 3), np.uint8)
                     frames.append(img)
                 images[lcam] = frames
-    return state, images, instr, success
+    return state, images, instr, success, contact
 
 
 def create_empty_dataset(repo_id: str, fps: int, M: int) -> LeRobotDataset:
@@ -117,6 +119,7 @@ def create_empty_dataset(repo_id: str, fps: int, M: int) -> LeRobotDataset:
         "observation.state": {"dtype": "float32", "shape": (len(MOTORS),), "names": [MOTORS]},
         "action": {"dtype": "float32", "shape": (len(MOTORS),), "names": [MOTORS]},
         "obstacle_points": {"dtype": "float32", "shape": (M * 3,), "names": None},
+        "collision_per_step": {"dtype": "float32", "shape": (1,), "names": None},
     }
     for lcam in CAM_MAP.values():
         features[f"observation.images.{lcam}"] = {
@@ -130,13 +133,15 @@ def main():
     ap.add_argument("--root", type=Path, required=True)
     ap.add_argument("--repo-id", type=str, required=True)
     ap.add_argument("--source", default="pi05_rollout")
-    ap.add_argument("--M", type=int, default=512, help="obstacle points per episode (pad/subsample)")
+    ap.add_argument("--M", type=int, default=4096,
+                    help="obstacle points per episode: full clutter scene at 2cm voxel (global max ~3642), pad if fewer")
     ap.add_argument("--margin", type=float, default=0.03)
     ap.add_argument("--fps", type=int, default=50)
     ap.add_argument("--tasks", nargs="*", default=None)
     ap.add_argument("--wrong-grasp-json", type=str, default=None,
                     help="JSON {'wrong_grasp':[{task,seed},...]} to exclude (default: built-in list)")
-    ap.add_argument("--require-success", action="store_true")
+    ap.add_argument("--require-success", action=argparse.BooleanOptionalAction, default=True,
+                    help="keep only success episodes (default ON; --no-require-success to include failures)")
     ap.add_argument("--limit", type=int, default=0)
     args = ap.parse_args()
 
@@ -162,7 +167,7 @@ def main():
             if (task, seed) in exclude:
                 n_skip += 1
                 continue
-            state, images, instr, success = load_demo(ep)
+            state, images, instr, success, contact = load_demo(ep)
             if (args.require_success and not success) or len(state) < 2:
                 n_skip += 1
                 continue
@@ -173,6 +178,7 @@ def main():
                     "observation.state": state[t],
                     "action": actions[t],
                     "obstacle_points": pts,            # same per-episode points each frame
+                    "collision_per_step": contact[t:t + 1],   # recorded per-step contact (online-relabel gate)
                     "task": instr,
                 }
                 for lcam, frames in images.items():
