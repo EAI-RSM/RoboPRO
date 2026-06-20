@@ -84,7 +84,7 @@ class AlohaInputs(transforms.DataTransformFn):
         if "prompt" in data:
             inputs["prompt"] = data["prompt"]
 
-        for key in ("advantage", "advantage_indicator", "action_mask", "obstacle_points"):
+        for key in ("advantage", "advantage_indicator", "action_mask", "obstacle_points", "collision_per_step"):
             if key in data:
                 inputs[key] = data[key]
 

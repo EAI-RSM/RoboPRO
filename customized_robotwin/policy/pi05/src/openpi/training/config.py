@@ -660,7 +660,7 @@ _CONFIGS = [
         name="pi05_aloha_adjoint",
         model=pi0_config.Pi0Config(pi05=True, action_expert_variant="gemma_300m_lora"),
         data=LeRobotAlohaDataConfig(
-            repo_id="local/kitchenl_d15_am",            # built by convert_collision_am_to_lerobot.py
+            repo_id="local/da3_collision_am_succ",      # QAM dataset (built by convert_collision_am_to_lerobot.py)
             # obstacle_points is a PER-FRAME feature (not windowed) -> NOT in action_sequence_keys.
             repack_transforms=_transforms.Group(inputs=[
                 _transforms.RepackTransform({
@@ -673,6 +673,41 @@ _CONFIGS = [
                     "actions": "action",
                     "prompt": "prompt",
                     "obstacle_points": "obstacle_points",   # preserved -> AlohaInputs passthrough -> batch
+                })
+            ]),
+            base_config=DataConfig(prompt_from_task=True),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader(
+            "gs://openpi-assets/checkpoints/pi05_base/params"  # replace with your base ckpt
+        ),
+        num_train_steps=30_000,
+        batch_size=32,
+        fsdp_devices=1,
+    ),
+    # pi05 ONLINE-RELABEL collision-aware BC (train_online_relabel.py): standard pi05
+    # flow-matching BC, but each step the action-chunk TARGET is perturbed online via the
+    # contact-gated smooth push (online_relabel.make_online_perturb) when the conditioning
+    # frame is collision-free. Observations are never modified — only the target chunk is
+    # corrected. Dataset = da3_collision_am_succ (obstacle_points + windowed recorded
+    # collision_per_step: gate at chunk step 0, active at recorded-contact steps).
+    TrainConfig(
+        name="pi05_aloha_online_relabel",
+        model=pi0_config.Pi0Config(pi05=True),
+        data=LeRobotAlohaDataConfig(
+            repo_id="local/da3_collision_am_succ",
+            action_sequence_keys=("action", "collision_per_step"),   # window contact with the chunk
+            repack_transforms=_transforms.Group(inputs=[
+                _transforms.RepackTransform({
+                    "images": {
+                        "cam_high": "observation.images.cam_high",
+                        "cam_left_wrist": "observation.images.cam_left_wrist",
+                        "cam_right_wrist": "observation.images.cam_right_wrist",
+                    },
+                    "state": "observation.state",
+                    "actions": "action",
+                    "prompt": "prompt",
+                    "obstacle_points": "obstacle_points",
+                    "collision_per_step": "collision_per_step",
                 })
             ]),
             base_config=DataConfig(prompt_from_task=True),

@@ -147,3 +147,64 @@ def create_adjoint_data_loader(
     )
     raw_loader = _AdjointRawLoader(torch_loader, sharding=sharding, num_batches=num_batches)
     return AdjointDataLoaderImpl(data_config, raw_loader)
+
+
+class OnlineRelabelDataLoaderImpl(_data_loader.DataLoader):
+    """Yields ``(Observation, actions, obstacle_points[B,M,3], contact_chunk[B,H])``.
+
+    Same dataset/loader as adjoint, plus the windowed recorded ``collision_per_step``
+    (the train-time perturbation gate + active-step mask).
+    """
+
+    def __init__(self, data_config: _config.DataConfig, raw_loader: _AdjointRawLoader):
+        self._data_config = data_config
+        self._raw = raw_loader
+
+    def data_config(self) -> _config.DataConfig:
+        return self._data_config
+
+    def __iter__(self) -> Iterator[tuple]:
+        for batch in self._raw:
+            obs = _model.Observation.from_dict(batch)
+            actions = batch["actions"]
+            B = actions.shape[0]
+            pts = batch["obstacle_points"].reshape(B, -1, 3)      # [B,M,3]
+            contact = batch["collision_per_step"].reshape(B, -1)  # [B,H] windowed recorded contact
+            yield obs, actions, pts, contact
+
+
+def create_online_relabel_data_loader(
+    config: _config.TrainConfig,
+    *,
+    sharding: jax.sharding.Sharding | None = None,
+    shuffle: bool = False,
+    num_batches: int | None = None,
+    num_workers: int = 0,
+    seed: int = 0,
+) -> OnlineRelabelDataLoaderImpl:
+    data_config = config.data.create(config.assets_dirs, config.model)
+    if jax.process_count() > 1:
+        raise NotImplementedError("Multi-process data loading is not supported.")
+    local_batch_size = config.batch_size // jax.process_count()
+    dataset = create_adjoint_torch_dataset(data_config, config.model.action_horizon, config.model)
+    if sharding is None:
+        sharding = jax.sharding.NamedSharding(
+            jax.sharding.Mesh(jax.devices(), ("B",)), jax.sharding.PartitionSpec("B")
+        )
+    mp_context = multiprocessing.get_context("spawn") if num_workers > 0 else None
+    generator = torch.Generator()
+    generator.manual_seed(seed)
+    torch_loader = torch.utils.data.DataLoader(
+        typing.cast(torch.utils.data.Dataset, dataset),
+        batch_size=local_batch_size,
+        shuffle=shuffle,
+        num_workers=num_workers,
+        multiprocessing_context=mp_context,
+        persistent_workers=num_workers > 0,
+        collate_fn=_data_loader._collate_fn,
+        worker_init_fn=_data_loader._worker_init_fn,
+        drop_last=True,
+        generator=generator,
+    )
+    raw_loader = _AdjointRawLoader(torch_loader, sharding=sharding, num_batches=num_batches)
+    return OnlineRelabelDataLoaderImpl(data_config, raw_loader)
