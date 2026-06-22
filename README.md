@@ -206,6 +206,9 @@ Drop-in YAMLs under `benchmark/bench_task_config/`:
 | `bench_demo_vision_blur.yml` | Blur only |
 | `bench_demo_vision_shake.yml` | Pixel shake only |
 | `bench_demo_object.yml` | Target texture swap + unseen obstacles + background_plus |
+| `bench_compositional_object_d{6,10,15}.yml` | OOD obstacles + OOD targets |
+| `bench_compositional_object_vision_d{6,10,15}.yml` | OOD objects + vision (lighting, blur, pixel shake) |
+| `bench_compositional_full_d{6,10,15}.yml` | All axes: OOD objects + vision + background randomization |
 
 See the YAMLs in `benchmark/bench_task_config/` for parameter-level details, and `docs/videos/` (`vision*.mp4`, `language.mp4`, `object.mp4`) for sample outputs.
 
