@@ -59,8 +59,8 @@ define RUN_IN_CUSTOMIZED
 	$(1)
 endef
 
-.PHONY: help bootstrap sync download-assets link-assets configure-curobo-assets \
-	patch-curobo-config render-test verify-scene verify-rollout collect-data \
+.PHONY: help check-prereqs bootstrap sync download-assets link-assets configure-curobo-assets \
+	patch-curobo-config setup render-test verify-scene verify-rollout collect-data \
 	precollect-seeds eval-direct eval-client policy-server eval-pi05-single eval-pi05-double \
 	collect-rollout-pi05 diag-kitchen-curobo show-config
 
@@ -69,6 +69,7 @@ help:
 	'RoboPRO Make targets' \
 	'' \
 	'Install / setup:' \
+	'  make check-prereqs            Verify system tools (uv, nvcc, ffmpeg, etc.).' \
 	'  make bootstrap                Create/sync .venv via uv and run post-install patches.' \
 	'    Vars: PYTHON_VERSION=3.10' \
 	'  make download-assets          Download benchmark bundles.' \
@@ -77,6 +78,7 @@ help:
 	'  make configure-curobo-assets  Render curobo_{left,right}.yml from curobo_*_tmp.yml' \
 	'    Vars: ASSETS_PATH=$(ASSETS_PATH)' \
 	'  make patch-curobo-config      Run scripts/install/patch_aloha_curobo.py' \
+	'  make setup                    Run link-assets + configure-curobo-assets + patch-curobo-config.' \
 	'' \
 	'Smoke tests:' \
 	'  make render-test              Minimal Sapien renderer smoke test.' \
@@ -122,6 +124,20 @@ show-config:
 	"POLICY_NAME=$(POLICY_NAME)" \
 	"POLICY_CONFIG=$(POLICY_CONFIG)"
 
+check-prereqs:
+	@missing=""
+	@command -v uv     >/dev/null 2>&1 || missing="$$missing uv"
+	@command -v git    >/dev/null 2>&1 || missing="$$missing git"
+	@command -v nvcc   >/dev/null 2>&1 || missing="$$missing nvcc"
+	@command -v ffmpeg >/dev/null 2>&1 || missing="$$missing ffmpeg"
+	@if [ -n "$$missing" ]; then \
+		printf 'Missing required tools:%s\n' "$$missing" >&2; \
+		printf '  nvcc   → sudo apt install nvidia-cuda-toolkit\n' >&2; \
+		printf '  ffmpeg → sudo apt install ffmpeg\n' >&2; \
+		exit 1; \
+	fi
+	@printf 'All prerequisites found.\n'
+
 bootstrap:
 	PYTHON_VERSION="$(PYTHON_VERSION)" bash "$(ROOT_DIR)/scripts/install/bootstrap_uv.sh"
 
@@ -154,12 +170,14 @@ link-assets:
 
 configure-curobo-assets:
 	cd "$(ROOT_DIR)/benchmark/assets/embodiments/aloha-agilex"
-	ASSETS_PATH="$(ASSETS_PATH)" "$(PYTHON)" -c 'from pathlib import Path; import os; assets_path = os.environ["ASSETS_PATH"]; [Path(f"curobo_{side}.yml").write_text(Path(f"curobo_{side}_tmp.yml").read_text(encoding="utf-8").replace("${ASSETS_PATH}", assets_path), encoding="utf-8") for side in ("left", "right")]'
+	ASSETS_PATH="$(ASSETS_PATH)" "$(PYTHON)" -c 'from pathlib import Path; import os; assets_path = os.environ["ASSETS_PATH"]; [Path(f"curobo_{side}.yml").write_text(Path(f"curobo_{side}_tmp.yml").read_text(encoding="utf-8").replace("$${ASSETS_PATH}", assets_path), encoding="utf-8") for side in ("left", "right")]'
 	printf 'generated curobo_left.yml and curobo_right.yml with ASSETS_PATH=$(ASSETS_PATH)\n'
 
 patch-curobo-config:
 	cd "$(ROOT_DIR)"
 	"$(PYTHON)" scripts/install/patch_aloha_curobo.py
+
+setup: link-assets configure-curobo-assets patch-curobo-config
 
 render-test:
 	$(call RUN_IN_CUSTOMIZED,$(PYTHON) script/test_render.py)
