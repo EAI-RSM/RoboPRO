@@ -98,7 +98,7 @@ objects:
 object_ood:
   office:
     targets:
-      077_phone: [4]
+      077_phone: [3]
       046_alarm-clock: [5]
       101_milk-tea: [5]
       061_battery: [5]
@@ -117,7 +117,6 @@ object_ood:
         029_olive-oil: [0,1,2,3]
         038_milk-box: [0,1,2]
         080_pillbottle: [1,2,3,4]
-        120_plant: [0]
   study:
     targets:
       021_cup: [5]
@@ -131,8 +130,17 @@ object_ood:
         057_toycar: [5]
         080_pillbottle: [5]
         108_block: [5]
+        031_jam-jar: [0,1,2,3,4]
+        092_notebook: [0,1,2]
+        068_boxdrink: [0,1,2]
+        073_rubikscube: [0,1,2]
+        055_small-speaker: [1,2,3]
       tall:
         001_bottle: [9,8,17,6]
+        029_olive-oil: [0,1,2,3]
+        038_milk-box: [0,1,2]
+        089_globe: [2,3]
+        099_fan: [0,4]
   kitchens:
     targets:
       006_hamburg: [3]
@@ -143,6 +151,16 @@ object_ood:
         065_soy-sauce: [4]
         088_wineglass: [4]
         091_kettle: [5]
+        031_jam-jar: [0,1,2,3,4]
+        107_soap: [0,1,2,3]
+        025_chips-tub: [0,1,2]
+        028_roll-paper: [1,3]
+      tall:
+        064_msg: [0,1,2,3,4]
+        108_block: [1,2,3]
+        080_pillbottle: [1,2,3,4]
+        038_milk-box: [0,1,2]
+        090_trophy: [0,1,2]
   kitchenl:
     targets:
       001_bottle: [21]
@@ -156,9 +174,17 @@ object_ood:
         064_msg: [5]
         069_vagetable: [6]
         112_tea-box: [5]
+        072_electronicscale: [0,1,6]
+        094_rest: [0,1,2,3]
+        023_tissue-box: [5,6]
+        080_pillbottle: [1,2,3,4]
       tall:
         029_olive-oil: [4]
         091_kettle: [5]
+        090_trophy: [0,1,2]
+        088_wineglass: [0,1,2,3]
+        066_vinegar: [0,1,2]
+        012_plant-pot: [0,2,3]
 
 scales:
   001_bottle:
