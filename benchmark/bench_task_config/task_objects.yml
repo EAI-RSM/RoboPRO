@@ -159,7 +159,6 @@ object_ood:
         064_msg: [0,1,2,3,4]
         080_pillbottle: [1,2,3,4]
         038_milk-box: [0,1,2]
-        069_vagetable: [3,6]
         001_bottle: [1,11,14,16]
   kitchenl:
     targets:
