@@ -39,14 +39,13 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 SCRIPT_DIR = Path(__file__).resolve().parent
-REPO_ROOT = SCRIPT_DIR.parents[2]
+REPO_ROOT = SCRIPT_DIR  # this script lives at the repo root
 RUN_EPISODE = SCRIPT_DIR / "run_targeted_episode.py"
 
-# Flat import of the registry/sampler modules — avoids pulling the sim-heavy
-# bench_envs package into the orchestrator process.
-sys.path.insert(0, str(REPO_ROOT / "benchmark" / "bench_envs" / "targeted"))
-import registry  # noqa: E402
-from sampler import sample_shift_params  # noqa: E402
+# robo_negative is an installed editable package (the single-file PoC library);
+# importing it does not pull in the sim-heavy bench_envs (sapien is lazy there).
+import robo_negative as registry  # was registry + sampler + ...
+from robo_negative import sample_shift_params
 
 _INDEX_LOCK = threading.Lock()
 

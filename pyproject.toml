@@ -1,54 +1,56 @@
 [project]
 name = "robopro"
 version = "0.1.0"
-description = "Perturbation-Resilient Obstacle-awareness — bimanual manipulation policy robustness benchmark"
-requires-python = ">=3.10,<3.11"
+description = "RoboPRO — bimanual manipulation robustness benchmark. The repo-root .venv is the single inclusive env (py3.11/torch2.6): sim + pi05/openpi + robo_negative. Self-contained — does not rely on policy/pi05's own env config."
+requires-python = ">=3.11"
 dependencies = [
-    # Core sim stack
-    "torch==2.4.1",
-    "torchvision==0.19.1",
-    "sapien==3.0.0b1",
-    "mplib==0.2.1",
-    "gymnasium==0.29.1",
-    "transforms3d==0.4.2",
-    "scipy==1.10.1",
-    # Motion planning
+    # openpi (editable path dep) brings jax + the openpi sim core (sapien, mplib,
+    # trimesh, open3d, gymnasium, ...) + lerobot/transformers/torch.
+    "openpi",
+    # the targeted negative-data library.
+    "robo-negative",
+    # compiled sim stack + extras NOT in openpi's own deps (added here so the root
+    # env is inclusive without depending on policy/pi05's pyproject content).
     "nvidia-curobo",
-    "warp-lang==1.12.0",
-    # 3D / vision
     "pytorch3d",
-    "trimesh==4.4.3",
-    "open3d==0.18.0",
-    "imageio==2.34.2",
-    "imageio-ffmpeg",
-    "av",
-    "matplotlib",
-    "moviepy",
-    # Storage
-    "h5py",
-    "zarr",
-    # ML / HF / logging
-    "huggingface-hub==0.25.0",
-    "wandb",
-    "openai",
-    "azure==4.0.0",
-    "azure-ai-inference",
-    "pydantic",
-    "termcolor",
-    "pyglet<2",
-    # Build/runtime shims
-    "setuptools==69.5.1",
-    "tomli",
+    "warp-lang==1.12.0",
+    "fvcore",
+    "iopath",
+    "transforms3d==0.4.2",
+    # build tooling for the no-build-isolation compiled packages.
+    "setuptools",
+    "setuptools-scm",
+    "wheel",
+    "ninja",
+]
+
+[dependency-groups]
+# dev / notebook tooling for the consolidated env (a path-dep's own dev group is
+# not pulled in, so list what the demo notebook + dev workflow need here).
+dev = [
+    "ipykernel>=6.29.5",
+    "ipywidgets>=8.1.5",
+    "nbconvert>=7.16",
+    "matplotlib>=3.10.0",
+    "pandas",
+    "pytest>=8.3.4",
+    "ruff>=0.8.6",
+    "pynvml>=12.0.0",
 ]
 
 [tool.uv]
 package = false
+# pytorch3d + CuRobo compile CUDA extensions against the env's torch (needs a CUDA
+# toolkit at sync time). After `uv sync`, re-apply the sapien/mplib in-place patches
+# + the .venv/bin/ffmpeg symlink (see CLAUDE.md install gotchas).
 no-build-isolation-package = ["pytorch3d", "nvidia-curobo"]
 
+# NOT a uv workspace: openpi/openpi-client are consumed as editable PATH deps so
+# policy/pi05 keeps its own (dev-state) pyproject untouched.
 [tool.uv.sources]
-pytorch3d = { git = "https://github.com/facebookresearch/pytorch3d.git", rev = "stable" }
+openpi = { path = "customized_robotwin/policy/pi05", editable = true }
+openpi-client = { path = "customized_robotwin/policy/pi05/packages/openpi-client", editable = true }
+robo-negative = { path = "robo_negative", editable = true }
 nvidia-curobo = { path = "customized_robotwin/envs/curobo", editable = true }
-
-[tool.uv.extra-build-dependencies]
-pytorch3d = ["torch==2.4.1", "wheel", "ninja", "setuptools"]
-nvidia-curobo = ["torch==2.4.1", "wheel", "tomli", "setuptools==69.5.1", "setuptools-scm"]
+pytorch3d = { git = "https://github.com/facebookresearch/pytorch3d.git", rev = "75ebeeaea0908c5527e7b1e305fbc7681382db47" }
+lerobot = { git = "https://github.com/huggingface/lerobot", rev = "a445d9c9da6bea99a8972daa4fe1fdd053d711d2" }

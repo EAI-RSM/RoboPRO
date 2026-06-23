@@ -11,7 +11,36 @@ RoboPRO is a bimanual manipulation robustness benchmark built on top of a forked
 - `scripts/` — install helpers (`install/download_assets.py`, `install/patch_aloha_curobo.py`), SLURM batch wrappers (`slurm/slurm_eval_bench.sh`), and upload tools.
 - `docs/` — static project page; not runtime code.
 
+## Negative-data collection (targeted desync)
+
+Failure/success **twin-pair** data — the planner plans against a virtual scene while the
+physical scene is edited by one controlled amount, so failures are causally labeled by
+construction — the importable library is the **`robo_negative/`** package (uv workspace member,
+installed editable); the planner hooks live in `benchmark/bench_envs/_bench_base_task.py`; and the
+runner/orchestrator/viewer are **root-level scripts** (`run_targeted_episode.py`,
+`collect_targeted_data.py`, `visualize_negative_data.py`). **All of the idea's
+documentation — design, the operational contract (mechanism, invariants, how to extend), the
+annotation spec, schema, and the PoC showcase — now lives in the **root notebook
+`negative_data_demo.ipynb`**, which is also self-running (its Collect cell regenerates the
+artifacts into `negative_data_demo/`). Read it before touching any of it.**
+(The former `.claude/negative_data_collection.md`, `negative_data_brainstorming.md`,
+`TARGETED_NEGATIVE_DATA.md`, and `failure_annotation.md` were consolidated into that notebook.)
+
 ## Environment activation (read before running anything)
+
+**Single env = the repo-root `.venv` (consolidated 2026-06).** Everything — the
+simulator stack (sapien, mplib, CuRobo, pytorch3d, warp), the pi05/openpi stack (jax,
+torch 2.6), and the `robo_negative` negative-data library — lives in **one uv venv at
+the repo root: `.venv` (Python 3.11)**, fully described by the root
+`pyproject.toml`/`uv.lock`. It is **self-contained, NOT a uv workspace**: `openpi` and
+`openpi-client` are editable **path** dependencies and the compiled sim stack is
+declared directly at the root, so `customized_robotwin/policy/pi05` keeps its own
+(separate, unused) env config. Build/repair with **`uv sync` from the repo root** (set
+`CUDA_HOME` for the compiled CuRobo/pytorch3d builds; then re-apply the sapien/mplib
+in-place patches + the `.venv/bin/ffmpeg` symlink — see the install gotchas below).
+Run with `.venv/bin/python ...` (or `uv run`) from the repo root; a Jupyter kernel
+`robopro-root` points at it. The old conda env and the earlier `policy/pi05/.venv`
+have been **removed** (`uv sync`/`uv run` at root are no-ops that keep the sim stack).
 
 Every command must run with both env vars exported:
 
@@ -38,13 +67,18 @@ python script/bench_script/visualize_task_scene.py \
 # Collect demonstrations
 bash collect_data.sh <task_name> <task_config> <gpu_id>
 
-# Eval — single-env (policy + sim in one conda env)
-bash policy/pi05/eval.sh <task> <task_config> <train_config> <model_name> <seed> <gpu_id>
+# Eval — single-process (policy + sim in the ONE consolidated venv; preferred post-consolidation)
+#   run with the venv python; set a low XLA mem fraction so jax + sapien/curobo share the GPU.
+XLA_PYTHON_CLIENT_MEM_FRACTION=0.4 \
+  /path/to/repo/.venv/bin/python script/eval_policy.py --config policy/pi05/deploy_policy.yml \
+    --overrides --task_name <task> --task_config <config> --train_config_name <train> \
+    --model_name <model> --checkpoint_id <id> --ckpt_setting "<train>_<model>_<id>" \
+    --policy_name pi05 --seed 0 --instruction_type seen --test_num 10
 
-# Eval — dual-env (recommended for pi05: openpi+jax in uv venv at policy/pi05/.venv/)
+# Eval — dual-env over a socket (legacy; only needed if you deliberately split sim/policy GPUs)
 bash policy/pi05/eval_double_env.sh <task> <task_config> <train_config> <model_name> <ckpt_id> <seed> <server_gpu>[:<client_gpu>]
 
-# Direct eval invocation (bypass wrapper)
+# Direct eval invocation (same as above, generic interpreter)
 python script/eval_policy.py --config policy/pi05/deploy_policy.yml \
     --overrides --task_name <task> --task_config <config> \
     --train_config_name <train> --model_name <model> --checkpoint_id <id> \
@@ -67,8 +101,9 @@ These are easy to break and worth re-checking if rollouts blow up:
    ```
 2. **Aloha CuRobo configs** — `benchmark/assets/embodiments/aloha-agilex/curobo_{left,right}_tmp.yml` are templates with `${ASSETS_PATH}` placeholders. Generate the real ones, then run `scripts/install/patch_aloha_curobo.py` to inject the `attached_object` link entries (CuRobo needs these to attach grasped objects).
 3. **CuRobo `clear_cache` patch** — `customized_robotwin/envs/curobo/src/curobo/geom/sdf/world_mesh.py` requires a manual edit to `clear_cache` (see README "CuRobo cache patch"). Without it, repeated rollouts leak mesh state.
-4. **`script/_install.sh` patches sapien and mplib in-place** via `sed`, and installs CuRobo editable into `customized_robotwin/envs/curobo/`. Don't reinstall sapien/mplib without re-running this.
-5. **`PYTHONNOUSERSITE=1`** on the conda env — otherwise sapien/torch may resolve from `~/.local/lib` instead of the env.
+4. **sapien & mplib in-place patches** — small `sed` edits to `sapien/wrapper/urdf_loader.py` (utf-8 + `.srdf` ext) and `mplib/planner.py` (drop the over-eager `or collide` screw-plan abort). `uv sync` does NOT re-apply them, so after any sapien/mplib (re)install re-run the two `sed` edits **and** re-create the `.venv/bin/ffmpeg` symlink → `python -c "import imageio_ffmpeg;print(imageio_ffmpeg.get_ffmpeg_exe())"` (eval shells out to a bare `ffmpeg`). (Legacy conda path: `script/_install.sh`.)
+5. **`PYTHONNOUSERSITE=1`** — set it when running so sapien/torch don't resolve from `~/.local/lib` instead of the venv.
+6. **CuRobo + pytorch3d compiled extensions** in the uv env are built against torch 2.6 / py3.11 by `uv sync` with `CUDA_HOME` set (`TORCH_CUDA_ARCH_LIST=9.0` for H100; `no-build-isolation-package` in the root pyproject). The aloha CuRobo configs (`benchmark/assets/embodiments/aloha-agilex/curobo_{left,right}.yml`) bake an absolute repo path — re-point `urdf_path`/`collision_spheres` if the repo moves.
 
 ## Task configs
 
@@ -92,7 +127,7 @@ Configs in `benchmark/bench_task_config/` follow a strict naming convention used
 
 ## Policy adapters
 
-`policy/` mirrors upstream RoboTwin adapter layout (`ACT`, `DP`, `DP3`, `RDT`, `pi0`, `pi05`, etc.). Each adapter exposes `get_model(...)` and is imported by name through `eval_function_decorator()` in `script/eval_policy.py`. The pi05 adapter is special-cased because openpi+jax need their own uv-managed venv at `policy/pi05/.venv/` — that's why `eval_double_env.sh` exists, spawning `script/policy_model_server.py` in the pi05 venv and talking to `script/eval_policy_client.py` (running in the conda env) over a socket.
+`policy/` mirrors upstream RoboTwin adapter layout (`ACT`, `DP`, `DP3`, `RDT`, `pi0`, `pi05`, etc.). Each adapter exposes `get_model(...)` and is imported by name through `eval_function_decorator()` in `script/eval_policy.py`. Historically pi05 needed its own uv venv (openpi+jax) separate from the conda sim env, so `eval_double_env.sh` ran `script/policy_model_server.py` in the venv and talked to `script/eval_policy_client.py` (conda) over a socket. **Post-consolidation that split is no longer required** — the repo-root `.venv` (uv workspace) holds both stacks, so `eval_policy.py` runs the policy and sim in **one process** (see the single-process eval command above). The dual-env script remains only as an option for deliberately splitting sim/policy across separate GPUs.
 
 ## Output locations
 

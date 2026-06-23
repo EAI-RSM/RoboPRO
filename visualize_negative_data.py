@@ -1,13 +1,13 @@
 """Visualize negative-data demo episodes with their annotations as an HTML gallery.
 
 Scans a data root for `episode.json` + rollout video, computes the annotation
-(WHAT flag-set / WHY / quality, per failure_annotation.md) offline from the
+(WHAT flag-set / WHY / quality, per the demo.ipynb notebook spec) offline from the
 recorded signals, and writes a self-contained `index.html` that embeds each demo
 video next to its annotation, grouping twins (baseline vs perturbed) side by side.
 
 No sim imports. Run:
     python customized_robotwin/script/bench_script/visualize_negative_data.py \
-        [--root customized_robotwin/data/negative_data_demo] [--out path.html]
+        [--root <repo>/negative_data_demo] [--out path.html]
 
 Serving / viewing the gallery
 -----------------------------
@@ -19,7 +19,7 @@ Local machine:
 
 Remote node (this repo runs on the cluster, e.g. london-2-embody-ai-node-8):
     # 1) on the node, start a static server rooted at the demo dir:
-    cd customized_robotwin/data/negative_data_demo
+    cd negative_data_demo
     python -m http.server 8011 --bind 0.0.0.0    # all interfaces, for the tunnel
     # 2) on your laptop, forward the port over SSH:
     ssh -L 8011:localhost:8011 <user>@<node-host>
@@ -36,17 +36,13 @@ import os
 import sys
 from pathlib import Path
 
-# Offline metrics live in the targeted package; import flat (avoid the sim-heavy
-# bench_envs __init__), like test_targeted.py. Charts are skipped if unavailable.
-sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "benchmark" / "bench_envs" / "targeted"))
+# robo_negative is an installed editable package providing both the annotation and
+# the offline metrics (sapien is imported lazily there, so no sim is needed here).
 try:
-    import labels  # type: ignore   # annotation: WHAT flag-set / WHY / quality
+    import robo_negative  # type: ignore
+    labels = metrics = robo_negative
 except Exception:  # noqa: BLE001
-    labels = None
-try:
-    import metrics  # type: ignore  # offline progress metrics (charts)
-except Exception:  # noqa: BLE001
-    metrics = None
+    labels = metrics = None
 
 # The annotation (WHAT flag-set / WHY / quality) comes from labels.annotate;
 # these are just display colors.
@@ -203,8 +199,8 @@ def card_html(root: Path, ep_dir: Path, ep: dict, d: dict, ep_id: str, cd) -> st
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
-    here = Path(__file__).resolve().parents[2]  # .../customized_robotwin
-    ap.add_argument("--root", default=str(here / "data" / "negative_data_demo"))
+    here = Path(__file__).resolve().parent  # repo root (this script lives here)
+    ap.add_argument("--root", default=str(here / "negative_data_demo"))
     ap.add_argument("--out", default=None, help="output html (default: <root>/index.html)")
     args = ap.parse_args()
 
@@ -274,8 +270,8 @@ def main():
              f'<style>{css}</style></head><body>',
              '<h1>Negative-data demo — annotated</h1>',
              '<p>Twin-pair desync episodes. WHAT (symptom, from sim) · WHY (cause, known by '
-             'construction) · quality — derived from the recorded labels per '
-             '<code>failure_annotation.md</code>. Under each video, two graphs (computed '
+             'construction) · quality — derived from the recorded labels (annotation '
+             'spec lives in the demo.ipynb notebook). Under each video, two graphs (computed '
              'offline from logged per-frame state, animated in sync with playback): '
              '<b>task progress</b> 0–100% (object→destination), and <b>safety</b> 0–1 '
              '(1 = clear; dips as the end-effector nears non-target objects or moves fast).</p>',
