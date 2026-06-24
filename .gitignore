@@ -72,3 +72,6 @@ benchmark_data/*
 benchmark/collision_test/
 benchmark/bench_script/collision_test/
 presentation_material/
+
+tmp/
+usecase_roadmap.tex

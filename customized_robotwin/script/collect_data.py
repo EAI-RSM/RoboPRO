@@ -248,6 +248,12 @@ def run(TASK_ENV, args):
             print(f"\033[34mTask name: {args['task_name']}\033[0m")
 
             TASK_ENV.setup_demo(now_ep_num=episode_idx, seed=seed_list[episode_idx], **args)
+            if hasattr(TASK_ENV, "set_benchmark_export_context"):
+                TASK_ENV.set_benchmark_export_context(
+                    task_config=args["task_config"],
+                    config_snapshot=args,
+                    bench_subdir=None,
+                )
             if hasattr(TASK_ENV, "_maybe_apply_language_perturbation"):
                 TASK_ENV._maybe_apply_language_perturbation()
 
@@ -268,6 +274,8 @@ def run(TASK_ENV, args):
             info = TASK_ENV.play_once()
             if info is None:
                 info = getattr(TASK_ENV, "info", None) or {}
+            if hasattr(TASK_ENV, "build_benchmark_episode_record"):
+                info = TASK_ENV.build_benchmark_episode_record(success=TASK_ENV.check_success())
             info_db[f"episode_{episode_idx}"] = info
 
             with open(info_file_path, "w", encoding="utf-8") as file:

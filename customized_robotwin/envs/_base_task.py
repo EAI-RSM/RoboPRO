@@ -1,5 +1,6 @@
 import os
 import re
+from datetime import datetime, timezone
 import sapien.core as sapien
 from sapien.render import clear_cache as sapien_clear_cache
 from sapien.utils.viewer import Viewer
@@ -24,6 +25,7 @@ from pathlib import Path
 import trimesh
 import imageio
 import glob
+import h5py
 
 
 from ._GLOBAL_CONFIGS import *
@@ -35,9 +37,22 @@ parent_directory = os.path.dirname(current_file_path)
 
 
 class Base_Task(gym.Env):
+    BENCHMARK_SCHEMA_NAME = "robopro_benchmark_support"
+    BENCHMARK_SCHEMA_VERSION = "1.0.0"
+    BENCHMARK_EXPORTER_NAME = "robopro_benchmark_export"
 
     def __init__(self):
         pass
+
+    def _ensure_benchmark_export_state(self):
+        if not hasattr(self, "_benchmark_export_context"):
+            self._benchmark_export_context = {}
+        if not hasattr(self, "_benchmark_episode_record"):
+            self._benchmark_episode_record = None
+        if not hasattr(self, "_benchmark_object_catalog_cache"):
+            self._benchmark_object_catalog_cache = None
+        if not hasattr(self, "_benchmark_contact_event_log"):
+            self._benchmark_contact_event_log = []
 
     # =========================================================== Init Task Env ===========================================================
     def _init_task_env_(self, table_xy_bias=[0, 0], table_height_bias=0, **kwags):
@@ -158,6 +173,703 @@ class Base_Task(gym.Env):
         self.info["info"] = {}
 
         self.stage_success_tag = False
+        self._benchmark_export_context = {}
+        self._benchmark_episode_record = None
+        self._benchmark_object_catalog_cache = None
+        self._benchmark_contact_event_log = []
+
+    def set_benchmark_export_context(self, task_config=None, config_snapshot=None, bench_subdir=None):
+        self._ensure_benchmark_export_state()
+        self._benchmark_export_context = {
+            "task_config": task_config,
+            "config_snapshot": deepcopy(config_snapshot),
+            "bench_subdir": bench_subdir,
+        }
+
+    def _export_jsonable(self, value):
+        if isinstance(value, dict):
+            return {str(k): self._export_jsonable(v) for k, v in value.items()}
+        if isinstance(value, (list, tuple)):
+            return [self._export_jsonable(v) for v in value]
+        if isinstance(value, Path):
+            return str(value)
+        if isinstance(value, np.generic):
+            return value.item()
+        if isinstance(value, np.ndarray):
+            return value.tolist()
+        return value
+
+    def _infer_scene_family(self) -> str:
+        module_parts = type(self).__module__.split(".")
+        if "bench_envs" in module_parts:
+            idx = module_parts.index("bench_envs")
+            if idx + 1 < len(module_parts) - 1:
+                return module_parts[idx + 1]
+        bench_subdir = self._benchmark_export_context.get("bench_subdir")
+        return bench_subdir or "unknown"
+
+    def _get_clutter_level(self) -> str:
+        if not getattr(self, "cluttered_table", False) or getattr(self, "obstacle_density", 0) <= 0:
+            return "clean"
+        if getattr(self, "obstacle_density", 0) >= 6:
+            return "heavy"
+        return "moderate"
+
+    def _is_furniture_name(self, name: str) -> bool:
+        furniture_names = set(getattr(self, "FURNITURE_NAMES", set()) or set())
+        return name in furniture_names or name.startswith("floor_")
+
+    def _collect_target_object_names_safe(self) -> set[str]:
+        if not hasattr(self, "_get_target_object_names"):
+            return set()
+        try:
+            return set(self._get_target_object_names() or set())
+        except Exception:
+            return set()
+
+    def _build_object_asset_ref_lookup(self) -> dict[str, str]:
+        lookup: dict[str, str] = {}
+        task_info = getattr(self, "info", {}).get("info", {}) or {}
+        for value in task_info.values():
+            if not isinstance(value, str) or "/" not in value:
+                continue
+            obj_name = value.split("/", 1)[0]
+            lookup.setdefault(obj_name, value)
+
+        clutter_records = getattr(self, "info", {}).get("cluttered_table_info", []) or []
+        for clutter_obj in clutter_records:
+            obj_name = clutter_obj.get("object_type")
+            obj_index = clutter_obj.get("object_index")
+            if obj_name is None or obj_index is None:
+                continue
+            lookup.setdefault(obj_name, f"{obj_name}/base{obj_index}")
+        return lookup
+
+    def _build_benchmark_object_catalog(self) -> list[dict]:
+        catalog = []
+        target_names = self._collect_target_object_names_safe()
+        asset_ref_lookup = self._build_object_asset_ref_lookup()
+        clutter_names = {
+            record.get("object_type")
+            for record in (getattr(self, "info", {}).get("cluttered_table_info", []) or [])
+            if record.get("object_type")
+        }
+        robot_link_names = set()
+        if hasattr(self, "robot"):
+            try:
+                robot_link_names = {
+                    link.get_name()
+                    for link in self.robot.left_entity.get_links() + self.robot.right_entity.get_links()
+                }
+            except Exception:
+                robot_link_names = set()
+
+        seen_ids = set()
+        for entity in self.scene.get_all_actors():
+            object_id = getattr(entity, "per_scene_id", None)
+            name = entity.get_name()
+            if object_id is None or object_id in seen_ids or not name or name in robot_link_names:
+                continue
+            seen_ids.add(object_id)
+
+            is_furniture = self._is_furniture_name(name)
+            is_target = name in target_names
+            is_distractor = name in clutter_names and not is_target
+            role = "other"
+            if is_target:
+                role = "target"
+            elif is_distractor:
+                role = "distractor"
+            elif is_furniture:
+                role = "furniture"
+
+            entry = {
+                "object_id": int(object_id),
+                "name": name,
+                "entity_kind": "actor",
+                "role": role,
+                "semantic_label": name,
+                "asset_ref": asset_ref_lookup.get(name),
+                "is_target": bool(is_target),
+                "is_distractor": bool(is_distractor),
+                "is_furniture": bool(is_furniture),
+                "is_robot": False,
+                "is_articulated": False,
+                "is_movable": not is_furniture,
+                "provenance": "privileged",
+                "metadata": {},
+            }
+            catalog.append(entry)
+
+        catalog.sort(key=lambda item: item["object_id"])
+        return catalog
+
+    def _get_benchmark_object_catalog(self) -> list[dict]:
+        self._ensure_benchmark_export_state()
+        if self._benchmark_object_catalog_cache is None:
+            self._benchmark_object_catalog_cache = self._build_benchmark_object_catalog()
+        return deepcopy(self._benchmark_object_catalog_cache)
+
+    def _build_benchmark_object_state_snapshot(self) -> dict:
+        object_catalog = self._get_benchmark_object_catalog()
+        actor_by_id = {}
+        for entity in self.scene.get_all_actors():
+            object_id = getattr(entity, "per_scene_id", None)
+            if object_id is not None:
+                actor_by_id[int(object_id)] = entity
+
+        object_ids = []
+        pose_world = []
+        is_present = []
+        is_target = []
+        is_furniture = []
+
+        for entry in object_catalog:
+            object_id = int(entry["object_id"])
+            entity = actor_by_id.get(object_id)
+            object_ids.append(object_id)
+            is_target.append(bool(entry.get("is_target", False)))
+            is_furniture.append(bool(entry.get("is_furniture", False)))
+
+            if entity is None:
+                is_present.append(False)
+                pose_world.append(np.zeros(7, dtype=np.float32))
+                continue
+
+            pose = entity.get_pose()
+            pose_world.append(
+                np.array(
+                    [
+                        float(pose.p[0]),
+                        float(pose.p[1]),
+                        float(pose.p[2]),
+                        float(pose.q[0]),
+                        float(pose.q[1]),
+                        float(pose.q[2]),
+                        float(pose.q[3]),
+                    ],
+                    dtype=np.float32,
+                )
+            )
+            is_present.append(True)
+
+        return {
+            "object_ids": np.array(object_ids, dtype=np.int64),
+            "pose_world": np.stack(pose_world, axis=0) if pose_world else np.zeros((0, 7), dtype=np.float32),
+            "is_present": np.array(is_present, dtype=np.bool_),
+            "is_target": np.array(is_target, dtype=np.bool_),
+            "is_furniture": np.array(is_furniture, dtype=np.bool_),
+        }
+
+    def _build_benchmark_link_state_snapshot(self) -> dict:
+        positions_world = []
+        side_code = []
+        link_names = []
+        chain_index = []
+        parent_index = []
+
+        def _append_chain(arm_joints, side_value: int):
+            if not arm_joints:
+                return
+
+            ordered_links = []
+            first_joint = arm_joints[0]
+            root_link = getattr(first_joint, "parent_link", None)
+            if root_link is not None:
+                ordered_links.append(root_link)
+
+            for joint in arm_joints:
+                child_link = getattr(joint, "child_link", None)
+                if child_link is not None:
+                    ordered_links.append(child_link)
+
+            seen_names = set()
+            prev_global_index = -1
+            local_chain_index = 0
+            for link in ordered_links:
+                link_name = link.get_name()
+                if link_name in seen_names:
+                    continue
+                seen_names.add(link_name)
+
+                pose = link.get_pose()
+                positions_world.append(
+                    np.array(
+                        [float(pose.p[0]), float(pose.p[1]), float(pose.p[2])],
+                        dtype=np.float32,
+                    )
+                )
+                side_code.append(side_value)
+                link_names.append(link_name)
+                chain_index.append(local_chain_index)
+                parent_index.append(prev_global_index)
+                prev_global_index = len(link_names) - 1
+                local_chain_index += 1
+
+        if hasattr(self, "robot"):
+            _append_chain(getattr(self.robot, "left_arm_joints", []), 0)
+            _append_chain(getattr(self.robot, "right_arm_joints", []), 1)
+
+        return {
+            "positions_world": np.stack(positions_world, axis=0) if positions_world else np.zeros((0, 3), dtype=np.float32),
+            "side_code": np.array(side_code, dtype=np.int8),
+            "link_names": np.array(link_names, dtype="S64"),
+            "chain_index": np.array(chain_index, dtype=np.int32),
+            "parent_index": np.array(parent_index, dtype=np.int32),
+        }
+
+    def _get_benchmark_entity_aabb(self, entity):
+        actor = getattr(entity, "actor", entity)
+        all_points = []
+
+        try:
+            entity_mat = actor.get_pose().to_transformation_matrix()
+        except Exception:
+            entity_mat = None
+
+        if entity_mat is not None:
+            for comp in actor.get_components():
+                if not hasattr(comp, "get_collision_shapes"):
+                    continue
+                for shape in comp.get_collision_shapes():
+                    try:
+                        local_vertices = np.array(shape.get_vertices(), dtype=np.float64)
+                    except Exception:
+                        half_size = np.array(getattr(shape, "half_size", [0.05, 0.05, 0.05]), dtype=np.float64)
+                        local_vertices = np.array(
+                            [
+                                [x, y, z]
+                                for x in (-half_size[0], half_size[0])
+                                for y in (-half_size[1], half_size[1])
+                                for z in (-half_size[2], half_size[2])
+                            ],
+                            dtype=np.float64,
+                        )
+
+                    try:
+                        scale = np.array(getattr(shape, "scale"), dtype=np.float64)
+                        local_vertices = local_vertices * scale
+                    except Exception:
+                        pass
+
+                    try:
+                        shape_mat = shape.get_local_pose().to_transformation_matrix()
+                    except Exception:
+                        continue
+
+                    world_mat = entity_mat @ shape_mat
+                    hom_vertices = np.pad(local_vertices, ((0, 0), (0, 1)), constant_values=1.0)
+                    world_vertices = (world_mat @ hom_vertices.T).T[:, :3]
+                    all_points.append(world_vertices)
+
+        if all_points:
+            points = np.vstack(all_points)
+            return points.min(axis=0), points.max(axis=0)
+
+        pose = entity.get_pose()
+        center = np.array(pose.p, dtype=np.float64)
+        fallback_half_extent = np.array([0.05, 0.05, 0.05], dtype=np.float64)
+        return center - fallback_half_extent, center + fallback_half_extent
+
+    @staticmethod
+    def _compute_benchmark_xy_overlap_ratio(upper_aabb, lower_aabb) -> float:
+        upper_min, upper_max = upper_aabb
+        lower_min, lower_max = lower_aabb
+        overlap_x = max(0.0, min(float(upper_max[0]), float(lower_max[0])) - max(float(upper_min[0]), float(lower_min[0])))
+        overlap_y = max(0.0, min(float(upper_max[1]), float(lower_max[1])) - max(float(upper_min[1]), float(lower_min[1])))
+        overlap_area = overlap_x * overlap_y
+        upper_area = max(
+            (float(upper_max[0]) - float(upper_min[0])) * (float(upper_max[1]) - float(upper_min[1])),
+            1e-8,
+        )
+        return overlap_area / upper_area
+
+    @staticmethod
+    def _compute_benchmark_xy_gap(aabb_a, aabb_b) -> float:
+        min_a, max_a = aabb_a
+        min_b, max_b = aabb_b
+        gap_x = max(0.0, max(float(min_a[0]) - float(max_b[0]), float(min_b[0]) - float(max_a[0])))
+        gap_y = max(0.0, max(float(min_a[1]) - float(max_b[1]), float(min_b[1]) - float(max_a[1])))
+        return float(np.hypot(gap_x, gap_y))
+
+    def _is_benchmark_supported_by(self, upper_aabb, lower_aabb) -> bool:
+        upper_min, upper_max = upper_aabb
+        lower_min, lower_max = lower_aabb
+        vertical_gap = float(upper_min[2] - lower_max[2])
+        if vertical_gap < -0.03 or vertical_gap > 0.06:
+            return False
+
+        upper_center_z = 0.5 * float(upper_min[2] + upper_max[2])
+        lower_center_z = 0.5 * float(lower_min[2] + lower_max[2])
+        if upper_center_z <= lower_center_z:
+            return False
+
+        return self._compute_benchmark_xy_overlap_ratio(upper_aabb, lower_aabb) >= 0.2
+
+    def _build_benchmark_relation_state_snapshot(self) -> dict:
+        object_catalog = self._get_benchmark_object_catalog()
+        actor_by_id = {}
+        aabb_by_id = {}
+        index_by_id = {}
+
+        for idx, entry in enumerate(object_catalog):
+            object_id = int(entry["object_id"])
+            index_by_id[object_id] = idx
+
+        for entity in self.scene.get_all_actors():
+            object_id = getattr(entity, "per_scene_id", None)
+            if object_id is None:
+                continue
+            object_id = int(object_id)
+            if object_id not in index_by_id:
+                continue
+            actor_by_id[object_id] = entity
+            aabb_by_id[object_id] = self._get_benchmark_entity_aabb(entity)
+
+        object_ids = np.array([int(entry["object_id"]) for entry in object_catalog], dtype=np.int64)
+        object_count = len(object_catalog)
+        contact = np.zeros((object_count, object_count), dtype=np.bool_)
+        near = np.zeros((object_count, object_count), dtype=np.bool_)
+        support = np.zeros((object_count, object_count), dtype=np.bool_)
+        grasped_by_code = np.full((object_count,), -1, dtype=np.int8)
+
+        left_gripper_names = set(getattr(self.robot, "left_fix_gripper_name", []))
+        right_gripper_names = set(getattr(self.robot, "right_fix_gripper_name", []))
+        for joint, _, _ in getattr(self.robot, "left_gripper", []):
+            if joint is not None and joint.child_link is not None:
+                left_gripper_names.add(joint.child_link.get_name())
+        for joint, _, _ in getattr(self.robot, "right_gripper", []):
+            if joint is not None and joint.child_link is not None:
+                right_gripper_names.add(joint.child_link.get_name())
+
+        left_contact = np.zeros((object_count,), dtype=np.bool_)
+        right_contact = np.zeros((object_count,), dtype=np.bool_)
+
+        for scene_contact in self.scene.get_contacts():
+            entity0 = scene_contact.bodies[0].entity
+            entity1 = scene_contact.bodies[1].entity
+            name0 = entity0.name
+            name1 = entity1.name
+            object_id0 = getattr(entity0, "per_scene_id", None)
+            object_id1 = getattr(entity1, "per_scene_id", None)
+
+            if object_id0 is not None:
+                object_id0 = int(object_id0)
+            if object_id1 is not None:
+                object_id1 = int(object_id1)
+
+            if object_id0 in index_by_id and object_id1 in index_by_id and object_id0 != object_id1:
+                idx0 = index_by_id[object_id0]
+                idx1 = index_by_id[object_id1]
+                contact[idx0, idx1] = True
+                contact[idx1, idx0] = True
+
+            if object_id0 in index_by_id and name1 in left_gripper_names:
+                left_contact[index_by_id[object_id0]] = True
+            if object_id1 in index_by_id and name0 in left_gripper_names:
+                left_contact[index_by_id[object_id1]] = True
+            if object_id0 in index_by_id and name1 in right_gripper_names:
+                right_contact[index_by_id[object_id0]] = True
+            if object_id1 in index_by_id and name0 in right_gripper_names:
+                right_contact[index_by_id[object_id1]] = True
+
+        for i in range(object_count):
+            object_id_i = int(object_ids[i])
+            aabb_i = aabb_by_id.get(object_id_i)
+            if aabb_i is None:
+                continue
+            min_i, max_i = aabb_i
+            center_i = 0.5 * (min_i + max_i)
+            extent_i = np.maximum(max_i - min_i, 1e-6)
+
+            for j in range(i + 1, object_count):
+                object_id_j = int(object_ids[j])
+                aabb_j = aabb_by_id.get(object_id_j)
+                if aabb_j is None:
+                    continue
+                min_j, max_j = aabb_j
+                center_j = 0.5 * (min_j + max_j)
+                extent_j = np.maximum(max_j - min_j, 1e-6)
+
+                horizontal_gap = self._compute_benchmark_xy_gap(aabb_i, aabb_j)
+                vertical_center_gap = abs(float(center_i[2] - center_j[2]))
+                vertical_tolerance = max(float(extent_i[2]), float(extent_j[2])) + 0.08
+                if horizontal_gap <= 0.10 and vertical_center_gap <= vertical_tolerance:
+                    near[i, j] = True
+                    near[j, i] = True
+
+                if contact[i, j]:
+                    if self._is_benchmark_supported_by(aabb_i, aabb_j):
+                        support[i, j] = True
+                    if self._is_benchmark_supported_by(aabb_j, aabb_i):
+                        support[j, i] = True
+
+        left_tcp = np.array(self.robot.get_left_tcp_pose()[:3], dtype=np.float64)
+        right_tcp = np.array(self.robot.get_right_tcp_pose()[:3], dtype=np.float64)
+        left_closed = bool(self.robot.is_left_gripper_close())
+        right_closed = bool(self.robot.is_right_gripper_close())
+
+        for i, object_id in enumerate(object_ids.tolist()):
+            entity = actor_by_id.get(int(object_id))
+            if entity is None:
+                continue
+            center = np.array(entity.get_pose().p, dtype=np.float64)
+            left_held = left_closed and left_contact[i] and float(np.linalg.norm(center - left_tcp)) <= 0.16
+            right_held = right_closed and right_contact[i] and float(np.linalg.norm(center - right_tcp)) <= 0.16
+            if left_held and right_held:
+                grasped_by_code[i] = 2
+            elif left_held:
+                grasped_by_code[i] = 0
+            elif right_held:
+                grasped_by_code[i] = 1
+
+        return {
+            "object_ids": object_ids,
+            "contact": contact,
+            "near": near,
+            "support": support,
+            "grasped_by_code": grasped_by_code,
+        }
+
+    def _record_benchmark_contact_event(
+        self,
+        *,
+        contact_step,
+        body0_name,
+        body1_name,
+        body0_id,
+        body1_id,
+        impulse,
+        position,
+        event_type,
+        counted_by_metric,
+    ):
+        self._ensure_benchmark_export_state()
+        self._benchmark_contact_event_log.append(
+            {
+                "t_step": int(contact_step),
+                "body0_name": body0_name,
+                "body1_name": body1_name,
+                "body0_id": -1 if body0_id is None else int(body0_id),
+                "body1_id": -1 if body1_id is None else int(body1_id),
+                "impulse": float(impulse),
+                "position": [float(x) for x in position],
+                "event_type": event_type,
+                "counted_by_metric": bool(counted_by_metric),
+            }
+        )
+
+    def build_benchmark_episode_record(self, success=None):
+        self._ensure_benchmark_export_state()
+        export_ctx = getattr(self, "_benchmark_export_context", {}) or {}
+        scene_info = self._export_jsonable(getattr(self, "info", {}) or {})
+        collision_info = {}
+        if hasattr(self, "get_collision_metrics"):
+            try:
+                collision_info = self._export_jsonable(self.get_collision_metrics())
+            except Exception:
+                collision_info = {}
+
+        scene_info["collision_info"] = collision_info
+        task_config = export_ctx.get("task_config")
+        episode_id = f"{type(self).__name__}_{self.ep_num}"
+        scenario_metadata = {
+            "task_name": self.task_name,
+            "task_config": task_config,
+            "seed": getattr(self, "seed", None),
+            "success": None if success is None else bool(success),
+            "scene_family": self._infer_scene_family(),
+            "embodiment": self._export_jsonable((export_ctx.get("config_snapshot") or {}).get("embodiment")),
+            "cluttered_table": bool(getattr(self, "cluttered_table", False)),
+            "obstacle_density": int(getattr(self, "obstacle_density", 0) or 0),
+            "clutter_level": self._get_clutter_level(),
+            "language_perturbation_enabled": bool(getattr(self, "language_perturbation_enabled", False)),
+            "vision_perturbation_enabled": bool(
+                getattr(self, "apply_lighting_ablation", False)
+                or getattr(self, "blur_perturb_enabled", False)
+                or getattr(self, "pixel_shift_enabled", False)
+            ),
+            "object_perturbation_enabled": bool(
+                getattr(self, "unseen_obstacles", False) or getattr(self, "unseen_targets", False)
+            ),
+            "ood_perturbation_enabled": bool(
+                getattr(self, "_specular_enabled", False)
+                or getattr(self, "_surface_material_enabled", False)
+                or getattr(self, "_furniture_texture_enabled", False)
+            ),
+            "enable_collision_metrics": bool(getattr(self, "enable_collision_metrics", False)),
+            "instruction_text": getattr(self, "instruction", None),
+            "config_snapshot": self._export_jsonable(export_ctx.get("config_snapshot") or {}),
+        }
+
+        record = scene_info
+        record["schema_name"] = self.BENCHMARK_SCHEMA_NAME
+        record["schema_version"] = self.BENCHMARK_SCHEMA_VERSION
+        record["export_timestamp"] = datetime.now(timezone.utc).isoformat()
+        record["exporter"] = self.BENCHMARK_EXPORTER_NAME
+        record["episode_id"] = episode_id
+        record["scenario_metadata"] = scenario_metadata
+        record["object_catalog"] = self._get_benchmark_object_catalog()
+        record["metadata"] = {
+            "task_name": self.task_name,
+            "task_config": task_config,
+            "seed": getattr(self, "seed", None),
+            "success": None if success is None else bool(success),
+            "episode_id": episode_id,
+            "data_file": f"data/episode{self.ep_num}.hdf5",
+            "video_file": f"video/episode{self.ep_num}.mp4",
+        }
+        record["contact_events_summary"] = {
+            "count": len(self._benchmark_contact_event_log),
+        }
+        self._benchmark_episode_record = record
+        return record
+
+    def _write_benchmark_metadata_to_hdf5(self, hdf5_path):
+        self._ensure_benchmark_export_state()
+        record = getattr(self, "_benchmark_episode_record", None)
+        if not record:
+            return
+
+        string_dtype = h5py.string_dtype(encoding="utf-8")
+        scenario = record.get("scenario_metadata", {}) or {}
+        object_catalog = record.get("object_catalog", []) or []
+        config_snapshot_json = json.dumps(
+            self._export_jsonable(scenario.get("config_snapshot", {})),
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+
+        with h5py.File(hdf5_path, "a") as f:
+            f.attrs["schema_name"] = record["schema_name"]
+            f.attrs["schema_version"] = record["schema_version"]
+            f.attrs["episode_id"] = record["episode_id"]
+            f.attrs["task_name"] = scenario.get("task_name") or ""
+            f.attrs["task_config"] = scenario.get("task_config") or ""
+            f.attrs["seed"] = -1 if scenario.get("seed") is None else int(scenario["seed"])
+            f.attrs["success"] = bool(scenario.get("success")) if scenario.get("success") is not None else False
+
+            export_group = f.require_group("benchmark_support")
+
+            object_state_group = export_group.get("object_state")
+            if object_state_group is not None:
+                for dataset_name in ("object_ids", "is_target", "is_furniture"):
+                    if dataset_name not in object_state_group:
+                        continue
+                    dataset = object_state_group[dataset_name]
+                    if getattr(dataset, "ndim", 0) <= 1:
+                        continue
+                    first_frame = dataset[0]
+                    dtype = dataset.dtype
+                    del object_state_group[dataset_name]
+                    object_state_group.create_dataset(dataset_name, data=first_frame, dtype=dtype)
+
+            link_state_group = export_group.get("link_state")
+            if link_state_group is not None:
+                for dataset_name in ("side_code", "link_names", "chain_index", "parent_index"):
+                    if dataset_name not in link_state_group:
+                        continue
+                    dataset = link_state_group[dataset_name]
+                    if getattr(dataset, "ndim", 0) <= 1:
+                        continue
+                    first_frame = dataset[0]
+                    dtype = dataset.dtype
+                    del link_state_group[dataset_name]
+                    link_state_group.create_dataset(dataset_name, data=first_frame, dtype=dtype)
+
+            relation_state_group = export_group.get("relation_state")
+            if relation_state_group is not None:
+                for dataset_name in ("object_ids",):
+                    if dataset_name not in relation_state_group:
+                        continue
+                    dataset = relation_state_group[dataset_name]
+                    if getattr(dataset, "ndim", 0) <= 1:
+                        continue
+                    first_frame = dataset[0]
+                    dtype = dataset.dtype
+                    del relation_state_group[dataset_name]
+                    relation_state_group.create_dataset(dataset_name, data=first_frame, dtype=dtype)
+
+            if "contact_events" in export_group:
+                del export_group["contact_events"]
+            contact_events_group = export_group.create_group("contact_events")
+            contact_events = self._benchmark_contact_event_log
+            contact_events_group.create_dataset(
+                "t_step",
+                data=np.array([event["t_step"] for event in contact_events], dtype=np.int64),
+            )
+            for field in ("body0_name", "body1_name", "event_type"):
+                contact_events_group.create_dataset(
+                    field,
+                    data=np.array([event[field] for event in contact_events], dtype=object),
+                    dtype=string_dtype,
+                )
+            for field in ("body0_id", "body1_id"):
+                contact_events_group.create_dataset(
+                    field,
+                    data=np.array([event[field] for event in contact_events], dtype=np.int64),
+                )
+            contact_events_group.create_dataset(
+                "impulse",
+                data=np.array([event["impulse"] for event in contact_events], dtype=np.float32),
+            )
+            contact_events_group.create_dataset(
+                "position",
+                data=(
+                    np.array([event["position"] for event in contact_events], dtype=np.float32)
+                    if contact_events
+                    else np.zeros((0, 3), dtype=np.float32)
+                ),
+            )
+            contact_events_group.create_dataset(
+                "counted_by_metric",
+                data=np.array([event["counted_by_metric"] for event in contact_events], dtype=np.bool_),
+            )
+
+            if "scenario_metadata" in export_group:
+                del export_group["scenario_metadata"]
+            scenario_group = export_group.create_group("scenario_metadata")
+            for key, value in scenario.items():
+                if key == "config_snapshot":
+                    scenario_group.create_dataset("config_snapshot_json", data=config_snapshot_json, dtype=string_dtype)
+                    continue
+                if value is None:
+                    scenario_group.create_dataset(key, data="", dtype=string_dtype)
+                elif isinstance(value, bool):
+                    scenario_group.create_dataset(key, data=value)
+                elif isinstance(value, int):
+                    scenario_group.create_dataset(key, data=value)
+                elif isinstance(value, list):
+                    scenario_group.create_dataset(key, data=np.array([str(v) for v in value], dtype=object), dtype=string_dtype)
+                else:
+                    scenario_group.create_dataset(key, data=str(value), dtype=string_dtype)
+
+            if "object_catalog" in export_group:
+                del export_group["object_catalog"]
+            object_group = export_group.create_group("object_catalog")
+            object_group.create_dataset(
+                "object_ids",
+                data=np.array([entry["object_id"] for entry in object_catalog], dtype=np.int64),
+            )
+            for field in ("name", "role", "entity_kind", "semantic_label", "asset_ref", "provenance"):
+                object_group.create_dataset(
+                    f"{field}s",
+                    data=np.array([(entry.get(field) or "") for entry in object_catalog], dtype=object),
+                    dtype=string_dtype,
+                )
+            for field in ("is_target", "is_distractor", "is_furniture", "is_robot", "is_articulated", "is_movable"):
+                object_group.create_dataset(
+                    field,
+                    data=np.array([bool(entry.get(field, False)) for entry in object_catalog], dtype=np.bool_),
+                )
+            object_group.create_dataset(
+                "metadata_json",
+                data=np.array(
+                    [json.dumps(self._export_jsonable(entry.get("metadata", {})), ensure_ascii=False, sort_keys=True) for entry in object_catalog],
+                    dtype=object,
+                ),
+                dtype=string_dtype,
+            )
 
     def check_stable(self):
         actors_list, actors_pose_list = [], []
@@ -529,6 +1241,12 @@ class Base_Task(gym.Env):
         if self.data_type.get("pointcloud", False):
             pkl_dic["pointcloud"] = self.cameras.get_pcd(self.data_type.get("conbine", False))
 
+        pkl_dic["benchmark_support"] = {
+            "object_state": self._build_benchmark_object_state_snapshot(),
+            "link_state": self._build_benchmark_link_state_snapshot(),
+            "relation_state": self._build_benchmark_relation_state_snapshot(),
+        }
+
         self.now_obs = deepcopy(pkl_dic)
         return pkl_dic
 
@@ -582,6 +1300,7 @@ class Base_Task(gym.Env):
 
         os.makedirs(f"{self.save_dir}/data", exist_ok=True)
         process_folder_to_hdf5_video(cache_path, target_file_path, target_video_path)
+        self._write_benchmark_metadata_to_hdf5(target_file_path)
 
     def remove_data_cache(self):
         folder_path = self.folder_path["cache"]

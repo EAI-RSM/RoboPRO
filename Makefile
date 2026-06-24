@@ -24,6 +24,18 @@ ROLLOUT ?= 1
 SAVE_DATA ?= 1
 SAVE_PLAN_FAIL_DIR ?=
 PLAN_FAIL_CAMERA ?= demo_camera
+HDF5_FILE ?=
+HDF5_CAMERA ?=
+HDF5_FRAME ?= 0
+HDF5_PREVIEW_PATH ?=
+SHOW_TREE ?= 0
+DUMP_JSON ?= 0
+VIZ_HDF5_FILE ?=
+VIZ_OUTPUT_VIDEO ?=
+VIZ_WIDTH ?= 1280
+VIZ_HEIGHT ?= 720
+VIZ_FPS ?= 20
+VIZ_TRAIL ?= 25
 
 # Asset / install flags
 PYTHON_VERSION ?= 3.10
@@ -62,7 +74,7 @@ endef
 .PHONY: help check-prereqs bootstrap sync download-assets link-assets configure-curobo-assets \
 	patch-curobo-config setup render-test verify-scene verify-rollout collect-data \
 	precollect-seeds eval-direct eval-client policy-server eval-pi05-single eval-pi05-double \
-	collect-rollout-pi05 diag-kitchen-curobo show-config
+	collect-rollout-pi05 diag-kitchen-curobo inspect-benchmark-hdf5 visualize-benchmark-rollout show-config
 
 help:
 	@printf '%s\n' \
@@ -86,6 +98,10 @@ help:
 	'  make verify-rollout           Headless rollout smoke test; saves video by default.' \
 	'  make precollect-seeds         Generate eval seeds without saving demos.' \
 	'  make diag-kitchen-curobo      Kitchen collision diagnostic script.' \
+	'  make inspect-benchmark-hdf5   Inspect a benchmark HDF5 export and optional preview frame.' \
+	'    Vars: HDF5_FILE=/abs/path/to/file.hdf5 HDF5_CAMERA=demo_camera HDF5_FRAME=0 HDF5_PREVIEW_PATH=/tmp/frame.png SHOW_TREE=1 DUMP_JSON=1' \
+	'  make visualize-benchmark-rollout  Render a top-down verification MP4 from a benchmark HDF5 export.' \
+	'    Vars: VIZ_HDF5_FILE=path/to/file.hdf5 VIZ_OUTPUT_VIDEO=/tmp/rollout.mp4 VIZ_WIDTH=1280 VIZ_HEIGHT=720 VIZ_FPS=20 VIZ_TRAIL=25' \
 	'' \
 	'Data collection:' \
 	'  make collect-data             Run collect_data.sh for one task/config.' \
@@ -273,3 +289,37 @@ collect-rollout-pi05:
 
 diag-kitchen-curobo:
 	$(call RUN_IN_CUSTOMIZED,$(PYTHON) script/bench_script/diag_kitchen_curobo.py)
+
+inspect-benchmark-hdf5:
+	@if [[ -z "$(HDF5_FILE)" ]]; then \
+		printf 'Set HDF5_FILE=/abs/path/to/episode.hdf5\n' >&2; \
+		exit 1; \
+	fi
+	hdf5_file="$(HDF5_FILE)"; \
+	if [[ "$$hdf5_file" != /* ]]; then hdf5_file="$(ROOT_DIR)/$$hdf5_file"; fi; \
+	preview_path="$(HDF5_PREVIEW_PATH)"; \
+	if [[ -n "$$preview_path" && "$$preview_path" != /* ]]; then preview_path="$(ROOT_DIR)/$$preview_path"; fi; \
+	cmd='$(PYTHON) ../benchmark/bench_script/inspect_benchmark_hdf5.py --file "'"$$hdf5_file"'"'; \
+	if [[ "$(SHOW_TREE)" == "1" ]]; then cmd+=" --show-tree"; fi; \
+	if [[ "$(DUMP_JSON)" == "1" ]]; then cmd+=" --dump-json"; fi; \
+	if [[ -n "$(HDF5_CAMERA)" ]]; then cmd+=" --camera $(HDF5_CAMERA)"; fi; \
+	if [[ -n "$$preview_path" ]]; then cmd+=' --save-preview "'"$$preview_path"'"'; fi; \
+	cmd+=" --frame $(HDF5_FRAME)"; \
+	$(call RUN_IN_CUSTOMIZED,eval "$$cmd")
+
+visualize-benchmark-rollout:
+	@if [[ -z "$(VIZ_HDF5_FILE)" ]]; then \
+		printf 'Set VIZ_HDF5_FILE=/abs/path/to/episode.hdf5\n' >&2; \
+		exit 1; \
+	fi
+	hdf5_file="$(VIZ_HDF5_FILE)"; \
+	if [[ "$$hdf5_file" != /* ]]; then hdf5_file="$(ROOT_DIR)/$$hdf5_file"; fi; \
+	output_video="$(VIZ_OUTPUT_VIDEO)"; \
+	if [[ -z "$$output_video" ]]; then \
+		stem="$$(basename "$$hdf5_file" .hdf5)"; \
+		output_video="$(ROOT_DIR)/tmp/$${stem}_benchmark_debug.mp4"; \
+	fi; \
+	if [[ "$$output_video" != /* ]]; then output_video="$(ROOT_DIR)/$$output_video"; fi; \
+	cmd='$(PYTHON) ../benchmark/bench_script/visualize_benchmark_rollout.py --file "'"$$hdf5_file"'" --output "'"$$output_video"'"'; \
+	cmd+=" --width $(VIZ_WIDTH) --height $(VIZ_HEIGHT) --fps $(VIZ_FPS) --trail $(VIZ_TRAIL)"; \
+	$(call RUN_IN_CUSTOMIZED,eval "$$cmd")

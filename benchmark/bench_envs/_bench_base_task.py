@@ -688,6 +688,9 @@ class Bench_base_task(Base_Task):
         self.filtered_contacts_for_log = []
         self.static_object_pose_prev: dict[int, tuple] = {}   # per_scene_id -> (pos, quat)
         self.static_object_pose_start: dict[int, tuple] = {}  # per_scene_id -> (pos, quat), captured once per episode
+        self._benchmark_contact_step_idx = 0
+        if hasattr(self, "_benchmark_contact_event_log"):
+            self._benchmark_contact_event_log = []
 
     def _get_target_object_names(self) -> set[str]:
         """Return the names of target objects for this task.
@@ -791,6 +794,7 @@ class Bench_base_task(Base_Task):
         """
         contacts = self.scene.get_contacts()
         self.filtered_contacts_for_log = []
+        contact_step = self._benchmark_contact_step_idx
 
         for contact in contacts:
             entity0 = contact.bodies[0].entity
@@ -858,19 +862,48 @@ class Bench_base_task(Base_Task):
                     impulse = float(np.linalg.norm(pt.impulse))
                     # Log furniture contacts by impulse; log static contacts regardless
                     if count_furniture and impulse > self.collision_impulse_threshold:
-                        self.filtered_contacts_for_log.append({
+                        event = {
                             "body0": name0,
                             "body1": name1,
                             "impulse": impulse,
                             "position": [float(x) for x in pt.position],
-                        })
+                        }
+                        self.filtered_contacts_for_log.append(event)
+                        if hasattr(self, "_record_benchmark_contact_event"):
+                            self._record_benchmark_contact_event(
+                                contact_step=contact_step,
+                                body0_name=name0,
+                                body1_name=name1,
+                                body0_id=getattr(entity0, "per_scene_id", None),
+                                body1_id=getattr(entity1, "per_scene_id", None),
+                                impulse=impulse,
+                                position=event["position"],
+                                event_type="robot_to_furniture",
+                                counted_by_metric=True,
+                            )
                     elif (count_static or count_target_static) and impulse > 0:
-                        self.filtered_contacts_for_log.append({
+                        event_type = "robot_to_static_object" if count_static else "target_to_static_object"
+                        event = {
                             "body0": name0,
                             "body1": name1,
                             "impulse": impulse,
                             "position": [float(x) for x in pt.position],
-                        })
+                        }
+                        self.filtered_contacts_for_log.append(event)
+                        if hasattr(self, "_record_benchmark_contact_event"):
+                            self._record_benchmark_contact_event(
+                                contact_step=contact_step,
+                                body0_name=name0,
+                                body1_name=name1,
+                                body0_id=getattr(entity0, "per_scene_id", None),
+                                body1_id=getattr(entity1, "per_scene_id", None),
+                                impulse=impulse,
+                                position=event["position"],
+                                event_type=event_type,
+                                counted_by_metric=True,
+                            )
+
+        self._benchmark_contact_step_idx += 1
 
 
     def get_collision_metrics(self):

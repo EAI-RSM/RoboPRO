@@ -129,23 +129,9 @@ def _write_rollout_scene_info(env, task_name, task_config, seed, success):
     save_dir.mkdir(parents=True, exist_ok=True)
     scene_info_path = save_dir / "scene_info.json"
 
-    episode_id = f"{env.__class__.__name__}_{env.ep_num}"
-    scene_info = _to_jsonable(getattr(env, "info", {}) or {})
-    collision_info = {}
-    if hasattr(env, "get_collision_metrics"):
-        collision_info = _to_jsonable(env.get_collision_metrics())
-
-    scene_info["collision_info"] = collision_info
+    scene_info = _to_jsonable(env.build_benchmark_episode_record(success=success))
     scene_info["object_hypotheses"] = _build_object_hypotheses(scene_info)
-    scene_info["metadata"] = {
-        "task_name": task_name,
-        "task_config": task_config,
-        "seed": seed,
-        "success": bool(success),
-        "episode_id": episode_id,
-        "data_file": f"data/episode_{episode_id}.hdf5",
-        "video_file": f"video/episode_{episode_id}.mp4",
-    }
+    episode_id = scene_info["episode_id"]
 
     if scene_info_path.exists():
         with open(scene_info_path, "r", encoding="utf-8") as f:
@@ -367,6 +353,12 @@ def main():
     # Build env and setup scene with viewer
     env = env_class()
     env.setup_demo(**cfg)
+    if hasattr(env, "set_benchmark_export_context"):
+        env.set_benchmark_export_context(
+            task_config=task_config,
+            config_snapshot=cfg,
+            bench_subdir=bench_subdir,
+        )
 
     if enable_render and (not getattr(env, "render_freq", 0) or getattr(env, "viewer", None) is None):
         print("Warning: viewer not created (render_freq was 0?). Exiting.")
