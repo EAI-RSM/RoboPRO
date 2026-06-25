@@ -59,6 +59,7 @@ class Base_Task(gym.Env):
         np.random.seed(kwags.get("seed", 0))
         torch.manual_seed(kwags.get("seed", 0))
         # random.seed(kwags.get('seed', 0))
+        self.seed = kwags.get("seed", 0)
 
         self.FRAME_IDX = 0
         self.task_name = kwags.get("task_name")
@@ -220,6 +221,9 @@ class Base_Task(gym.Env):
         # declare sapien scene
         scene_config = sapien.SceneConfig()
         self.scene = self.engine.create_scene(scene_config)
+        # Clear the per-scene asset build-spec registry for this fresh scene so
+        # capture_init_state / restore_init_state see only this episode's objects.
+        reset_asset_registry(self.scene)
         # set simulation timestep
         self.scene.set_timestep(kwargs.get("timestep", 1 / 250))
         # add ground to scene
@@ -529,6 +533,33 @@ class Base_Task(gym.Env):
         if self.data_type.get("pointcloud", False):
             pkl_dic["pointcloud"] = self.cameras.get_pcd(self.data_type.get("conbine", False))
 
+        # per-frame object poses (for replay-time experiments / verification).
+        # Scene-based so it captures every object regardless of builder. Keyed by
+        # "{index}_{name}" so repeated clutter names stay distinct and stable.
+        if self.data_type.get("object_pose", False):
+            object_pose = {}
+            idx = 0
+            for ent in self.scene.get_all_actors():
+                name = ent.get_name()
+                if name == "" or name == "ground":
+                    continue
+                try:
+                    p = ent.get_pose()
+                    object_pose[f"{idx}_{name}"] = np.concatenate(
+                        [np.asarray(p.p, dtype=float), np.asarray(p.q, dtype=float)])
+                    idx += 1
+                except Exception:
+                    continue
+            for art in self.scene.get_all_articulations():
+                try:
+                    pose = art.get_root_pose() if hasattr(art, "get_root_pose") else art.get_pose()
+                    object_pose[f"{idx}_{art.get_name()}"] = np.concatenate(
+                        [np.asarray(pose.p, dtype=float), np.asarray(pose.q, dtype=float)])
+                    idx += 1
+                except Exception:
+                    continue
+            pkl_dic["object_pose"] = object_pose
+
         self.now_obs = deepcopy(pkl_dic)
         return pkl_dic
 
@@ -565,12 +596,202 @@ class Base_Task(gym.Env):
         }
         save_pkl(file_path, traj_data)
 
+    def _traj_root(self):
+        """Directory to READ saved trajectory + init-state from. Defaults to
+        self.save_dir, but replay can point reads at a separate source dir via
+        self.traj_src_dir while writing new HDF5 under self.save_dir."""
+        return getattr(self, "traj_src_dir", None) or self.save_dir
+
     def load_tran_data(self, idx):
         assert self.save_dir is not None, "self.save_dir is None"
-        file_path = os.path.join(self.save_dir, "_traj_data", f"episode{idx}.pkl")
+        file_path = os.path.join(self._traj_root(), "_traj_data", f"episode{idx}.pkl")
         with open(file_path, "rb") as f:
             traj_data = pickle.load(f)
         return traj_data
+
+    # =========================================================== Initial State (record + replay) ===========================================================
+    # The recorded initial state makes a saved trajectory reloadable by the
+    # simulator for faithful replay. The explicit state is authoritative: on
+    # replay we run the seeded setup only to wire up task object handles +
+    # gripper/attach structure that play_once needs, then OVERRIDE every object
+    # pose / articulation & robot qpos from this record. See capture/restore below.
+
+    def _init_state_path(self, idx):
+        return os.path.join(self._traj_root(), "_traj_data", f"episode{idx}_init.json")
+
+    def capture_init_state(self) -> dict:
+        """Snapshot the scene + robot state at episode start (t=0, after
+        load_actors + check_stable). Factory-agnostic: enumerates the live scene
+        directly (get_all_actors / get_all_articulations) so it captures every
+        object regardless of which builder created it. The factory build-spec
+        registry is recorded separately as provenance (not used for restore)."""
+
+        def _pose_to_list(pose):
+            return [np.asarray(pose.p, dtype=float).tolist(),
+                    np.asarray(pose.q, dtype=float).tolist()]
+
+        # Rigid actors (task objects, clutter, table/wall, ...). Skip the ground.
+        actors = []
+        for ent in self.scene.get_all_actors():
+            name = ent.get_name()
+            if name == "" or name == "ground":
+                continue
+            try:
+                actors.append({"name": name, "pose": _pose_to_list(ent.get_pose())})
+            except Exception as e:
+                print(f"[capture_init_state] skip actor {name}: {e}")
+
+        # Articulations (appliances + the robot arms). Records root pose + qpos.
+        articulations = []
+        for art in self.scene.get_all_articulations():
+            try:
+                pose = art.get_root_pose() if hasattr(art, "get_root_pose") else art.get_pose()
+                qpos = np.asarray(art.get_qpos(), dtype=float).tolist()
+                articulations.append({"name": art.get_name(),
+                                      "root_pose": _pose_to_list(pose),
+                                      "qpos": qpos})
+            except Exception as e:
+                print(f"[capture_init_state] skip articulation {art.get_name()}: {e}")
+
+        robot = {
+            "embodiment_name": getattr(self, "embodiment_name", None),
+            "left_arm": [float(v) for v in self.robot.get_left_arm_jointState()],
+            "right_arm": [float(v) for v in self.robot.get_right_arm_jointState()],
+        }
+        try:
+            robot["left_qpos"] = np.asarray(self.robot.left_entity.get_qpos(), dtype=float).tolist()
+            robot["right_qpos"] = np.asarray(self.robot.right_entity.get_qpos(), dtype=float).tolist()
+        except Exception:
+            robot["left_qpos"] = robot["right_qpos"] = None
+
+        # Provenance: what the factories built, in creation order (asset identity).
+        asset_specs = [spec for _wrapper, spec in get_asset_registry(self.scene)]
+
+        scaffold = {
+            "table_z_bias": float(getattr(self, "table_z_bias", 0.0)),
+            "texture_info": self.info.get("texture_info") if hasattr(self, "info") else None,
+        }
+        meta = {
+            "seed": getattr(self, "seed", None),
+            "task_name": getattr(self, "task_name", None),
+            "task_config": getattr(self, "task_config", None),
+            "cluttered_table_info": getattr(self, "record_cluttered_objects", None),
+        }
+        return {"actors": actors, "articulations": articulations, "robot": robot,
+                "asset_specs": asset_specs, "scaffold": scaffold, "meta": meta}
+
+    @staticmethod
+    def _json_default(o):
+        """Make numpy scalars / arrays JSON-serialisable."""
+        if isinstance(o, np.generic):
+            return o.item()
+        if isinstance(o, np.ndarray):
+            return o.tolist()
+        raise TypeError(f"Object of type {type(o).__name__} is not JSON serializable")
+
+    def save_init_state(self, idx, state=None):
+        # IMPORTANT: the initial state must be captured BEFORE play_once mutates
+        # the scene. Callers that already captured it at t=0 should pass `state`;
+        # otherwise it is captured now (only correct if nothing has moved yet).
+        if state is None:
+            state = self.capture_init_state()
+        path = self._init_state_path(idx)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(state, f, ensure_ascii=False, indent=2, default=self._json_default)
+
+    def load_init_state(self, idx):
+        with open(self._init_state_path(idx), "r", encoding="utf-8") as f:
+            return json.load(f)
+
+    def _zero_actor_velocity(self, ent):
+        try:
+            import sapien.physx as _physx
+            comp = ent.find_component_by_type(_physx.PhysxRigidDynamicComponent)
+            if comp is not None:
+                comp.set_linear_velocity([0.0, 0.0, 0.0])
+                comp.set_angular_velocity([0.0, 0.0, 0.0])
+        except Exception:
+            pass
+
+    def restore_init_state(self, state):
+        """Override the freshly-built (seeded) scene with the recorded explicit
+        state. Must be called AFTER setup_demo has created the scene + handles.
+
+        Live scene objects are matched to recorded ones by name, preserving order
+        among duplicates (the seed reproduces the same creation order, so the i-th
+        live object named X is the i-th recorded one named X). The recorded state
+        is authoritative; count/name mismatches are logged, not fatal."""
+        from collections import defaultdict, deque
+
+        # --- rigid actors ---
+        actor_recs = defaultdict(deque)
+        for rec in state.get("actors", []):
+            actor_recs[rec["name"]].append(rec)
+        for ent in self.scene.get_all_actors():
+            name = ent.get_name()
+            if name == "" or name == "ground":
+                continue
+            q = actor_recs.get(name)
+            if not q:
+                continue
+            rec = q.popleft()
+            p, qq = rec["pose"]
+            try:
+                ent.set_pose(sapien.Pose(p=p, q=qq))
+                self._zero_actor_velocity(ent)
+            except Exception as e:
+                print(f"[restore_init_state] actor '{name}' set_pose failed: {e}")
+        leftover = sum(len(v) for v in actor_recs.values())
+        if leftover:
+            print(f"\033[93m[restore_init_state] {leftover} recorded actor(s) had no live match\033[0m")
+
+        # --- articulations (appliances + robot arms) ---
+        artic_recs = defaultdict(deque)
+        for rec in state.get("articulations", []):
+            artic_recs[rec["name"]].append(rec)
+        for art in self.scene.get_all_articulations():
+            q = artic_recs.get(art.get_name())
+            if not q:
+                continue
+            rec = q.popleft()
+            p, qq = rec["root_pose"]
+            try:
+                if hasattr(art, "set_root_pose"):
+                    art.set_root_pose(sapien.Pose(p=p, q=qq))
+                else:
+                    art.set_pose(sapien.Pose(p=p, q=qq))
+                if rec.get("qpos") is not None:
+                    qpos = np.asarray(rec["qpos"], dtype=float)
+                    art.set_qpos(qpos)
+                    if hasattr(art, "set_qvel"):
+                        art.set_qvel(np.zeros_like(qpos))
+            except Exception as e:
+                print(f"[restore_init_state] articulation '{art.get_name()}' restore failed: {e}")
+
+        # Robot arm drive targets + gripper (so the PD controller holds the pose).
+        self._restore_robot_state(state.get("robot", {}))
+
+    def _restore_robot_state(self, robot_state):
+        if not robot_state:
+            return
+        try:
+            if robot_state.get("left_qpos") is not None:
+                self.robot.left_entity.set_qpos(np.asarray(robot_state["left_qpos"], dtype=float))
+            if robot_state.get("right_qpos") is not None:
+                self.robot.right_entity.set_qpos(np.asarray(robot_state["right_qpos"], dtype=float))
+            left_arm = robot_state.get("left_arm")
+            right_arm = robot_state.get("right_arm")
+            if left_arm is not None:
+                self.robot.set_arm_joints(np.asarray(left_arm[:-1], dtype=float),
+                                          np.zeros(len(left_arm) - 1), "left")
+                self.robot.set_gripper(float(left_arm[-1]), "left")
+            if right_arm is not None:
+                self.robot.set_arm_joints(np.asarray(right_arm[:-1], dtype=float),
+                                          np.zeros(len(right_arm) - 1), "right")
+                self.robot.set_gripper(float(right_arm[-1]), "right")
+        except Exception as e:
+            print(f"[restore_init_state] robot restore failed: {e}")
 
     def merge_pkl_to_hdf5_video(self):
         if not self.save_data:

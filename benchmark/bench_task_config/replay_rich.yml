@@ -1,0 +1,32 @@
+# Replay overlay config for replay_trajectory.py
+#
+# This is NOT a full task config. replay_trajectory.py loads the *collection*
+# task_config (to reproduce the identical seeded scene + handles) and then
+# overlays only the keys below: extra observation modalities to record during
+# replay, where to write the replay dataset, and capture cadence.
+#
+#   python script/replay_trajectory.py <task_name> <collection_config> \
+#       --replay-config replay_rich
+#
+# Outputs land in <save_path>/<task_name>/<collection_config>_<out_subdir>/.
+
+# Extra modalities to record during replay (merged into the collection data_type).
+# Enable whatever your experiment needs; each is already supported by get_obs().
+data_type:
+  rgb: true
+  depth: true
+  pointcloud: true
+  mesh_segmentation: true
+  actor_segmentation: true
+  endpose: true
+  qpos: true
+  object_pose: true        # per-frame pose of every scene object (new modality)
+
+# Where replay datasets are written (defaults to the collection save_path if unset).
+save_path: ./data/replay_data
+
+# Subdir suffix: outputs go to <save_path>/<task>/<collection_config>_<out_subdir>/.
+out_subdir: replay
+
+# Capture cadence (frames between saved observations). Lower = denser, larger files.
+save_freq: 15

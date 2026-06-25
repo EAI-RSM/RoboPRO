@@ -155,12 +155,16 @@ def run(TASK_ENV, args):
                 TASK_ENV.setup_demo(now_ep_num=suc_num, seed=epid, **args)
                 if hasattr(TASK_ENV, "_maybe_apply_language_perturbation"):
                     TASK_ENV._maybe_apply_language_perturbation()
+                # Capture the initial state at t=0, BEFORE play_once moves anything.
+                init_state = TASK_ENV.capture_init_state() if args.get("save_init_state", True) else None
                 TASK_ENV.play_once()
 
                 if TASK_ENV.plan_success and TASK_ENV.check_success():
                     print(f"simulate data episode {suc_num} success! (seed = {epid})")
                     seed_list.append(epid)
                     TASK_ENV.save_traj_data(suc_num)
+                    if init_state is not None:
+                        TASK_ENV.save_init_state(suc_num, state=init_state)
                     suc_num += 1
                 else:
                     print(f"simulate data episode {suc_num} fail! (seed = {epid})")

@@ -9,6 +9,62 @@ import os, re
 from .actor_utils import Actor, ArticulationActor
 
 
+# ---------------------------------------------------------------------------
+# Asset build-spec registry
+#
+# Records, per scene and in creation order, the build spec of every object
+# spawned through the object factories below (task objects, clutter, articulated
+# appliances). Base_Task.capture_init_state / restore_init_state use this to make
+# the recorded initial state self-describing and to override poses on replay by
+# creation order (the seeded setup reproduces the same order; we overwrite poses).
+# Keyed by id() of the resolved sapien.Scene; reset_asset_registry() is called
+# from Base_Task.setup_scene right after the scene is (re)created.
+# ---------------------------------------------------------------------------
+_ASSET_SPEC_REGISTRY = {}
+
+
+def resolve_scene(scene):
+    """create_actor-style callers may pass either a sapien.Scene or the task
+    wrapper (which carries a `.scene`). Return the underlying sapien.Scene."""
+    return scene if isinstance(scene, sapien.Scene) else scene.scene
+
+
+def reset_asset_registry(scene):
+    _ASSET_SPEC_REGISTRY[id(resolve_scene(scene))] = []
+
+
+def get_asset_registry(scene):
+    """Creation-ordered list of (wrapper, spec) spawned in this scene."""
+    return _ASSET_SPEC_REGISTRY.get(id(resolve_scene(scene)), [])
+
+
+def register_asset_spec(scene, actor, modelname, *, model_id=None, scale=None,
+                        convex=False, is_static=False, kind="rigid"):
+    """Stamp the build spec onto the wrapper and append (wrapper, spec) to the
+    per-scene registry. Returns the wrapper unchanged (so callers can `return
+    register_asset_spec(...)`)."""
+    if actor is None:
+        return actor
+    if isinstance(scale, np.ndarray):
+        scale = scale.tolist()
+    elif isinstance(scale, tuple):
+        scale = list(scale)
+    spec = {
+        "modelname": modelname,
+        "model_id": model_id,
+        "scale": scale,
+        "convex": bool(convex),
+        "is_static": bool(is_static),
+        "kind": kind,
+    }
+    try:
+        actor.build_spec = spec
+    except Exception:
+        pass
+    _ASSET_SPEC_REGISTRY.setdefault(id(resolve_scene(scene)), []).append((actor, spec))
+    return actor
+
+
 class UnStableError(Exception):
 
     def __init__(self, msg):
@@ -597,7 +653,10 @@ def create_obj(
     mesh = builder.build(name=modelname)
     mesh.set_pose(pose)
 
-    return Actor(mesh, model_data, scale=scale)
+    return register_asset_spec(
+        scene, Actor(mesh, model_data, scale=scale), modelname,
+        model_id=model_id, scale=scale, convex=convex, is_static=is_static, kind="rigid",
+    )
 
 
 # create glb model
@@ -652,7 +711,10 @@ def create_glb(
     mesh = builder.build(name=modelname)
     mesh.set_pose(pose)
 
-    return Actor(mesh, model_data, scale=scale)
+    return register_asset_spec(
+        scene, Actor(mesh, model_data, scale=scale), modelname,
+        model_id=model_id, scale=scale, convex=convex, is_static=is_static, kind="rigid",
+    )
 
 
 def get_glb_or_obj_file(modeldir, model_id):
@@ -734,7 +796,10 @@ def create_actor(
     mesh = builder.build(name=modelname)
     mesh.set_name(modelname)
     mesh.set_pose(pose)
-    return Actor(mesh, model_data, scale=scale)
+    return register_asset_spec(
+        scene, Actor(mesh, model_data, scale=scale), modelname,
+        model_id=model_id, scale=scale, convex=convex, is_static=is_static, kind="rigid",
+    )
 
 
 # create urdf model
@@ -764,7 +829,10 @@ def create_urdf_obj(scene, pose: sapien.Pose, modelname: str, scale: float | int
     object: sapien.Articulation = loader.load(str(modeldir / "mobility.urdf"))
     object.set_root_pose(pose)
     object.set_name(modelname)
-    return ArticulationActor(object, model_data, scale=[scale,scale,scale]) # mobility.urdf does not contain a scale so final scale is just loader.scale
+    return register_asset_spec(
+        scene, ArticulationActor(object, model_data, scale=[scale,scale,scale]),
+        modelname, scale=scale, kind="urdf",
+    )  # mobility.urdf does not contain a scale so final scale is just loader.scale
 
 
 def create_sapien_urdf_obj(
@@ -839,4 +907,7 @@ def create_sapien_urdf_obj(
             bounding_box = json.load(open(bounding_box_file, "r", encoding="utf-8"))
             model_data["extents"] = (np.array(bounding_box["max"]) - np.array(bounding_box["min"])).tolist()
     object.set_name(modelname)
-    return ArticulationActor(object, model_data, scale=[scale,scale,scale])
+    return register_asset_spec(
+        scene, ArticulationActor(object, model_data, scale=[scale,scale,scale]),
+        modelname, model_id=modelid, scale=scale, kind="sapien_urdf",
+    )

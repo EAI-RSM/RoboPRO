@@ -614,9 +614,10 @@ def create_cluttered_urdf_obj(scene, pose: sapien.Pose, modelname: str, scale=1.
 
     # combined_scale = urdf_mesh_scales(modeldir / "model.urdf") * scale
     if isinstance(object, sapien.physx.PhysxArticulation):
-        return ArticulationActor(object, None, scale=[scale,scale,scale])
+        wrapper = ArticulationActor(object, None, scale=[scale,scale,scale])
     else:
-        return Actor(object, None, scale=[scale,scale,scale])
+        wrapper = Actor(object, None, scale=[scale,scale,scale])
+    return register_asset_spec(scene, wrapper, modelname, scale=scale, kind="cluttered_urdf")
 
 def urdf_mesh_scales(urdf_path: str | Path):
     urdf_path = Path(urdf_path)
