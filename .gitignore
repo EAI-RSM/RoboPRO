@@ -72,3 +72,7 @@ benchmark_data/*
 benchmark/collision_test/
 benchmark/bench_script/collision_test/
 presentation_material/
+
+# Validation outputs (generated, not tracked)
+scripts/validation/results/
+docs/objaverse_preview/
