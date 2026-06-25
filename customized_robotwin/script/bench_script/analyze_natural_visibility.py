@@ -192,9 +192,13 @@ def analyze(out_dir, heavy_threshold, selectable_threshold):
     import matplotlib.pyplot as plt
 
     recs = load_records(out_dir)
-    if any(not r.get("pose_match", True) for r in recs):
-        n = sum(1 for r in recs if not r.get("pose_match", True))
-        print(f"WARNING: {n} records had target pose != clean build; their fractions are suspect.")
+    # Drop records whose target drifted from the clean build (physics settling near
+    # clutter): their denominator is the wrong silhouette, so the fraction is invalid.
+    n_bad = sum(1 for r in recs if not r.get("pose_match", True))
+    if n_bad:
+        print(f"NOTE: excluding {n_bad}/{len(recs)} records with target pose != clean build "
+              f"(invalid denominator from settling drift).")
+        recs = [r for r in recs if r.get("pose_match", True)]
 
     densities = sorted({r["density"] for r in recs})
     buckets = ["not_visible", "heavily_occluded", "visible"]
