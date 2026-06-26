@@ -36,6 +36,19 @@ from typing import Optional, Literal
 current_file_path = os.path.abspath(__file__)
 parent_directory = os.path.dirname(current_file_path)
 
+# Diagnostic clutter set for maximizing occlusion on the steep countertop view.
+# Each entry: model ids to use + a sampling weight (relative frequency of placement).
+# 038_milk-box is a tall flat carton (the best occluder by silhouette, not radius)
+# and is weighted to ~half of all placements. It is NOT in the office obstacle pool,
+# so its clutter params are computed directly in _build_handcrafted_clutter().
+HANDCRAFTED_TALL_CLUTTER = {
+    "038_milk-box": {"ids": [1, 2], "weight": 4, "scale_mult": 2.0},  # carton, 2x -> ~half
+    "089_globe": {"ids": [2, 3], "weight": 1},           # h~0.33/0.29
+    "090_trophy": {"ids": [1], "weight": 1},             # h~0.29
+    "099_fan": {"ids": [0, 4], "weight": 1},             # h~0.24/0.23
+    "119_mini-chalkboard": {"ids": [0], "weight": 1},    # h~0.23, flat/wide
+}
+
 
 class Office_base_task(Bench_base_task):
 
@@ -92,6 +105,13 @@ class Office_base_task(Bench_base_task):
         self.random_embodiment = random_setting.get("random_embodiment", False)  # TODO
         self.obstacle_height = random_setting.get("obstacle_height", "short")
         self.obstacle_density = random_setting.get("obstacle_density", 3)
+        # diagnostic: place table clutter from the "tall" obstacle pool only
+        self.tall_obstacles_only = random_setting.get("obstacle_tall_only", False)
+        # diagnostic: restrict table clutter to the handcrafted tallest/widest set
+        self.handcrafted_clutter = HANDCRAFTED_TALL_CLUTTER if random_setting.get("obstacle_handcrafted", False) else None
+        # allow repeating the same object so obstacle_density is actually reached
+        # (auto-on for handcrafted, which has few distinct model ids)
+        self.allow_duplicate_clutter = random_setting.get("obstacle_allow_duplicates", False) or bool(self.handcrafted_clutter)
 
         # Parse vision / ood / object / language perturbation flags
         # before setup_scene() so lighting ablation can consult them.
@@ -572,13 +592,72 @@ class Office_base_task(Bench_base_task):
             "office", self.obstacle_distribution, task_objects_list
         )
 
-        self.clutter_surface_split(xlim, ylim, zlim, self.prohibited_area["table"], self.obstacle_density, cluttered_item_info, obj_names_short, obj_names_tall)
+        # diagnostic: restrict table clutter to the handcrafted set (computed directly,
+        # so objects outside the obstacle pool like 038_milk-box work), weighted sampling.
+        if getattr(self, "handcrafted_clutter", None):
+            cluttered_item_info, obj_names_tall = self._build_handcrafted_clutter()
+            obj_names_short = []
+            pool_str = ", ".join(f"{n}:{cluttered_item_info[n]['ids']}(w{c})"
+                                 for n, c in sorted(((n, obj_names_tall.count(n)) for n in cluttered_item_info)))
+            print(f"\033[92m[handcrafted_clutter] pool = {{{pool_str}}}\033[0m")
+
+        # diagnostic: when tall_obstacles_only, draw table clutter from the tall pool only
+        table_short_pool = [] if getattr(self, "tall_obstacles_only", False) else obj_names_short
+        self.clutter_surface_split(xlim, ylim, zlim, self.prohibited_area["table"], self.obstacle_density, cluttered_item_info, table_short_pool, obj_names_tall)
         # # shelves ----------------------------------------------------
         xlim = [self.office_info["shelf_lims"][0], self.office_info["shelf_lims"][2]]
         ylim = [self.office_info["shelf_lims"][1], self.office_info["shelf_lims"][3]]
         self.clutter_surface(xlim, ylim, [self.office_info["shelf_heights"][0]], self.prohibited_area["shelf0"], 5, cluttered_item_info, obj_names_short)
         self.clutter_surface(xlim, ylim, [self.office_info["shelf_heights"][1]], self.prohibited_area["shelf1"], 5, cluttered_item_info, obj_names_short)
-    
+
+    def _build_handcrafted_clutter(self):
+        """
+        Build (cluttered_item_info, weighted_tall_names) for self.handcrafted_clutter.
+        Params (scale/z_max/radius) are computed directly from each model's
+        model_data + task_objects.yml scales, so objects outside the obstacle pool
+        (e.g. 038_milk-box) work. weighted_tall_names repeats each name `weight`
+        times so clutter_surface_split's uniform pick yields the desired mix.
+        """
+        import yaml as _yaml
+        from envs.utils.rand_create_cluttered_actor import _scale_vec3_from_task_yaml
+        objects_dir = Path(os.environ["BENCH_ROOT"]) / "assets" / "objects"
+        with open(Path(os.environ["BENCH_ROOT"]) / "bench_task_config" / "task_objects.yml",
+                  "r", encoding="utf-8") as _f:
+            scales_cfg = (_yaml.safe_load(_f) or {}).get("scales", {})
+
+        info, weighted = {}, []
+        for name, spec in self.handcrafted_clutter.items():
+            ids = spec["ids"] if isinstance(spec, dict) else spec
+            weight = spec.get("weight", 1) if isinstance(spec, dict) else 1
+            scale_mult = spec.get("scale_mult", 1.0) if isinstance(spec, dict) else 1.0
+            params, good_ids = {}, []
+            for mid in ids:
+                mc_path = objects_dir / name / f"model_data{mid}.json"
+                if not mc_path.exists():
+                    print(f"\033[93m[handcrafted] {name}/{mid} missing model_data, skip\033[0m")
+                    continue
+                with open(mc_path, "r", encoding="utf-8") as _mf:
+                    mc = json.load(_mf)
+                ext, cen = mc.get("extents"), mc.get("center", [0, 0, 0])
+                if not ext:
+                    continue
+                sv = scales_cfg.get(name)
+                sv = sv.get(str(mid)) if isinstance(sv, dict) else sv
+                sc = [s * scale_mult for s in _scale_vec3_from_task_yaml(sv, mc)]
+                params[str(mid)] = {
+                    "z_max": (ext[1] + cen[1]) * sc[1],
+                    "radius": (ext[0] * sc[0] + ext[2] * sc[2]) / 4,
+                    "z_offset": 0,
+                    "scale": sc,
+                }
+                good_ids.append(str(mid))
+            if not good_ids:
+                print(f"\033[93m[handcrafted] {name} has no valid ids, skip\033[0m")
+                continue
+            info[name] = {"ids": good_ids, "type": "glb", "root": f"objects/{name}", "params": params}
+            weighted += [name] * max(1, int(weight))
+        return info, weighted
+
     def add_extra_cameras(self):
         self.cameras.add_extra_cameras(f"{os.environ['BENCH_ROOT']}/assets/embodiments/office_config.yml")
     
