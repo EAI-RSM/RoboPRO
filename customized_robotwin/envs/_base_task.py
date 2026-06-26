@@ -33,6 +33,16 @@ from typing import Optional, Literal
 current_file_path = os.path.abspath(__file__)
 parent_directory = os.path.dirname(current_file_path)
 
+# Visibility buckets as ordered (name, upper-exclusive bound on visible_fraction).
+# `not_visible` is the special case visible_fraction == 0 (handled separately).
+# Tunable; pass a custom list to classify_visibility / measure_target_visibility.
+DEFAULT_VISIBILITY_BUCKETS = [
+    ("heavily_occluded", 0.25),    # 0    < frac < 0.25
+    ("mostly_occluded", 0.5),      # 0.25 <= frac < 0.5
+    ("partially_occluded", 0.9),   # 0.5  <= frac < 0.9
+    ("fully_visible", float("inf")),  # 0.9 <= frac
+]
+
 
 class Base_Task(gym.Env):
 
@@ -566,25 +576,35 @@ class Base_Task(gym.Env):
 
         raise TypeError(f"Cannot resolve segmentation id for object of type {type(actor)}")
 
-    def classify_visibility(self, visible_fraction, heavy_threshold=0.25) -> str:
+    def classify_visibility(self, visible_fraction, buckets=None) -> str:
         """
-        Extremes-focused bucket classifier (tunable).
-            not_visible       : visible_fraction == 0
-            heavily_occluded  : 0 < visible_fraction < heavy_threshold
-            visible           : visible_fraction >= heavy_threshold
+        Classify visible_fraction into a named bucket. ``buckets`` is an ordered
+        list of (name, upper_exclusive) bounds (defaults to
+        ``DEFAULT_VISIBILITY_BUCKETS``); visible_fraction == 0 is always
+        ``not_visible``.
+
+        Default taxonomy:
+            not_visible        : frac == 0
+            heavily_occluded   : 0    < frac < 0.25
+            mostly_occluded    : 0.25 <= frac < 0.5
+            partially_occluded : 0.5  <= frac < 0.9
+            fully_visible      : 0.9  <= frac
         """
+        if buckets is None:
+            buckets = DEFAULT_VISIBILITY_BUCKETS
         if visible_fraction <= 0.0:
             return "not_visible"
-        if visible_fraction < heavy_threshold:
-            return "heavily_occluded"
-        return "visible"
+        for name, hi in buckets:
+            if visible_fraction < hi:
+                return name
+        return buckets[-1][0]
 
     def measure_target_visibility(
         self,
         target_actor,
         camera_name="countertop_camera",
         denominator=None,
-        heavy_threshold=0.25,
+        buckets=None,
         render=True,
     ) -> dict:
         """
@@ -630,7 +650,7 @@ class Base_Task(gym.Env):
         if denominator is not None and denominator > 0:
             frac = visible_pixel_count / float(denominator)
             result["visible_fraction"] = frac
-            result["bucket"] = self.classify_visibility(frac, heavy_threshold=heavy_threshold)
+            result["bucket"] = self.classify_visibility(frac, buckets=buckets)
 
         return result
 
