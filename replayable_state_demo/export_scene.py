@@ -44,8 +44,6 @@ ROBOT_BASE_P = np.array([0.0, -0.65, 0.0])
 ROBOT_BASE_Q = np.array([0.707, 0.0, 0.0, 0.707])  # wxyz, 90deg about Z
 # Cameras to export RGB for (policy view + a nice external view)
 RGB_CAMS = ["head_camera", "demo_camera"]
-# glTF (Y-up) -> SAPIEN (Z-up) visual correction applied to object meshes
-GLTF_TO_Z = trimesh.transformations.rotation_matrix(np.pi / 2, [1, 0, 0])
 
 ENV_ACTORS = {"ground", "table", "wall"}
 PALETTE = [
@@ -107,20 +105,21 @@ def model_data_scale(name):
     return None
 
 
-def recover_scale(verts, R_corr, R_obj0, p0, table_top):
+def recover_scale(verts, R_obj0, p0, table_top):
     """The manifest gap: per-object scale was not logged. Recover a uniform scale
     from the trace -- for a table-resting object, the scale that drops its lowest
     mesh vertex onto the table surface at frame 0. Wall-mounted / floating objects
-    fall back to normalizing the largest extent to a plausible size."""
-    vc = (R_corr[:3, :3] @ verts.T).T            # correction-aligned, unscaled
-    world_z_dir = (R_obj0 @ vc.T).T[:, 2]         # local z component once posed
-    min_z = float(world_z_dir.min())
+    fall back to normalizing the largest extent to a plausible size.
+    `verts` are already in the SAPIEN actor frame (glb node transforms baked in by
+    trimesh force='mesh'), so no extra rotation is applied."""
+    world_z = (R_obj0 @ verts.T).T[:, 2]          # vertex height once posed at frame 0
+    min_z = float(world_z.min())
     gap = float(p0[2] - table_top)                # origin height above table
     if 0.005 < gap < 0.20 and min_z < -0.02:      # plausibly resting on the table
         s = (table_top - p0[2]) / min_z
         if 0.02 < s < 2.0:
             return [s, s, s], "rest-on-table"
-    ext = vc.max(0) - vc.min(0)                    # fallback: normalize size
+    ext = verts.max(0) - verts.min(0)             # fallback: normalize size
     s = 0.35 / float(ext.max())
     return [s, s, s], "extent-norm"
 
@@ -295,8 +294,8 @@ def main():
             if glb:
                 shutil.copy(glb, os.path.join(ASSETS, f"{name}.glb"))
                 entry["glb"] = f"assets/{name}.glb"
-                entry["mesh_correction"] = wxyz_to_xyzw(
-                    trimesh.transformations.quaternion_from_matrix(GLTF_TO_Z))
+                # no mesh correction: SAPIEN (and three.js GLTFLoader) honor each glb's own
+                # node transforms; the up-axis fix is already baked per-asset.
                 ms = model_data_scale(name)
                 if ms is not None:
                     entry["scale"], entry["scale_src"] = ms, "model_data"
@@ -304,7 +303,7 @@ def main():
                     verts = trimesh.load(glb, force="mesh").vertices
                     R0 = quat_wxyz_to_R(quat[0, i])
                     entry["scale"], entry["scale_src"] = recover_scale(
-                        verts, GLTF_TO_Z, R0, pos[0, i], table_top_z)
+                        verts, R0, pos[0, i], table_top_z)
             else:
                 entry["primitive"] = "box"
                 entry["scale"] = [1, 1, 1]

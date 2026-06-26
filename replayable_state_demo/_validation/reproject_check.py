@@ -67,11 +67,9 @@ def main():
     for i, obj in enumerate(SCENE["objects"]):
         if "glb" not in obj:
             continue
-        verts = load_glb_vertices(obj["glb"])
-        Rc = R_xyzw(obj["mesh_correction"]) if "mesh_correction" in obj else np.eye(3)
+        verts = load_glb_vertices(obj["glb"])   # force='mesh' bakes the glb's own node xform
         s = np.array(obj["scale"])
-        local = (Rc @ (verts * s).T).T
-        world = (R_xyzw(oquat[i]) @ local.T).T + opos[i]
+        world = (R_xyzw(oquat[i]) @ (verts * s).T).T + opos[i]   # no added correction
         col = [int(255 * c) for c in reversed(obj["color"])]  # BGR
         draw(world, col)
 

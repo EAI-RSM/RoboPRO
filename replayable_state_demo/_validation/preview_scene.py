@@ -75,9 +75,9 @@ draw(box_verts(0.1, -0.05, (ztop - 0.05) / 2, 1.2, 0.7, ztop - 0.05), (190, 190,
 for i, o in enumerate(SCENE["objects"]):
     col = tuple(int(255 * c) for c in reversed(o["color"]))
     if "glb" in o:
-        v = glb_verts(o["glb"])
-        Rc = R_xyzw(o["mesh_correction"]); s = np.array(o["scale"])
-        world = (R_xyzw(oq[i]) @ (Rc @ (v * s).T)).T + op[i]
+        v = glb_verts(o["glb"])             # force='mesh' already bakes the glb's own node xform
+        s = np.array(o["scale"])
+        world = (R_xyzw(oq[i]) @ (v * s).T).T + op[i]   # no added correction (matches three.js)
         draw(world, col)
     elif o.get("primitive") == "box" and o["role"] == "destination":
         v = box_verts(0, 0, 0, 0.23, 0.17, 0.01)

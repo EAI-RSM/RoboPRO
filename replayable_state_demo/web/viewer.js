@@ -14,9 +14,14 @@ function fatal(msg) {
 }
 window.addEventListener('error', e => fatal((e.error && e.error.stack) || e.message));
 window.addEventListener('unhandledrejection', e => fatal('' + (e.reason && (e.reason.stack || e.reason))));
+function status(msg) {
+  const el = document.getElementById('loading');
+  if (el && el.style.color !== 'rgb(248, 81, 73)') el.textContent = msg;
+}
 
 // ---------------------------------------------------------------- load manifest
-const SCENE = await (await fetch('data/scene.json')).json();
+status('fetching scene.json …');
+const SCENE = await (await fetch('data/scene.json')).json().catch(err => { fatal('scene.json: ' + err); throw err; });
 const M = SCENE.meta, NF = M.n_frames, A = SCENE.objects.length;
 const OP = SCENE.frames.object_pos, OQ = SCENE.frames.object_quat;
 
@@ -52,13 +57,26 @@ scene.add(key);
 scene.add(new THREE.DirectionalLight(0xffffff, 0.4).translateZ(3));
 
 function resize() {
-  const w = host.clientWidth, h = host.clientHeight;
+  let w = host.clientWidth, h = host.clientHeight;
+  if (!w || !h) { w = Math.max(320, window.innerWidth - 360); h = Math.max(240, window.innerHeight - 64); }
   renderer.setSize(w, h); camera.aspect = w / h; camera.updateProjectionMatrix();
 }
 new ResizeObserver(resize).observe(host);
 
+// tiny debug readout (so a black screen is diagnosable without a console)
+const dbg = document.createElement('div');
+dbg.style.cssText = 'position:absolute;top:8px;right:8px;z-index:20;font:11px monospace;' +
+  'color:#8b949e;background:rgba(13,17,23,.7);padding:4px 7px;border-radius:6px;white-space:pre';
+host.parentElement.appendChild(dbg);
+
 // ---------------------------------------------------------------- helpers
 const loader = new GLTFLoader();
+let nWant = 0, nGot = 0;
+function gltf(url, onLoad) {
+  nWant++;
+  loader.load(url, (g) => { nGot++; status(`loading meshes … ${nGot}/${nWant}`); onLoad(g); },
+    undefined, (err) => fatal('failed to load ' + url + '\n' + (err && err.message || err)));
+}
 const segMaterials = new Map();          // mesh -> {orig, seg}
 function registerSeg(mesh, colorArr) {
   const seg = new THREE.MeshStandardMaterial({
@@ -104,9 +122,10 @@ const objRoots = [];                        // per-actor root Object3D or null
 SCENE.objects.forEach((o, i) => {
   if (o.glb) {
     const root = new THREE.Group(); scene.add(root); objRoots[i] = root;
-    loader.load(o.glb, (g) => {
+    gltf(o.glb, (g) => {
       const inner = g.scene;
-      inner.quaternion.set(...o.mesh_correction);          // glTF Y-up -> SAPIEN Z-up
+      // SAPIEN's add_visual_from_file uses the glb coords as-is (each glb bakes its own
+      // up-axis node transform), so we honor the loaded nodes and add NO correction.
       inner.scale.set(...o.scale);
       inner.traverse((m) => {
         if (m.isMesh) { m.castShadow = true; m.receiveShadow = true; registerSeg(m, o.color); }
@@ -130,14 +149,14 @@ const robotGroup = new THREE.Group(); scene.add(robotGroup);
 const robMeta = { name: 'robot', color: [0.62, 0.66, 0.72] };
 const movingLinks = [];                     // {group}
 if (SCENE.robot.static_glb) {
-  loader.load(SCENE.robot.static_glb, (g) => {
+  gltf(SCENE.robot.static_glb, (g) => {
     g.scene.traverse(m => { if (m.isMesh) { m.castShadow = true; registerSeg(m, robMeta.color); } });
     robotGroup.add(g.scene);
   });
 }
 (SCENE.robot.moving_links || []).forEach((lk, j) => {
   const grp = new THREE.Group(); robotGroup.add(grp); movingLinks[j] = grp;
-  loader.load(lk.glb, (g) => {
+  gltf(lk.glb, (g) => {
     g.scene.traverse(m => { if (m.isMesh) { m.castShadow = true; registerSeg(m, robMeta.color); } });
     grp.add(g.scene);
   });
@@ -317,8 +336,9 @@ document.getElementById('st-bar').style.width = Math.max(st.ratio_pct, 0.6) + '%
 // ---------------------------------------------------------------- run
 resize(); applyFrame(0);
 [...camButtons.children][0].click();        // start in free-orbit
-document.getElementById('loading').style.display = 'none';
+status(nWant ? `loading meshes … ${nGot}/${nWant}` : 'rendering …');
 
+let firstFrame = true;
 function tick(now) {
   const dt = (now - last) / 1000; last = now;
   if (playing) {
@@ -327,6 +347,15 @@ function tick(now) {
   }
   if (controls.enabled) controls.update();   // when snapped to a collected cam, hold the pose
   renderer.render(scene, camera);
+  const sz = renderer.getSize(new THREE.Vector2());
+  dbg.textContent = `canvas ${sz.x|0}x${sz.y|0}  meshes ${nGot}/${nWant}\n` +
+    `cam ${camera.position.x.toFixed(2)},${camera.position.y.toFixed(2)},${camera.position.z.toFixed(2)}` +
+    `  frame ${frame}`;
+  if (firstFrame) {                          // hide overlay only once we've actually drawn a frame
+    firstFrame = false;
+    const el = document.getElementById('loading');
+    if (el && el.style.color !== 'rgb(248, 81, 73)') el.style.display = 'none';
+  }
   requestAnimationFrame(tick);
 }
 requestAnimationFrame(tick);
