@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>Replayable State — RoboPRO demo</title>
+<title>Replayable State — layered viewer</title>
 <style>
   :root {
     --bg:#0d1117; --panel:#161b22; --panel2:#1c2330; --line:#2b3340;
@@ -11,155 +11,176 @@
   }
   * { box-sizing:border-box; }
   html,body { margin:0; height:100%; background:var(--bg); color:var(--txt);
-    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif; }
-  #app { display:grid; grid-template-columns:1fr 360px; grid-template-rows:1fr auto;
-    height:100vh; gap:0; }
-  #stage { position:relative; grid-row:1; grid-column:1; overflow:hidden; }
-  #canvas-host { position:absolute; inset:0; }
-  #overlay-top { position:absolute; top:0; left:0; right:0; padding:14px 18px;
-    background:linear-gradient(180deg,rgba(13,17,23,.85),rgba(13,17,23,0)); pointer-events:none; }
-  #overlay-top h1 { margin:0; font-size:15px; font-weight:600; letter-spacing:.2px; }
-  #overlay-top .sub { color:var(--dim); font-size:12px; margin-top:3px; }
-  .badge { display:inline-block; padding:2px 8px; border-radius:10px; font-size:11px; font-weight:600;
-    vertical-align:middle; }
+    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif; font-size:13px; }
+  #app { display:grid; grid-template-columns:1fr 396px; grid-template-rows:auto 1fr auto; height:100vh; }
+  #top { grid-column:1 / span 2; padding:9px 14px; border-bottom:1px solid var(--line);
+    display:flex; align-items:center; gap:12px; flex-wrap:wrap; }
+  #top h1 { margin:0; font-size:14px; font-weight:600; }
+  #top .sub { color:var(--dim); font-size:12px; }
+  #top .spacer { flex:1; }
+  select, .tbtn { background:var(--panel2); color:var(--txt); border:1px solid var(--line);
+    border-radius:6px; padding:5px 9px; font-size:12px; cursor:pointer; }
+  .tbtn:hover { border-color:var(--accent); }
+  .tbtn.active { background:var(--accent); color:var(--bg); border-color:var(--accent); font-weight:600; }
+  .badge { padding:2px 8px; border-radius:10px; font-size:11px; font-weight:600; }
   .badge.good { background:rgba(63,185,80,.18); color:var(--good); }
-  .badge.role { background:rgba(88,166,255,.16); color:var(--accent); margin-left:6px; }
-  #view-tag { position:absolute; left:18px; bottom:14px; font-size:12px; padding:6px 11px;
-    border-radius:8px; background:rgba(28,35,48,.85); border:1px solid var(--line);
-    backdrop-filter:blur(4px); }
-  #view-tag b { color:var(--accent); }
-  #rgb-compare { position:absolute; right:14px; bottom:14px; width:240px;
-    border:1px solid var(--line); border-radius:8px; overflow:hidden; background:#000;
-    box-shadow:0 6px 24px rgba(0,0,0,.5); display:none; }
-  #rgb-compare img { display:block; width:100%; image-rendering:auto; }
-  #rgb-compare .cap { font-size:10.5px; color:var(--dim); padding:4px 7px; background:var(--panel);
-    border-top:1px solid var(--line); }
-  #side { grid-row:1; grid-column:2; background:var(--panel); border-left:1px solid var(--line);
-    overflow-y:auto; padding:0 0 16px; }
-  .sec { padding:14px 16px; border-bottom:1px solid var(--line); }
-  .sec h2 { margin:0 0 10px; font-size:11px; text-transform:uppercase; letter-spacing:.7px;
-    color:var(--dim); font-weight:600; }
-  .sec h2 .note { text-transform:none; letter-spacing:0; color:#5b6470; font-weight:400; }
-  .kv { display:flex; justify-content:space-between; align-items:baseline; font-size:13px;
-    padding:3px 0; }
+  .badge.warn { background:rgba(210,153,34,.18); color:var(--warn); }
+  .badge.bad  { background:rgba(248,81,73,.18);  color:var(--bad); }
+  #stage { grid-row:2; grid-column:1; position:relative; overflow:hidden; background:#05070a; padding:8px;
+    display:flex; gap:8px; }
+  .viewbox { display:flex; flex-direction:column; flex:1; min-width:0; }
+  .vwrap { position:relative; flex:1; min-height:0; }
+  .vwrap canvas { width:100%; height:100%; object-fit:contain; background:#000; }
+  .vhead { display:flex; align-items:center; gap:8px; padding:4px 8px; background:var(--panel);
+    border:1px solid var(--line); border-bottom:none; border-radius:6px 6px 0 0; font-size:11px;
+    height:30px; flex-wrap:nowrap; overflow:hidden; white-space:nowrap; }
+  .vhead .hid { font-weight:600; }
+  .vhead .hmeta { color:var(--dim); }
+  .vhead .sparks { display:flex; gap:4px; margin-left:auto; }
+  .vhead .sparks canvas { width:64px; height:22px; background:var(--panel2); border:1px solid var(--line); border-radius:3px; }
+  .allnone { float:right; text-transform:none; letter-spacing:0; font-weight:400; font-size:11px; }
+  .allnone a { cursor:pointer; }
+  .tag { position:absolute; left:7px; top:7px; font:11px monospace; color:var(--dim);
+    background:rgba(13,17,23,.72); padding:3px 7px; border-radius:6px; pointer-events:none; }
+  #cmpbox { display:none; }
+  #cmpbox.on { display:flex; }
+  .vfoot { display:flex; gap:6px; height:200px; padding-top:6px; }
+  .vfoot .fcell { flex:1; display:flex; flex-direction:column; min-width:0; }
+  .vfoot .flabel { font-size:10px; color:var(--dim); margin:0 0 2px 2px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .vfoot .vmini, .vfoot .vgraph { flex:1; width:100%; min-height:0; background:var(--panel2); border:1px solid var(--line); border-radius:5px; }
+  #loadbar { position:absolute; right:8px; top:8px; font:11px monospace; color:var(--accent);
+    background:rgba(13,17,23,.8); padding:3px 8px; border-radius:6px; }
+  #side { grid-row:2; grid-column:2; background:var(--panel); border-left:1px solid var(--line); overflow-y:auto; }
+  .sec { padding:11px 13px; border-bottom:1px solid var(--line); }
+  .sec h2 { margin:0 0 8px; font-size:10.5px; text-transform:uppercase; letter-spacing:.6px; color:var(--dim); font-weight:600; }
+  .chips, .cams { display:flex; flex-wrap:wrap; gap:5px; }
+  .chips .tbtn { padding:4px 8px; }
+  .grid2 { display:grid; grid-template-columns:1fr 1fr; gap:2px 10px; }
+  .row { display:flex; align-items:center; gap:7px; padding:3px 0; cursor:pointer; user-select:none; }
+  .row input[type=checkbox] { accent-color:var(--accent); width:14px; height:14px; }
+  .row .sw { width:10px; height:10px; border-radius:3px; flex:0 0 auto; }
+  .row .nm { flex:1; }
+  .row .meta { color:var(--dim); font-variant-numeric:tabular-nums; font-size:10.5px; }
+  .row.dim { opacity:.4; }
+  .slider { display:flex; align-items:center; gap:8px; padding:3px 0; font-size:12px; }
+  .slider input { flex:1; accent-color:var(--accent); }
+  .slider .v { color:var(--accent); font-variant-numeric:tabular-nums; min-width:42px; text-align:right; }
+  .gx-elabel { font:10px monospace; }
+  .gx-node text { font:600 11px -apple-system,sans-serif; }
+  .spark { width:100%; height:34px; background:var(--panel2); border:1px solid var(--line); border-radius:5px; display:block; margin:3px 0; }
+  .kv { display:flex; justify-content:space-between; font-size:12px; padding:2px 0; }
   .kv .v { font-variant-numeric:tabular-nums; font-weight:600; }
-  .relation { font-size:13px; line-height:1.5; color:var(--txt); background:var(--panel2);
-    border:1px solid var(--line); border-radius:6px; padding:8px 10px; }
-  .relation .q { color:var(--dim); }
-  .chips { display:flex; gap:6px; flex-wrap:wrap; margin-top:8px; }
-  .chip { font-size:11px; padding:3px 8px; border-radius:11px; border:1px solid var(--line);
-    color:var(--dim); }
-  .chip.on { color:var(--bg); font-weight:600; }
-  .chip.on.lift { background:var(--accent); border-color:var(--accent); }
-  .chip.on.place { background:var(--good); border-color:var(--good); }
-  .chip.on.grasp { background:var(--warn); border-color:var(--warn); }
-  .toggle { display:flex; align-items:center; justify-content:space-between; padding:5px 0;
-    font-size:13px; cursor:pointer; }
-  .toggle input { accent-color:var(--accent); width:15px; height:15px; }
-  .btn-row { display:flex; gap:6px; flex-wrap:wrap; }
-  button.cam { flex:1 1 auto; font-size:12px; padding:6px 8px; border-radius:6px; cursor:pointer;
-    background:var(--panel2); color:var(--txt); border:1px solid var(--line); }
-  button.cam:hover { border-color:var(--accent); }
-  button.cam.active { background:var(--accent); color:var(--bg); border-color:var(--accent); font-weight:600; }
-  .storage { font-size:12px; line-height:1.6; }
-  .storage .bignum { font-size:22px; font-weight:700; color:var(--good); }
-  .bar { height:8px; border-radius:4px; background:var(--panel2); overflow:hidden;
-    border:1px solid var(--line); margin:6px 0; }
-  .bar > div { height:100%; background:linear-gradient(90deg,var(--accent),var(--good)); }
-  #transport { grid-row:2; grid-column:1 / span 2; background:var(--panel);
-    border-top:1px solid var(--line); padding:10px 16px; display:flex; align-items:center; gap:14px; }
-  #playbtn { width:40px; height:40px; border-radius:50%; border:1px solid var(--line);
-    background:var(--panel2); color:var(--txt); font-size:16px; cursor:pointer; flex:0 0 auto; }
-  #playbtn:hover { border-color:var(--accent); }
+  .relsent { font-size:12px; background:var(--panel2); border:1px solid var(--line); border-radius:6px; padding:7px 9px; line-height:1.4; }
+  .hint { color:var(--dim); font-size:11px; margin-top:5px; line-height:1.4; }
+  #transport { grid-column:1 / span 2; grid-row:3; background:var(--panel); border-top:1px solid var(--line);
+    padding:7px 14px 9px; }
+  #timeline { width:100%; height:30px; display:block; cursor:pointer; }
+  .tline2 { display:flex; align-items:center; gap:12px; margin-top:5px; }
+  #play { width:34px; height:34px; border-radius:50%; border:1px solid var(--line); background:var(--panel2);
+    color:var(--txt); font-size:14px; cursor:pointer; flex:0 0 auto; }
   #scrub { flex:1; accent-color:var(--accent); }
-  #framelbl { font-variant-numeric:tabular-nums; font-size:13px; color:var(--dim);
-    min-width:118px; text-align:right; }
-  .legend { font-size:11px; color:var(--dim); margin-top:6px; }
-  a { color:var(--accent); }
-  #loading { position:absolute; inset:0; display:flex; align-items:center; justify-content:center;
-    background:var(--bg); z-index:10; font-size:13px; color:var(--dim); }
+  #flbl { font-variant-numeric:tabular-nums; color:var(--dim); min-width:110px; text-align:right; }
+  a { color:var(--accent); text-decoration:none; }
 </style>
 </head>
 <body>
 <div id="app">
+  <div id="top">
+    <h1 id="title">Replayable State</h1>
+    <span class="sub" id="subtitle"></span>
+    <span class="spacer"></span>
+    <label class="sub">scene <select id="sceneSel"></select></label>
+    <button class="tbtn" id="cmpBtn" title="overlay the paired baseline/perturbed twin">compare twin</button>
+    <button class="tbtn" id="snapBtn" title="download the current annotated frame">save frame</button>
+    <a href="scene3d.html">3D view →</a>
+  </div>
+
   <div id="stage">
-    <div id="canvas-host"></div>
-    <div id="loading">Reconstructing scene from state trace…</div>
-    <div id="overlay-top">
-      <h1 id="title">RoboPRO · Replayable State demo</h1>
-      <div class="sub" id="subtitle"></div>
+    <div class="viewbox">
+      <div class="vhead">
+        <span class="hid" id="h-id"></span><span class="badge" id="h-oc"></span>
+        <span class="hmeta" id="h-pert"></span><span class="hmeta" id="h-metrics"></span>
+        <span class="sparks"><canvas id="h-prog" title="progress"></canvas><canvas id="h-safe" title="safety/clearance"></canvas><canvas id="h-speed" title="target speed"></canvas></span>
+      </div>
+      <div class="vwrap"><canvas id="cv" width="640" height="480"></canvas><div class="tag" id="camtag"></div>
+        <div id="loadbar" style="display:none"></div></div>
+      <div class="vfoot">
+        <div class="fcell"><div class="flabel">top-down minimap</div><canvas class="vmini" id="minimap"></canvas></div>
+        <div class="fcell"><div class="flabel">scene graph · relations → grippers (heat=closest · L/R·F/B·U/D)</div>
+          <svg class="vgraph" id="graph" viewBox="0 0 360 300" preserveAspectRatio="xMidYMid meet"></svg></div>
+      </div>
     </div>
-    <div id="view-tag"></div>
-    <div id="rgb-compare"><img id="rgb-img" alt="collected RGB"/><div class="cap" id="rgb-cap"></div></div>
+    <div class="viewbox" id="cmpbox">
+      <div class="vhead">
+        <span class="hid" id="h2-id"></span><span class="badge" id="h2-oc"></span>
+        <span class="hmeta" id="h2-pert"></span><span class="hmeta" id="h2-metrics"></span>
+        <span class="sparks"><canvas id="h2-prog"></canvas><canvas id="h2-safe"></canvas><canvas id="h2-speed"></canvas></span>
+      </div>
+      <div class="vwrap"><canvas id="cv2" width="640" height="480"></canvas><div class="tag" id="camtag2"></div></div>
+      <div class="vfoot">
+        <div class="fcell"><div class="flabel">top-down minimap</div><canvas class="vmini" id="minimap2"></canvas></div>
+        <div class="fcell"><div class="flabel">scene graph · relations → grippers</div>
+          <svg class="vgraph" id="graph2" viewBox="0 0 360 300" preserveAspectRatio="xMidYMid meet"></svg></div>
+      </div>
+    </div>
   </div>
 
   <div id="side">
     <div class="sec">
-      <h2>Derived semantics <span class="note">— computed offline from the trace, never stored</span></h2>
-      <div class="relation"><span class="q">language re-annotation:</span><br/><span id="relation"></span></div>
-      <div style="height:10px"></div>
-      <div class="kv"><span>distance mouse → pad</span><span class="v" id="s-dist">–</span></div>
-      <div class="kv"><span>mouse height over table</span><span class="v" id="s-height">–</span></div>
-      <div class="kv"><span>final placement error</span><span class="v" id="s-perr">–</span></div>
-      <div class="chips">
-        <span class="chip" id="c-lift">lifted</span>
-        <span class="chip" id="c-grasp">gripper closed</span>
-        <span class="chip" id="c-place">placed on pad</span>
+      <h2>Camera stream</h2>
+      <div class="cams" id="cams"></div>
+      <h2 style="margin-top:10px">Base view</h2>
+      <div class="chips" id="baseSel">
+        <button class="tbtn active" data-base="rgb">RGB</button>
+        <button class="tbtn" data-base="depth">Depth</button>
+        <button class="tbtn" data-base="seg">Segmentation</button>
       </div>
     </div>
 
     <div class="sec">
-      <h2>Re-derived success criterion</h2>
-      <div class="kv"><span>task</span><span class="v" id="s-success">–</span></div>
-      <div class="legend">Success is recomputed here from object poses alone — the rule can be
-        changed and re-run offline, no recollection.</div>
-    </div>
-
-    <div class="sec">
-      <h2>Render this view as…</h2>
-      <label class="toggle">Realistic meshes <input type="checkbox" id="t-seg"/></label>
-      <div class="legend" style="margin:-2px 0 8px">unchecked = textured mesh · checked = per-actor
-        segmentation (free from the renderer)</div>
-      <label class="toggle">Robot (from joint qpos via FK) <input type="checkbox" id="t-robot" checked/></label>
-      <label class="toggle">Collected-camera frusta <input type="checkbox" id="t-frusta"/></label>
-      <label class="toggle">Trajectories (mouse + gripper) <input type="checkbox" id="t-traj"/></label>
-      <label class="toggle">Table &amp; floor <input type="checkbox" id="t-env" checked/></label>
-    </div>
-
-    <div class="sec">
-      <h2>Camera</h2>
-      <div class="btn-row" id="cam-buttons"></div>
-      <div class="legend" id="cam-note">Drag to orbit to <b>any</b> viewpoint — including ones the
-        cameras never captured.</div>
-    </div>
-
-    <div class="sec">
-      <h2>Why this matters — storage</h2>
-      <div class="storage">
-        This entire interactive episode is reconstructed from a
-        <span class="bignum" id="st-kb">–</span> state trace.<br/>
-        The collected pixels for the same episode were <b id="st-mb">–</b>
-        across <b id="st-cams">–</b> cameras.
-        <div class="bar"><div id="st-bar" style="width:1%"></div></div>
-        <span id="st-ratio" style="color:var(--good);font-weight:600"></span> of the pixel footprint —
-        yet every view, segmentation channel, and label above is derived from it on demand.
+      <h2>Layers <span class="allnone"><a id="lay-all">all</a> · <a id="lay-none">none</a></span></h2>
+      <div class="grid2">
+        <label class="row"><input type="checkbox" id="L-pcd" checked><span class="nm">Point cloud</span></label>
+        <label class="row"><input type="checkbox" id="L-bbox" checked><span class="nm">Bounding boxes</span></label>
+        <label class="row"><input type="checkbox" id="L-ids" checked><span class="nm">Object IDs</span></label>
+        <label class="row"><input type="checkbox" id="L-traj"><span class="nm">Trajectories</span></label>
+        <label class="row"><input type="checkbox" id="L-vel"><span class="nm">Velocity</span></label>
+        <label class="row"><input type="checkbox" id="L-grip" checked><span class="nm">Grippers</span></label>
+        <label class="row"><input type="checkbox" id="L-skel"><span class="nm">Robot skeleton</span></label>
+        <label class="row" id="row-occ"><input type="checkbox" id="L-occ"><span class="nm">Occlusion</span></label>
+        <label class="row"><input type="checkbox" id="L-relview" checked><span class="nm">Relations on view</span></label>
+        <label class="row"><input type="checkbox" id="L-minimap" checked><span class="nm">Minimap</span></label>
+        <label class="row"><input type="checkbox" id="L-graph" checked><span class="nm">Scene graph</span></label>
       </div>
+    </div>
+
+    <div class="sec">
+      <h2>Objects <span class="allnone"><a id="obj-all">all</a> · <a id="obj-none">none</a></span></h2>
+      <div id="objs"></div>
+    </div>
+
+    <div class="sec">
+      <h2>Re-derive success <span style="text-transform:none;color:#5b6470">— offline, adjustable</span></h2>
+      <div class="slider">place ε<input type="range" id="sl-eps" min="1" max="12" step="0.5" value="4"><span class="v" id="v-eps">4.0cm</span></div>
+      <div class="slider">height<input type="range" id="sl-h" min="0.5" max="8" step="0.5" value="2"><span class="v" id="v-h">2.0cm</span></div>
+      <div class="kv"><span>re-derived success</span><span class="v" id="succ">–</span></div>
+      <div class="hint">success = mouse within ε of pad &amp; resting. Change the rule, watch the label flip — no recollection.</div>
+    </div>
+
+    <div class="sec">
+      <div class="hint" id="storage"></div>
     </div>
   </div>
 
   <div id="transport">
-    <button id="playbtn">▶</button>
-    <input type="range" id="scrub" min="0" max="100" value="0"/>
-    <span id="framelbl">frame 0 / 0</span>
+    <canvas id="timeline" width="1200" height="30"></canvas>
+    <div class="tline2">
+      <button id="play">▶</button>
+      <input type="range" id="scrub" min="0" max="100" value="0">
+      <span id="flbl">frame 0 / 0</span>
+    </div>
   </div>
 </div>
-
-<script type="importmap">
-{ "imports": {
-  "three": "./vendor/three.module.js",
-  "three/addons/": "./vendor/addons/"
-}}
-</script>
-<script type="module" src="viewer.js"></script>
+<script src="layers.js"></script>
 </body>
 </html>

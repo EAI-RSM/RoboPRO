@@ -21,7 +21,7 @@ function status(msg) {
 
 // ---------------------------------------------------------------- load manifest
 status('fetching scene.json …');
-const SCENE = await (await fetch('data/scene.json')).json().catch(err => { fatal('scene.json: ' + err); throw err; });
+const SCENE = await (await fetch('data/scenes/clean_baseline/scene.json')).json().catch(err => { fatal('scene.json: ' + err); throw err; });
 const M = SCENE.meta, NF = M.n_frames, A = SCENE.objects.length;
 const OP = SCENE.frames.object_pos, OQ = SCENE.frames.object_quat;
 

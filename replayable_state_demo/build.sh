@@ -14,7 +14,7 @@ echo "[3/3] fetching three.js runtime ..."
 
 cat <<EOF
 
-done. serve it:
-    cd web && "$PY" -m http.server 8000
-then open  http://localhost:8000
+done. serve it (threaded server -> fast frame streaming):
+    "$PY" serve.py 8000
+then open  http://localhost:8000   (layered viewer; 3D reconstruction at /scene3d.html)
 EOF
