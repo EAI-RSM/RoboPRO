@@ -5,8 +5,8 @@ Scans a data root for `episode.json` + rollout video, computes the annotation
 recorded signals, and writes a self-contained `index.html` that embeds each demo
 video next to its annotation, grouping twins (baseline vs perturbed) side by side.
 
-No sim imports. Run:
-    python customized_robotwin/script/bench_script/visualize_negative_data.py \
+No sim imports. Run (from the repo root):
+    python visualize_negative_data.py \
         [--root <repo>/negative_data_demo] [--out path.html]
 
 Serving / viewing the gallery

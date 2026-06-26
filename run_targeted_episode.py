@@ -4,7 +4,7 @@ Production form of the PoC runner (TARGETED_DATA_COLLECTION.md). Always
 executed as a subprocess of collect_targeted_data.py so CuRobo warm-start
 state and SAPIEN GPU state never leak across episodes.
 
-Only tasks in bench_envs.targeted.registry are run; everything else is
+Only tasks in the robo_negative registry are run; everything else is
 skipped with a logged reason (incremental task enablement).
 
 Writes into --out-dir:
@@ -241,7 +241,7 @@ def main():
         what = (f"task '{args.task_name}'" if entry is None
                 else f"ptype '{args.ptype}' for task '{args.task_name}'")
         record["status"] = "skip_unsupported_task"
-        record["failure_reason"] = (f"{what} is not in bench_envs.targeted.registry — "
+        record["failure_reason"] = (f"{what} is not in the robo_negative registry — "
                                     f"add it after the desync audit passes")
         flush(exit_code=2)
     bench_subdir = args.bench_subdir or entry["bench_subdir"]

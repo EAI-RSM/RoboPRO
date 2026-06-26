@@ -4,8 +4,8 @@ No sim imports here — every episode runs in its own subprocess
 (run_targeted_episode.py), so CuRobo warm-start state never leaks between the
 baseline runs and the perturbed twin.
 
-Work is organized by the supported-task registry (bench_envs/targeted/
-registry.py) and the scene-pairing rule: for each requested task, the clean
+Work is organized by the supported-task registry (the robo_negative
+package) and the scene-pairing rule: for each requested task, the clean
 config carries shift_object/shift_target and the cluttered config carries
 shift_obstacle/hide_obstacle, each group with its own n-baseline seed
 qualification. Unsupported tasks/ptypes are skipped with a logged reason —
@@ -310,7 +310,7 @@ def main():
         if entry is None:
             append_index(args.index_path, {"task": task, "role": "registry",
                                            "status": "skip_unsupported_task"})
-            print(f"[collector] SKIP task '{task}' — not in bench_envs.targeted.registry "
+            print(f"[collector] SKIP task '{task}' — not in the robo_negative registry "
                   f"(supported: {sorted(registry.SUPPORTED_TASKS)})")
             continue
         unsupported = [pt for pt in args.ptypes if pt not in entry["ptypes"]]

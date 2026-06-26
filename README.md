@@ -8,6 +8,8 @@ RoboPRO extends the RoboTwin simulation framework with:
 - **Realistic scenes** across office, study, kitchen (small & large) domains
 - **Systematic perturbation suite** — Language, Vision, and Object axes for evaluating policy robustness
 - **Aloha-Agilex** bimanual embodiment with CuRobo motion planning
+- **Targeted failure generation** — labelled baseline↔perturbed *twin pairs* produced by deliberately desyncing the planner ([Targeted negative data](#targeted-negative-data-failure-generation))
+- **Replayable-state capture** — reconstruct any episode's full 3D scene and re-derive its semantics offline, no simulator ([Replayable-state capture & demo](#replayable-state-capture--demo))
 
 ## Installation
 
@@ -227,6 +229,85 @@ Full list in `benchmark/bench_envs/`.
 3. Add a description template under `benchmark/bench_description/task_instructions/`.
 
 Naming tip: never reuse an existing RoboTwin task name. Start from an analogous sibling task (`kitchenl/`, `office/`, `study/`) — copying a proven recipe is faster than inventing from scratch.
+
+## Targeted negative data (failure generation)
+
+The perturbation suite above is for *evaluating* a trained policy. Separately, RoboPRO can
+**generate labelled failure demonstrations** via [`robo_negative/`](robo_negative/README.md),
+a twin-pair desync library. For each scene it records a **baseline** (a clean scripted-expert
+success) and one or more **perturbed twins** in which the expert is driven to fail in a
+*specific, labelled* way — an object shifted right after its grasp is planned, an obstacle
+hidden from the planner, the target moved, etc.
+
+The mechanism is a *causal* desync, not random noise: `robo_negative.TargetedRuntime` attaches
+to the env (`env.targeted`) and, through one hook in
+[`benchmark/bench_envs/_bench_base_task.py`](benchmark/bench_envs/_bench_base_task.py), keeps
+the CuRobo collision-world out of sync with reality (excluding actors, freezing pre-shift
+poses, firing a shift after the grasp plan commits). Each episode logs a full per-frame
+**state trace** (HDF5 `targeted_state` group: actor poses + contacts) and an offline-computed
+**label record** (`outcome`, WHAT/WHY/quality, progress & safety curves) — all pure,
+versioned, unit-tested functions in `robo_negative`.
+
+```bash
+# from the repo root, using the project's sim env (the scripts self-configure BENCH_ROOT etc.)
+
+# minimal — defaults: task put_mouse_on_pad, ptypes {shift_object,shift_target,shift_obstacle},
+# seeds 0:40, 3 baselines + up to 30 perturbed twins per group, written to ./targetted_dataset/
+python collect_targeted_data.py --gpu 0
+
+# customised
+python collect_targeted_data.py \
+    --tasks put_mouse_on_pad --ptypes shift_object shift_target \
+    --seeds 0:10 --n-baseline 3 --target-perturbed 20 \
+    --out-root targetted_dataset --gpu 0
+```
+
+Every episode runs in its own subprocess ([`run_targeted_episode.py`](run_targeted_episode.py))
+so CuRobo/SAPIEN state never leaks between a baseline and its twin. Per-episode outputs:
+`episode.json` (label record), `data/episode0.hdf5` (standard bench episode + the
+`targeted_state` / `targeted_labels` groups), `video/episode0.mp4`.
+
+Browse a collected set as an annotated HTML gallery (baseline vs. perturbed side-by-side,
+computed offline — no simulator):
+
+```bash
+python visualize_negative_data.py --root targetted_dataset --out gallery.html
+```
+
+Full walk-through in [`negative_data_demo.ipynb`](negative_data_demo.ipynb); library details in
+[`robo_negative/README.md`](robo_negative/README.md).
+
+## Replayable-state capture & demo
+
+The per-frame state trace above is enough to **reconstruct an episode's entire 3D scene
+offline** — no simulator, no re-collection. [`replayable_state_demo/`](replayable_state_demo/README.md)
+turns one collected episode into a self-contained, browser-based viewer: scrub the timeline,
+**orbit to camera views that were never captured**, toggle real-mesh ↔ segmentation, and watch
+object-level semantics — spatial-relation language, distance-to-goal, re-derived success —
+recomputed live from the trace. The whole interactive scene is rebuilt from an ~80 KB trace
+versus the ~40 MB of pixels collected for the same episode.
+
+```bash
+cd replayable_state_demo
+./build.sh                                # one collected episode -> web bundle (assets git-ignored)
+cd web && python -m http.server 8000      # open http://localhost:8000
+```
+
+The idea — *capture sufficient state once, project every semantic offline* — is argued in
+[`REPLAYABLE_STATE_PROPOSAL.md`](REPLAYABLE_STATE_PROPOSAL.md); the demo internals and its
+offline validation are documented in
+[`replayable_state_demo/README.md`](replayable_state_demo/README.md).
+
+## Documentation
+
+| Doc | For |
+|---|---|
+| [`GETTING_STARTED.md`](GETTING_STARTED.md) | Newcomers — mental model, vocabulary, hands-on quickstarts |
+| `README.md` (this file) | Install, eval, perturbation configs, and the two features above |
+| [`CLAUDE.md`](CLAUDE.md) | Contributor / agent guidance — env activation, common commands, gotchas |
+| [`robo_negative/README.md`](robo_negative/README.md) | Targeted negative-data generation (desync, capture, labels) |
+| [`replayable_state_demo/README.md`](replayable_state_demo/README.md) | Replayable-state reconstruction + interactive HTML viewer |
+| [`REPLAYABLE_STATE_PROPOSAL.md`](REPLAYABLE_STATE_PROPOSAL.md) | RFC: the replayable-state capture format |
 
 ## License
 
