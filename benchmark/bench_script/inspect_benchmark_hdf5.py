@@ -203,43 +203,84 @@ def _summarize_benchmark_support(root: h5py.File):
         object_ids = state["object_ids"][()].tolist() if "object_ids" in state else []
         contact = state["contact"][()] if "contact" in state else None
         near = state["near"][()] if "near" in state else None
-        support_matrix = state["support"][()] if "support" in state else None
+        support_legacy = state["support"][()] if "support" in state else None
         grasped_by_code = state["grasped_by_code"][()] if "grasped_by_code" in state else None
+        on_matrix = state["on"][()] if "on" in state else None
+        supports_matrix = state["supports"][()] if "supports" in state else None
+        collides_with = state["collides_with"][()] if "collides_with" in state else None
+        held_by = state["held_by"][()] if "held_by" in state else None
+        held_by_effector_names = _decode_string_array(state["held_by_effector_names"]) if "held_by_effector_names" in state else []
+        canonical_relation_names = _decode_string_array(state["canonical_relation_names"]) if "canonical_relation_names" in state else []
+        implemented_relation_names = _decode_string_array(state["implemented_relation_names"]) if "implemented_relation_names" in state else []
 
         if contact is not None:
             print(f"    contact shape: {contact.shape}")
         if near is not None:
             print(f"    near shape: {near.shape}")
-        if support_matrix is not None:
-            print(f"    support shape: {support_matrix.shape}")
+        if support_legacy is not None:
+            print(f"    support shape: {support_legacy.shape} [legacy alias]")
         if grasped_by_code is not None:
             print(f"    grasped_by_code shape: {grasped_by_code.shape}")
+        if on_matrix is not None:
+            print(f"    on shape: {on_matrix.shape}")
+        if supports_matrix is not None:
+            print(f"    supports shape: {supports_matrix.shape}")
+        if collides_with is not None:
+            print(f"    collides_with shape: {collides_with.shape}")
+        if held_by is not None:
+            print(f"    held_by shape: {held_by.shape}")
+        if held_by_effector_names:
+            print(f"    held_by_effector_names: {held_by_effector_names}")
+        if canonical_relation_names:
+            print(f"    canonical_relation_names: {canonical_relation_names}")
+        if implemented_relation_names:
+            print(f"    implemented_relation_names: {implemented_relation_names}")
 
         checks = {}
         if contact is not None:
             checks["contact dims are (T,N,N)"] = contact.ndim == 3
         if near is not None:
             checks["near dims are (T,N,N)"] = near.ndim == 3
-        if support_matrix is not None:
-            checks["support dims are (T,N,N)"] = support_matrix.ndim == 3
+        if support_legacy is not None:
+            checks["support dims are (T,N,N) [legacy alias]"] = support_legacy.ndim == 3
         if grasped_by_code is not None:
             checks["grasped_by_code dims are (T,N)"] = grasped_by_code.ndim == 2
+        if on_matrix is not None:
+            checks["on dims are (T,N,N)"] = on_matrix.ndim == 3
+        if supports_matrix is not None:
+            checks["supports dims are (T,N,N)"] = supports_matrix.ndim == 3
+        if collides_with is not None:
+            checks["collides_with dims are (T,N,N)"] = collides_with.ndim == 3
+        if held_by is not None:
+            checks["held_by dims are (T,N,E)"] = held_by.ndim == 3
         if object_ids and contact is not None:
             checks["same N across object_ids/contact"] = contact.shape[1] == len(object_ids)
         if object_ids and grasped_by_code is not None:
             checks["same N across object_ids/grasped_by_code"] = grasped_by_code.shape[1] == len(object_ids)
+        if object_ids and held_by is not None:
+            checks["same N across object_ids/held_by"] = held_by.shape[1] == len(object_ids)
+        if held_by is not None and held_by_effector_names:
+            checks["same E across held_by/effector_names"] = held_by.shape[2] == len(held_by_effector_names)
+        if on_matrix is not None and supports_matrix is not None:
+            checks["supports is transpose of on (frame0)"] = np.array_equal(supports_matrix[0], on_matrix[0].T)
         for key, value in checks.items():
             print(f"    {key}: {value}")
 
         if contact is not None and contact.shape[0] > 0:
             frame0_edges = int(np.count_nonzero(np.triu(contact[0], k=1)))
             print(f"    frame0 contact edges: {frame0_edges}")
-        if support_matrix is not None and support_matrix.shape[0] > 0:
-            frame0_support = int(np.count_nonzero(support_matrix[0]))
-            print(f"    frame0 support edges: {frame0_support}")
+        if support_legacy is not None and support_legacy.shape[0] > 0:
+            frame0_support = int(np.count_nonzero(support_legacy[0]))
+            print(f"    frame0 support edges: {frame0_support} [legacy alias]")
         if grasped_by_code is not None and grasped_by_code.shape[0] > 0:
             frame0_grasped = int(np.count_nonzero(grasped_by_code[0] >= 0))
             print(f"    frame0 grasped objects: {frame0_grasped}")
+        if on_matrix is not None and on_matrix.shape[0] > 0:
+            print(f"    frame0 on edges: {int(np.count_nonzero(on_matrix[0]))}")
+        if collides_with is not None and collides_with.shape[0] > 0:
+            print(f"    frame0 collides_with edges: {int(np.count_nonzero(np.triu(collides_with[0], k=1)))}")
+        if held_by is not None and held_by.shape[0] > 0:
+            print(f"    frame0 held_by edges: {int(np.count_nonzero(held_by[0]))}")
 
 
 def _list_cameras(root: h5py.File) -> list[str]:
@@ -367,14 +408,37 @@ def main():
                         relation_state_summary["near_shape"] = list(state["near"].shape)
                     if "support" in state:
                         support_matrix = state["support"][()]
-                        relation_state_summary["support_shape"] = list(support_matrix.shape)
+                        relation_state_summary["support_shape_legacy_alias"] = list(support_matrix.shape)
                         if support_matrix.ndim == 3 and support_matrix.shape[0] > 0:
-                            relation_state_summary["frame0_support_edges"] = int(np.count_nonzero(support_matrix[0]))
+                            relation_state_summary["frame0_support_edges_legacy_alias"] = int(np.count_nonzero(support_matrix[0]))
                     if "grasped_by_code" in state:
                         grasped_by_code = state["grasped_by_code"][()]
                         relation_state_summary["grasped_by_code_shape"] = list(grasped_by_code.shape)
                         if grasped_by_code.ndim == 2 and grasped_by_code.shape[0] > 0:
                             relation_state_summary["frame0_grasped_objects"] = int(np.count_nonzero(grasped_by_code[0] >= 0))
+                    if "on" in state:
+                        on_matrix = state["on"][()]
+                        relation_state_summary["on_shape"] = list(on_matrix.shape)
+                        if on_matrix.ndim == 3 and on_matrix.shape[0] > 0:
+                            relation_state_summary["frame0_on_edges"] = int(np.count_nonzero(on_matrix[0]))
+                    if "supports" in state:
+                        relation_state_summary["supports_shape"] = list(state["supports"].shape)
+                    if "collides_with" in state:
+                        collides_with = state["collides_with"][()]
+                        relation_state_summary["collides_with_shape"] = list(collides_with.shape)
+                        if collides_with.ndim == 3 and collides_with.shape[0] > 0:
+                            relation_state_summary["frame0_collides_with_edges"] = int(np.count_nonzero(np.triu(collides_with[0], k=1)))
+                    if "held_by" in state:
+                        held_by = state["held_by"][()]
+                        relation_state_summary["held_by_shape"] = list(held_by.shape)
+                        if held_by.ndim == 3 and held_by.shape[0] > 0:
+                            relation_state_summary["frame0_held_by_edges"] = int(np.count_nonzero(held_by[0]))
+                    if "held_by_effector_names" in state:
+                        relation_state_summary["held_by_effector_names"] = _decode_string_array(state["held_by_effector_names"])
+                    if "canonical_relation_names" in state:
+                        relation_state_summary["canonical_relation_names"] = _decode_string_array(state["canonical_relation_names"])
+                    if "implemented_relation_names" in state:
+                        relation_state_summary["implemented_relation_names"] = _decode_string_array(state["implemented_relation_names"])
                     summary["relation_state"] = relation_state_summary
             print("\nJSON summary:")
             print(json.dumps(summary, indent=2, ensure_ascii=False))

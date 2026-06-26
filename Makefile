@@ -36,6 +36,11 @@ VIZ_WIDTH ?= 1280
 VIZ_HEIGHT ?= 720
 VIZ_FPS ?= 20
 VIZ_TRAIL ?= 25
+REL_HDF5_FILE ?=
+REL_FRAME ?= 0
+REL_OUTPUT_IMAGE ?=
+REL_WIDTH ?= 1400
+REL_HEIGHT ?= 900
 
 # Asset / install flags
 PYTHON_VERSION ?= 3.10
@@ -74,7 +79,7 @@ endef
 .PHONY: help check-prereqs bootstrap sync download-assets link-assets configure-curobo-assets \
 	patch-curobo-config setup render-test verify-scene verify-rollout collect-data \
 	precollect-seeds eval-direct eval-client policy-server eval-pi05-single eval-pi05-double \
-	collect-rollout-pi05 diag-kitchen-curobo inspect-benchmark-hdf5 visualize-benchmark-rollout show-config
+	collect-rollout-pi05 diag-kitchen-curobo inspect-benchmark-hdf5 visualize-benchmark-rollout visualize-relation-frame show-config
 
 help:
 	@printf '%s\n' \
@@ -102,6 +107,8 @@ help:
 	'    Vars: HDF5_FILE=/abs/path/to/file.hdf5 HDF5_CAMERA=demo_camera HDF5_FRAME=0 HDF5_PREVIEW_PATH=/tmp/frame.png SHOW_TREE=1 DUMP_JSON=1' \
 	'  make visualize-benchmark-rollout  Render a top-down verification MP4 from a benchmark HDF5 export.' \
 	'    Vars: VIZ_HDF5_FILE=path/to/file.hdf5 VIZ_OUTPUT_VIDEO=/tmp/rollout.mp4 VIZ_WIDTH=1280 VIZ_HEIGHT=720 VIZ_FPS=20 VIZ_TRAIL=25' \
+	'  make visualize-relation-frame Render one frame of canonical relation edges from a benchmark HDF5 export.' \
+	'    Vars: REL_HDF5_FILE=path/to/file.hdf5 REL_FRAME=0 REL_OUTPUT_IMAGE=/tmp/relation_frame.png REL_WIDTH=1400 REL_HEIGHT=900' \
 	'' \
 	'Data collection:' \
 	'  make collect-data             Run collect_data.sh for one task/config.' \
@@ -322,4 +329,21 @@ visualize-benchmark-rollout:
 	if [[ "$$output_video" != /* ]]; then output_video="$(ROOT_DIR)/$$output_video"; fi; \
 	cmd='$(PYTHON) ../benchmark/bench_script/visualize_benchmark_rollout.py --file "'"$$hdf5_file"'" --output "'"$$output_video"'"'; \
 	cmd+=" --width $(VIZ_WIDTH) --height $(VIZ_HEIGHT) --fps $(VIZ_FPS) --trail $(VIZ_TRAIL)"; \
+	$(call RUN_IN_CUSTOMIZED,eval "$$cmd")
+
+visualize-relation-frame:
+	@if [[ -z "$(REL_HDF5_FILE)" ]]; then \
+		printf 'Set REL_HDF5_FILE=/abs/path/to/episode.hdf5\n' >&2; \
+		exit 1; \
+	fi
+	hdf5_file="$(REL_HDF5_FILE)"; \
+	if [[ "$$hdf5_file" != /* ]]; then hdf5_file="$(ROOT_DIR)/$$hdf5_file"; fi; \
+	output_image="$(REL_OUTPUT_IMAGE)"; \
+	if [[ -z "$$output_image" ]]; then \
+		stem="$$(basename "$$hdf5_file" .hdf5)"; \
+		output_image="$(ROOT_DIR)/tmp/$${stem}_relation_frame_$(REL_FRAME).png"; \
+	fi; \
+	if [[ "$$output_image" != /* ]]; then output_image="$(ROOT_DIR)/$$output_image"; fi; \
+	cmd='$(PYTHON) ../benchmark/bench_script/visualize_relation_frame.py --file "'"$$hdf5_file"'" --frame "$(REL_FRAME)" --output "'"$$output_image"'"'; \
+	cmd+=" --width $(REL_WIDTH) --height $(REL_HEIGHT)"; \
 	$(call RUN_IN_CUSTOMIZED,eval "$$cmd")

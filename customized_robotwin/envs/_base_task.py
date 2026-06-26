@@ -38,8 +38,30 @@ parent_directory = os.path.dirname(current_file_path)
 
 class Base_Task(gym.Env):
     BENCHMARK_SCHEMA_NAME = "robopro_benchmark_support"
-    BENCHMARK_SCHEMA_VERSION = "1.0.0"
+    BENCHMARK_SCHEMA_VERSION = "1.1.0"
     BENCHMARK_EXPORTER_NAME = "robopro_benchmark_export"
+    BENCHMARK_CANONICAL_RELATION_NAMES = (
+        "on",
+        "in",
+        "supports",
+        "contains",
+        "held_by",
+        "near",
+        "blocks",
+        "occludes",
+        "reachable_by",
+        "contact_risk_with",
+        "collides_with",
+        "visible_to",
+        "part_of",
+    )
+    BENCHMARK_IMPLEMENTED_RELATION_NAMES = (
+        "on",
+        "supports",
+        "held_by",
+        "near",
+        "collides_with",
+    )
 
     def __init__(self):
         pass
@@ -530,8 +552,9 @@ class Base_Task(gym.Env):
         object_count = len(object_catalog)
         contact = np.zeros((object_count, object_count), dtype=np.bool_)
         near = np.zeros((object_count, object_count), dtype=np.bool_)
-        support = np.zeros((object_count, object_count), dtype=np.bool_)
+        supports_from = np.zeros((object_count, object_count), dtype=np.bool_)
         grasped_by_code = np.full((object_count,), -1, dtype=np.int8)
+        held_by = np.zeros((object_count, 2), dtype=np.bool_)
 
         left_gripper_names = set(getattr(self.robot, "left_fix_gripper_name", []))
         right_gripper_names = set(getattr(self.robot, "right_fix_gripper_name", []))
@@ -600,9 +623,9 @@ class Base_Task(gym.Env):
 
                 if contact[i, j]:
                     if self._is_benchmark_supported_by(aabb_i, aabb_j):
-                        support[i, j] = True
+                        supports_from[i, j] = True
                     if self._is_benchmark_supported_by(aabb_j, aabb_i):
-                        support[j, i] = True
+                        supports_from[j, i] = True
 
         left_tcp = np.array(self.robot.get_left_tcp_pose()[:3], dtype=np.float64)
         right_tcp = np.array(self.robot.get_right_tcp_pose()[:3], dtype=np.float64)
@@ -616,6 +639,8 @@ class Base_Task(gym.Env):
             center = np.array(entity.get_pose().p, dtype=np.float64)
             left_held = left_closed and left_contact[i] and float(np.linalg.norm(center - left_tcp)) <= 0.16
             right_held = right_closed and right_contact[i] and float(np.linalg.norm(center - right_tcp)) <= 0.16
+            held_by[i, 0] = left_held
+            held_by[i, 1] = right_held
             if left_held and right_held:
                 grasped_by_code[i] = 2
             elif left_held:
@@ -623,12 +648,22 @@ class Base_Task(gym.Env):
             elif right_held:
                 grasped_by_code[i] = 1
 
+        on = supports_from.copy()
+        supports = supports_from.T.copy()
+        collides_with = contact.copy()
+
         return {
             "object_ids": object_ids,
             "contact": contact,
             "near": near,
-            "support": support,
             "grasped_by_code": grasped_by_code,
+            "on": on,
+            "supports": supports,
+            "collides_with": collides_with,
+            "held_by": held_by,
+            "held_by_effector_names": np.array(["left_end_effector", "right_end_effector"], dtype="S32"),
+            "canonical_relation_names": np.array(self.BENCHMARK_CANONICAL_RELATION_NAMES, dtype="S32"),
+            "implemented_relation_names": np.array(self.BENCHMARK_IMPLEMENTED_RELATION_NAMES, dtype="S32"),
         }
 
     def _record_benchmark_contact_event(
@@ -779,7 +814,12 @@ class Base_Task(gym.Env):
 
             relation_state_group = export_group.get("relation_state")
             if relation_state_group is not None:
-                for dataset_name in ("object_ids",):
+                for dataset_name in (
+                    "object_ids",
+                    "held_by_effector_names",
+                    "canonical_relation_names",
+                    "implemented_relation_names",
+                ):
                     if dataset_name not in relation_state_group:
                         continue
                     dataset = relation_state_group[dataset_name]
