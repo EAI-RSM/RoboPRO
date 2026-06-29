@@ -37,6 +37,16 @@ python build_demo.py
 python serve.py 8001     # -> http://localhost:8001
 ```
 
+### Self-contained single file (no server)
+
+```bash
+python build_selfcontained.py   # -> negative_targeted_data_demo.html
+```
+
+Inlines every video as a base64 `data:` URI and embeds the manifest, producing one
+standalone HTML (~6 MB) you can open straight from disk or email around — no server, no
+external files. This file IS committed (the only generated artifact that is).
+
 Collected data (`../enriched_negative_demo/`) and the generated bundle (`web/videos/`,
 `web/manifest.json`) are git-ignored — regenerate with the steps above.
 

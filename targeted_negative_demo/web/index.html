@@ -105,7 +105,8 @@ const PTYPE_COLOR={shift_object:"#58a6ff",shift_target:"#a371f7",
 const dot=c=>`<span class="dot" style="background:${c}"></span>`;
 const $=id=>document.getElementById(id);
 
-fetch('manifest.json').then(r=>r.json()).then(M=>{
+(window.__MANIFEST__ ? Promise.resolve(window.__MANIFEST__)
+                     : fetch('manifest.json').then(r=>r.json())).then(M=>{
   const order=M.ptype_order, meta=M.ptype_meta;
   // legend
   $('legend').innerHTML = order.map(pt=>{
