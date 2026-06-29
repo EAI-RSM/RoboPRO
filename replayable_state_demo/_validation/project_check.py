@@ -7,13 +7,15 @@ This is itself a tiny demonstration of the proposal: the per-frame 2D keypoints 
 """
 import io
 import json
+import os
 import sys
 
 import cv2
 import h5py
 import numpy as np
 
-EP = "negative_data_demo/clean/seed00000/baseline/data/episode0.hdf5"
+# episode HDF5 to reproject; point EP_HDF5 at any collected episode0.hdf5
+EP = os.environ.get("EP_HDF5", "")
 CAM = sys.argv[1] if len(sys.argv) > 1 else "head_camera"
 FRAME = int(sys.argv[2]) if len(sys.argv) > 2 else 0
 OUT = f"replayable_state_demo/_validation/overlay_{CAM}_f{FRAME}.png"

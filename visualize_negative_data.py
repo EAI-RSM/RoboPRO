@@ -7,7 +7,7 @@ video next to its annotation, grouping twins (baseline vs perturbed) side by sid
 
 No sim imports. Run (from the repo root):
     python visualize_negative_data.py \
-        [--root <repo>/negative_data_demo] [--out path.html]
+        --root <collection-dir> [--out path.html]
 
 Serving / viewing the gallery
 -----------------------------
@@ -19,7 +19,7 @@ Local machine:
 
 Remote node (this repo runs on the cluster, e.g. london-2-embody-ai-node-8):
     # 1) on the node, start a static server rooted at the demo dir:
-    cd negative_data_demo
+    cd <collection-dir>
     python -m http.server 8011 --bind 0.0.0.0    # all interfaces, for the tunnel
     # 2) on your laptop, forward the port over SSH:
     ssh -L 8011:localhost:8011 <user>@<node-host>
@@ -200,7 +200,8 @@ def card_html(root: Path, ep_dir: Path, ep: dict, d: dict, ep_id: str, cd) -> st
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     here = Path(__file__).resolve().parent  # repo root (this script lives here)
-    ap.add_argument("--root", default=str(here / "negative_data_demo"))
+    ap.add_argument("--root", default=str(here / "targetted_dataset"),
+                    help="collection dir to scan for episode.json + rollout videos")
     ap.add_argument("--out", default=None, help="output html (default: <root>/index.html)")
     args = ap.parse_args()
 

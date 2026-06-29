@@ -14,7 +14,8 @@ import trimesh
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 WEB = os.path.join(ROOT, "replayable_state_demo/web")
 SCENE = json.load(open(os.path.join(WEB, "data/scene.json")))
-EP = os.path.join(ROOT, "negative_data_demo/clean/seed00000/baseline/data/episode0.hdf5")
+# point EP_HDF5 at any collected episode0.hdf5
+EP = os.environ.get("EP_HDF5", "")
 CAM = sys.argv[1] if len(sys.argv) > 1 else "head_camera"
 FRAME = int(sys.argv[2]) if len(sys.argv) > 2 else 0
 

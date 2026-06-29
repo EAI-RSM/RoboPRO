@@ -46,8 +46,7 @@ RGB_CAMS = ["head_camera", "front_camera", "demo_camera", "left_camera"]
 # Cameras to also export depth for (powers occlusion + depth point cloud + depth view)
 DEPTH_CAMS = ["head_camera", "demo_camera"]
 
-# Collected episodes to publish as switchable scenes (id, path under negative_data_demo, twin_of).
-# Paths starting with ../ reach other dataset roots under the repo (e.g. enriched_variety_data).
+# Collected episodes to publish as switchable scenes (id, repo-relative path, twin_of).
 
 # Variety set: 20 different bench tasks (fixed seed 0) across all four scenes.
 # 17 clean_success + 3 longest clean_failure (the scripted expert misses on the
@@ -65,15 +64,7 @@ VARIETY_TASKS = [
     "drop_apple_in_bin_ks", "close_microwave_ks", "put_spoon_in_sink_ks",
     "put_bread_on_board_ks", "move_hamburger_onto_plate_ks", "place_bowl_in_dishrack_ks",
 ]
-SCENES = [
-    *[(t, f"../enriched_variety_data/runs/{t}", None) for t in VARIETY_TASKS],
-    # Curated twin-pair showcase (baseline vs its causally-labelled perturbed twin)
-    ("clean_baseline",     "clean/seed00000/baseline",     None),
-    ("clean_shift_object", "clean/seed00000/shift_object", "clean_baseline"),
-    ("clean_shift_target", "clean/seed00000/shift_target", "clean_baseline"),
-    ("d6_baseline",        "d6/seed00000/baseline",        None),
-    ("d6_shift_obstacle",  "d6/seed00000/shift_obstacle",  "d6_baseline"),
-]
+SCENES = [(t, f"enriched_variety_data/runs/{t}", None) for t in VARIETY_TASKS]
 
 ENV_ACTORS = {"ground", "table", "wall"}
 PALETTE = [
@@ -366,7 +357,7 @@ def derive_signals(names, pos, ep_json, table_top_z):
 
 # ----------------------------------------------------------------------------- per-scene
 def export_one(scene_id, ep_relpath, twin_of, write_glbs=False):
-    ep_dir = os.path.join(ROOT, "negative_data_demo", ep_relpath)
+    ep_dir = os.path.join(ROOT, ep_relpath)
     out_dir = os.path.join(SCENES_DIR, scene_id)
     os.makedirs(out_dir, exist_ok=True)
     f = h5py.File(os.path.join(ep_dir, "data/episode0.hdf5"), "r")
