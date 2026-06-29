@@ -37,6 +37,8 @@ LABEL_SCHEMA_VERSION = 1
 REQUIRED_SCENE_BY_PTYPE = {"shift_object": "clean", "shift_target": "clean",
                            "shift_obstacle": "cluttered", "hide_obstacle": "cluttered"}
 
+_ALL_PTYPES = frozenset({"shift_object", "shift_target", "shift_obstacle", "hide_obstacle"})
+
 SUPPORTED_TASKS: dict[str, dict] = {
     # Verified 2026-06-10/12 (PoC batch: 84 episodes + demo quad):
     #   shift_object  after_grasp_plan, boundary ~2.9-3.5 cm (plan_aborted)
@@ -44,10 +46,41 @@ SUPPORTED_TASKS: dict[str, dict] = {
     #   shift_obstacle corridor form, milk box, success_with_collision
     "put_mouse_on_pad": {
         "bench_subdir": "office",
-        "ptypes": frozenset({"shift_object", "shift_target", "shift_obstacle"}),
+        "ptypes": _ALL_PTYPES,
         "clean_config": "bench_demo_office_clean",
         "cluttered_config": "bench_demo_office_d6",
     },
+    "put_book_on_book": {
+        "bench_subdir": "office", "ptypes": _ALL_PTYPES,
+        "clean_config": "bench_demo_office_clean", "cluttered_config": "bench_demo_office_d6"},
+    "put_mouse_next_to_stapler": {
+        "bench_subdir": "office", "ptypes": _ALL_PTYPES,
+        "clean_config": "bench_demo_office_clean", "cluttered_config": "bench_demo_office_d6"},
+    "put_spoon_on_plate_ks": {
+        "bench_subdir": "kitchens", "ptypes": _ALL_PTYPES,
+        "clean_config": "bench_demo_kitchens_clean", "cluttered_config": "bench_demo_kitchens_d6"},
+    # Audited 2026-06-29 for the targeted-negative demo: all read live state in
+    # check_success and carry self.target_obj + self.des_obj. shift_object /
+    # shift_target use cached des_obj_pose (place at stale pose). The obstacle
+    # perturbations need no per-task obstacle — the runtime injects a corridor
+    # milk-box (inject_corridor_obstacle), so they run in the CLEAN scene too.
+    # NOTE: put_phone_on_holder reads its destination LIVE in play_once, so
+    # shift_target is typically *absorbed* (clean_success) — kept honest.
+    "put_stapler_on_book": {
+        "bench_subdir": "office", "ptypes": _ALL_PTYPES,
+        "clean_config": "bench_demo_office_clean", "cluttered_config": "bench_demo_office_d6"},
+    "put_phone_on_holder": {
+        "bench_subdir": "office", "ptypes": _ALL_PTYPES,
+        "clean_config": "bench_demo_office_clean", "cluttered_config": "bench_demo_office_d6"},
+    "put_bread_on_board_ks": {
+        "bench_subdir": "kitchens", "ptypes": _ALL_PTYPES,
+        "clean_config": "bench_demo_kitchens_clean", "cluttered_config": "bench_demo_kitchens_d6"},
+    "drop_apple_in_bin_ks": {
+        "bench_subdir": "kitchens", "ptypes": _ALL_PTYPES,
+        "clean_config": "bench_demo_kitchens_clean", "cluttered_config": "bench_demo_kitchens_d6"},
+    "move_hamburger_onto_plate_ks": {
+        "bench_subdir": "kitchens", "ptypes": _ALL_PTYPES,
+        "clean_config": "bench_demo_kitchens_clean", "cluttered_config": "bench_demo_kitchens_d6"},
 }
 
 
@@ -566,6 +599,80 @@ class TargetedRuntime:
         cur = np.asarray(_entity(actor).get_pose().p[:2], dtype=np.float64)
         d = target_xy - cur
         return np.array([d[0], d[1], 0.0], dtype=np.float64)
+
+    def inject_corridor_obstacle(self, env, model_id: int = 0, clear_min_m: float = 0.10,
+                                 obstacle_scale: float = 1.4, mass: float = 3.0):
+        """GENERAL corridor obstacle: spawn a STATIC milk-box on the table on the
+        grasp->place transport corridor (between target_obj and des_obj), at the
+        point that maximises clearance from every other actor. No per-task code:
+        mirrors the proven put_mouse_on_pad milk-box so shift_obstacle /
+        hide_obstacle work in ANY (incl. clean) scene.
+
+        Static => it never falls or is pushed, so it cannot disturb the scene.
+        Clearance-aware => it is not dropped onto the task objects. If the corridor
+        is too short to fit it (clearance < clear_min_m) raises
+        EpisodeDiscard('short_corridor'). Returns (actor, info)."""
+        import os
+        from envs.utils.rand_create_actor import rand_create_actor
+
+        a = np.asarray(env.target_obj.get_pose().p[:2], dtype=np.float64)
+        b = np.asarray(env.des_obj.get_pose().p[:2], dtype=np.float64)
+        table_z = float(env.target_obj.get_pose().p[2])
+        # other actors to clear (dynamic props + the two task objects)
+        others = [a, b]
+        try:
+            for e in env.scene.get_all_actors():
+                nm = e.get_name()
+                if nm in ("ground", "table", "wall"):
+                    continue
+                others.append(np.asarray(e.get_pose().p[:2], dtype=np.float64))
+        except Exception:  # noqa: BLE001
+            pass
+        d = b - a
+        perp = np.array([-d[1], d[0]], dtype=np.float64)
+        pn = float(np.linalg.norm(perp))
+        perp = perp / pn if pn > 1e-6 else np.array([1.0, 0.0])
+        # search points along the corridor (and a little to either side) for the
+        # one with the largest min-distance to every other actor.
+        best, best_clear = None, -1.0
+        for t in np.linspace(0.25, 0.75, 11):
+            for off in (0.0, 0.06, -0.06, 0.10, -0.10):
+                p = (1.0 - t) * a + t * b + perp * off
+                clr = min(float(np.linalg.norm(p - o)) for o in others)
+                if clr > best_clear:
+                    best, best_clear = p, clr
+        if best is None or best_clear < clear_min_m:
+            raise EpisodeDiscard("short_corridor",
+                                 f"no corridor point clears all actors by {clear_min_m*100:.0f} cm "
+                                 f"(best {best_clear*100:.1f} cm) — target/dest too close")
+        s = float(obstacle_scale)
+        obstacle = rand_create_actor(
+            env, modelname="038_milk-box",
+            xlim=[float(best[0])], ylim=[float(best[1])],
+            rotate_rand=False, qpos=[0.66, 0.66, -0.25, -0.25],
+            convex=True, scale=[s, s, s], model_id=int(model_id) % 4)
+        obstacle.set_mass(float(mass))  # heavy => the arm cannot just shove it aside
+        env.collision_list.append({
+            "actor": obstacle,
+            "collision_path": (f"{os.environ['BENCH_ROOT']}/assets/objects/038_milk-box/"
+                               f"collision/base{int(model_id) % 4}.glb"),
+        })
+        settle(env)  # let it come to rest BEFORE the rollout (clearance => disturbs nothing)
+        env.update_world(exclude_obstacles=getattr(env, "enable_collision_metrics", False))
+        return obstacle, {"pos": best.tolist(), "clearance_cm": round(best_clear * 100, 1)}
+
+    def believe_displaced(self, env, actor, displacement_xy):
+        """Make the planner believe `actor` is at pose + displacement (xy) while it
+        physically stays put — a localisation error. update_world then routes the
+        belief pose through override_pose. No physics touched."""
+        import sapien.core as sapien
+        ent = _entity(actor)
+        pose = ent.get_pose()
+        bp = np.array(pose.p, dtype=np.float64)
+        bp[0] += float(displacement_xy[0])
+        bp[1] += float(displacement_xy[1])
+        self._pose_overrides[ent.per_scene_id] = sapien.Pose(bp.tolist(), pose.q)
+        env.update_world(exclude_obstacles=getattr(env, "enable_collision_metrics", False))
 
     # ------------- instrumentation -------------
 

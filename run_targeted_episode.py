@@ -27,8 +27,11 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 REPO_ROOT = SCRIPT_DIR  # this script lives at the repo root
 
 TRIGGER_BY_PTYPE = {"shift_object": "after_grasp_plan", "shift_target": "immediate",
-                    "shift_obstacle": "immediate"}
+                    "shift_obstacle": "immediate", "hide_obstacle": "immediate"}
 ACTOR_ATTR_BY_PTYPE = {"shift_object": "target_obj", "shift_target": "des_obj"}
+# Obstacle perturbations inject their own corridor obstacle, so they run in ANY
+# scene (incl. clean) — the required-scene rule below is bypassed for them.
+OBSTACLE_PTYPES = {"shift_obstacle", "hide_obstacle"}
 
 # An episode needs roughly 7-8 GiB (CuRobo + SAPIEN RT renderer); below this we
 # abort immediately and loudly instead of OOMing minutes into CuRobo warmup.
@@ -173,7 +176,8 @@ def main():
                         help="default: from the supported-task registry")
     parser.add_argument("--seed", type=int, required=True)
     parser.add_argument("--role", choices=["baseline", "perturbed"], required=True)
-    parser.add_argument("--ptype", choices=["shift_object", "shift_target", "shift_obstacle", "none"],
+    parser.add_argument("--ptype",
+                        choices=["shift_object", "shift_target", "shift_obstacle", "hide_obstacle", "none"],
                         default="none")
     parser.add_argument("--params-json", default=None,
                         help="JSON params (sampler.sample_shift_params dict, or "
@@ -260,7 +264,7 @@ def main():
     scene_kind = ("cluttered" if (dr.get("cluttered_table") and dr.get("obstacle_density", 0) > 0)
                   else "clean")
     record["scene_kind"] = scene_kind
-    if args.role == "perturbed":
+    if args.role == "perturbed" and args.ptype not in OBSTACLE_PTYPES:
         required = registry.REQUIRED_SCENE_BY_PTYPE[args.ptype]
         if required != scene_kind:
             msg = (f"FATAL: {args.ptype} requires a {required} scene but config "
@@ -311,28 +315,49 @@ def main():
 
     world_shift = np.zeros(3)
     perturbed_actor = None
-    if args.role == "perturbed" and args.ptype == "shift_obstacle":
-        params = cli_params or cfg_params or {"mode": "corridor", "corridor_t": 0.55}
-        record["sampler"] = params
-        record["perceptual_failure_class"] = "obstacle_localization_error"
+    if args.role == "perturbed" and args.ptype in OBSTACLE_PTYPES:
+        is_hide = args.ptype == "hide_obstacle"
+        record["sampler"] = cli_params or cfg_params or {"mode": "corridor"}
+        record["perceptual_failure_class"] = ("object_undetected" if is_hide
+                                              else "obstacle_localization_error")
+        # Use a scene-provided planner-visible corridor obstacle if one exists;
+        # otherwise inject a general STATIC corridor milk-box (clears the task
+        # objects, never falls) so the obstacle perturbations need no per-task code.
         try:
             perturbed_actor = rt.select_corridor_obstacle(env)
-        except EpisodeDiscard as d:
-            record["status"] = f"skip_{d.reason}"
-            record["failure_reason"] = d.detail
-            flush(exit_code=2)
-        record["planner_entries_hidden"] = rt.hide_from_planner(env, perturbed_actor)
-        record["planner_visible_actors_after_hide"] = sorted(
-            info["actor"].get_name() for info in env.collision_list
-            if not (getattr(env, "enable_collision_metrics", False) and info.get("is_obstacle", False))
-            and not rt.is_excluded(info["actor"]))
-        world_shift = rt.corridor_shift_vector(env, perturbed_actor,
-                                               float(params.get("corridor_t", 0.55)))
-        record["commanded"] = {
-            "magnitude_cm": float(np.linalg.norm(world_shift) * 100.0),
-            "shift_world": world_shift.tolist(),
-            "camera_frame": labels.camera_frame_decomposition(world_shift, depth_axis, lateral_axis),
-        }
+            record["obstacle_source"] = "scene"
+        except EpisodeDiscard:
+            try:
+                perturbed_actor, info = rt.inject_corridor_obstacle(env, model_id=args.seed)
+            except EpisodeDiscard as d:  # corridor too short to fit an obstacle
+                record["status"] = f"skip_{d.reason}"
+                record["failure_reason"] = d.detail
+                flush(exit_code=2)
+            record["obstacle_source"] = "injected"
+            record["obstacle_info"] = info
+        # Apply the perceptual error as a PLANNER BELIEF (no physics shift):
+        #   hide_obstacle  -> exclude it from the planner world  (undetected)
+        #   shift_obstacle -> planner believes it sits off the corridor (mislocated)
+        if is_hide:
+            record["planner_entries_hidden"] = rt.hide_from_planner(env, perturbed_actor)
+            record["commanded"] = {"magnitude_cm": 0.0, "mode": "undetected"}
+        else:
+            a = np.asarray(env.target_obj.get_pose().p[:2], dtype=np.float64)
+            b = np.asarray(env.des_obj.get_pose().p[:2], dtype=np.float64)
+            d = b - a
+            perp = np.array([-d[1], d[0]], dtype=np.float64)
+            n = float(np.linalg.norm(perp))
+            perp = perp / n if n > 1e-6 else np.array([1.0, 0.0])
+            disp = (perp * 0.12).tolist()  # planner believes it 12 cm off the line
+            rt.believe_displaced(env, perturbed_actor, disp)
+            record["commanded"] = {"magnitude_cm": 12.0, "belief_displacement_xy": disp,
+                                   "mode": "mislocated"}
+        record["planner_visible_actors_after"] = sorted(
+            info2["actor"].get_name() for info2 in env.collision_list
+            if not (getattr(env, "enable_collision_metrics", False) and info2.get("is_obstacle", False))
+            and not rt.is_excluded(info2["actor"]))
+        # obstacle perturbations never physically shift anything
+        world_shift = np.zeros(3)
     elif args.role == "perturbed":
         params = cli_params or cfg_params or sampler.sample_shift_params(args.ptype, args.seed, 0)
         record["sampler"] = params
@@ -362,21 +387,31 @@ def main():
     status, play_error = "recorded", None
     start_target_p = None
     try:
-        # Both twins run the identical settle protocol at BOTH trigger points;
-        # the shift is zero everywhere except the perturbed episode's own
-        # trigger (principle 5).
-        immediate_shift = world_shift if (args.role == "perturbed"
-                                          and TRIGGER_BY_PTYPE[args.ptype] == "immediate") else np.zeros(3)
-        immediate_actor = perturbed_actor if float(np.linalg.norm(immediate_shift)) > 0 else None
-        rec = rt.apply_shift(env, immediate_actor, immediate_shift)
-        if immediate_actor is not None:
-            rec["applied"] = True
-            record["achieved"] = rec
-            record["shift_frame_idx"] = None  # immediate trigger: null per principle 7
+        # Obstacle perturbations are already applied (inject + planner belief);
+        # the new obstacle is a deliberate scene change, so skip the two-sided
+        # integrity guard and just settle.
+        if args.role == "perturbed" and args.ptype in OBSTACLE_PTYPES:
+            targeted.settle(env)
+            record["achieved"] = {"applied": True, "mode": "obstacle_belief"}
+        else:
+            # Both twins run the identical settle protocol at BOTH trigger points;
+            # the shift is zero everywhere except the perturbed episode's own
+            # trigger (principle 5).
+            immediate_shift = world_shift if (args.role == "perturbed"
+                                              and TRIGGER_BY_PTYPE[args.ptype] == "immediate") else np.zeros(3)
+            immediate_actor = perturbed_actor if float(np.linalg.norm(immediate_shift)) > 0 else None
+            rec = rt.apply_shift(env, immediate_actor, immediate_shift)
+            if immediate_actor is not None:
+                rec["applied"] = True
+                record["achieved"] = rec
+                record["shift_frame_idx"] = None  # immediate trigger: null per principle 7
 
-        deferred_shift = world_shift if deferred_is_real else np.zeros(3)
-        deferred_actor = perturbed_actor if float(np.linalg.norm(deferred_shift)) > 0 else None
-        rt.arm("after_grasp_plan", deferred_actor, deferred_shift, on_deferred_shift)
+        # Obstacle perturbations have no deferred component; skip the deferred
+        # parity settle so its integrity guard can't reject the injected obstacle.
+        if not (args.role == "perturbed" and args.ptype in OBSTACLE_PTYPES):
+            deferred_shift = world_shift if deferred_is_real else np.zeros(3)
+            deferred_actor = perturbed_actor if float(np.linalg.norm(deferred_shift)) > 0 else None
+            rt.arm("after_grasp_plan", deferred_actor, deferred_shift, on_deferred_shift)
 
         # Live (post-immediate-shift) start poses for outcome signals.
         start_target_p = np.array(env.target_obj.get_pose().p, dtype=np.float64)
