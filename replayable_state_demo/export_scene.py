@@ -46,8 +46,28 @@ RGB_CAMS = ["head_camera", "front_camera", "demo_camera", "left_camera"]
 # Cameras to also export depth for (powers occlusion + depth point cloud + depth view)
 DEPTH_CAMS = ["head_camera", "demo_camera"]
 
-# Collected episodes to publish as switchable scenes (id, path under negative_data_demo, twin_of)
+# Collected episodes to publish as switchable scenes (id, path under negative_data_demo, twin_of).
+# Paths starting with ../ reach other dataset roots under the repo (e.g. enriched_variety_data).
+
+# Variety set: 20 different bench tasks (fixed seed 0) across all four scenes.
+# 17 clean_success + 3 longest clean_failure (the scripted expert misses on the
+# harder articulated tasks — kept as honest failure scenarios). Scene id == task.
+VARIETY_TASKS = [
+    # office (5)
+    "close_drawer", "put_book_in_fileholder", "put_phone_on_holder",
+    "put_stapler_on_book", "put_milktea_on_shelf",
+    # study (6)
+    "move_cup", "put_cup_on_coaster", "move_book_onto_table",
+    "put_seal_in_box", "empty_box", "put_pen_in_pencup",
+    # kitchenl (3)
+    "pick_can_from_basket", "put_sauce_can_in_basket", "move_milk_close_fridge",
+    # kitchens (6)
+    "drop_apple_in_bin_ks", "close_microwave_ks", "put_spoon_in_sink_ks",
+    "put_bread_on_board_ks", "move_hamburger_onto_plate_ks", "place_bowl_in_dishrack_ks",
+]
 SCENES = [
+    *[(t, f"../enriched_variety_data/runs/{t}", None) for t in VARIETY_TASKS],
+    # Curated twin-pair showcase (baseline vs its causally-labelled perturbed twin)
     ("clean_baseline",     "clean/seed00000/baseline",     None),
     ("clean_shift_object", "clean/seed00000/shift_object", "clean_baseline"),
     ("clean_shift_target", "clean/seed00000/shift_target", "clean_baseline"),
@@ -297,6 +317,9 @@ def derive_signals(names, pos, ep_json, table_top_z):
     out["dist_xy_cm"] = np.round(np.linalg.norm(tp[:, :2] - dp[:, :2], axis=1) * 100, 2).tolist()
     out["target_height_cm"] = np.round((tp[:, 2] - table_top_z) * 100, 2).tolist()
     # spatial relation of target wrt destination (world: +x right, +y back/away, +z up)
+    def _clean(nm, fallback):
+        return re.sub(r"^\d+_", "", nm).replace("-", " ").replace("_", " ") if nm else fallback
+    tlab, dlab = _clean(tgt, "object"), _clean(dst, "goal")
     rels = []
     for t in range(T):
         d = tp[t] - dp[t]
@@ -304,7 +327,8 @@ def derive_signals(names, pos, ep_json, table_top_z):
         ay = "behind" if d[1] > 0.03 else "in front of" if d[1] < -0.03 else ""
         az = "above" if d[2] > 0.03 else ""
         parts = [p for p in (az, ax, ay) if p]
-        rels.append(f"mouse is {' and '.join(parts)} the pad" if parts else "mouse is on the pad")
+        rels.append(f"{tlab} is {' and '.join(parts)} the {dlab}" if parts
+                    else f"{tlab} is on the {dlab}")
     out["relation"] = rels
     # lifted / placed / grasp heuristics
     h = np.array(out["target_height_cm"])
@@ -490,7 +514,7 @@ def export_one(scene_id, ep_relpath, twin_of, write_glbs=False):
             "twin_of": twin_of,
             "task_name": ep_json["task_name"],
             "task_config": ep_json["task_config"],
-            "instruction": "Put the mouse onto the pad.",
+            "instruction": ep_json.get("instruction") or ep_json["task_name"].replace("_", " "),
             "outcome": ep_json.get("outcome"),
             "perturbation_type": ep_json.get("perturbation_type"),
             "seed": ep_json.get("scene_seed"),
