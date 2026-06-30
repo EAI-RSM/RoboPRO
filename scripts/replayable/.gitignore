@@ -1,0 +1,10 @@
+# Generated / downloaded demo bundle — rebuild with ./build.sh (kept out of git on purpose)
+web/assets/
+web/vendor/
+web/data/
+
+# Validation renders (the *.py validators are kept)
+_validation/*.png
+
+__pycache__/
+*.pyc

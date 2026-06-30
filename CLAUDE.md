@@ -15,16 +15,17 @@ RoboPRO is a bimanual manipulation robustness benchmark built on top of a forked
 
 Failure/success **twin-pair** data — the planner plans against a virtual scene while the
 physical scene is edited by one controlled amount, so failures are causally labeled by
-construction — the importable library is the **`robo_negative/`** package (uv workspace member,
-installed editable); the planner hooks live in `benchmark/bench_envs/_bench_base_task.py`; and the
-runner/orchestrator/viewer are **root-level scripts** (`run_targeted_episode.py`,
-`collect_targeted_data.py`, `visualize_negative_data.py`). **All of the idea's
-documentation — design, the operational contract (mechanism, invariants, how to extend), the
-annotation spec, schema, and the PoC showcase — now lives in the **root notebook
-`negative_data_demo.ipynb`**, which is also self-running (its Collect cell regenerates the
-artifacts into `negative_data_demo/`). Read it before touching any of it.**
-(The former `.claude/negative_data_collection.md`, `negative_data_brainstorming.md`,
-`TARGETED_NEGATIVE_DATA.md`, and `failure_annotation.md` were consolidated into that notebook.)
+construction — the importable library is the **`robo_tools`** package (editable path dependency
+in the root `.venv`); the planner hooks live in `benchmark/bench_envs/_bench_base_task.py` (all
+guarded by `if getattr(self,"targeted",None) is not None` → zero behavior change when the runtime
+is absent); and the runner/orchestrator/visualizer live under **`scripts/`**
+(`run_targeted_episode.py`, `collect_targeted_data.py`, `visualize_negative_data.py`). Enrichment
+(the per-frame `targeted_state` pose trace + clean annotation) is **default** behavior in
+`customized_robotwin/script/collect_data.py`; `negative:` / `multimodal:` are per-task **toggles**
+that emit sibling variations of each scene seed (parallel annotations: good action, bad action,
+another good action), negatives carrying a causal-graph annotation. Unsupported (task, feature)
+pairs are skipped. The replayable-state projectors that turn a trace into a web bundle live in
+`robo_tools.replayable` + `scripts/replayable/`.
 
 ## Environment activation (read before running anything)
 

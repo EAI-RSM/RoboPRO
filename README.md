@@ -297,8 +297,7 @@ computed offline — no simulator):
 python scripts/visualize_negative_data.py --root targetted_dataset --out gallery.html
 ```
 
-Full walk-through in [`negative_data_demo.ipynb`](negative_data_demo.ipynb); library details in
-[`robo_tools/`](robo_tools/).
+Library details in [`robo_tools/`](robo_tools/).
 
 ## Multimodal action generation
 
@@ -324,7 +323,7 @@ the causal annotation, the task registries) and the repo-root [`scripts/`](scrip
 ## Replayable-state capture & demo
 
 The per-frame state trace above is enough to **reconstruct an episode's entire 3D scene
-offline** — no simulator, no re-collection. [`replayable_state_demo/`](replayable_state_demo/README.md)
+offline** — no simulator, no re-collection. [`scripts/replayable/`](scripts/replayable/README.md)
 turns one collected episode into a self-contained, browser-based viewer: scrub the timeline,
 **orbit to camera views that were never captured**, toggle real-mesh ↔ segmentation, and watch
 object-level semantics — spatial-relation language, distance-to-goal, re-derived success —
@@ -332,26 +331,25 @@ recomputed live from the trace. The whole interactive scene is rebuilt from an ~
 versus the ~40 MB of pixels collected for the same episode.
 
 ```bash
-cd replayable_state_demo
+cd scripts/replayable
 ./build.sh                                # one collected episode -> web bundle (assets git-ignored)
-cd web && python -m http.server 8000      # open http://localhost:8000
+python serve.py 8000                      # threaded static server -> http://localhost:8000
 ```
 
-The idea — *capture sufficient state once, project every semantic offline* — is argued in
-[`REPLAYABLE_STATE_PROPOSAL.md`](REPLAYABLE_STATE_PROPOSAL.md); the demo internals and its
-offline validation are documented in
-[`replayable_state_demo/README.md`](replayable_state_demo/README.md).
+The reusable offline projectors (FK, scale recovery, depth decode, spatial-relation language,
+success/grasp/lift) live in the importable library [`robo_tools.replayable`](robo_tools/); the
+CLI/bundle (`export_scene.py`, `serve.py`, `web/`) lives under `scripts/replayable/`. The idea —
+*capture sufficient state once, project every semantic offline* — and the demo internals + offline
+validation are documented in [`scripts/replayable/README.md`](scripts/replayable/README.md).
 
 ## Documentation
 
 | Doc | For |
 |---|---|
-| [`GETTING_STARTED.md`](GETTING_STARTED.md) | Newcomers — mental model, vocabulary, hands-on quickstarts |
 | `README.md` (this file) | Install, eval, perturbation configs, and the two features above |
 | [`CLAUDE.md`](CLAUDE.md) | Contributor / agent guidance — env activation, common commands, gotchas |
 | [`robo_tools/`](robo_tools/) | Targeted negative-data generation (desync, capture, labels) |
-| [`replayable_state_demo/README.md`](replayable_state_demo/README.md) | Replayable-state reconstruction + interactive HTML viewer |
-| [`REPLAYABLE_STATE_PROPOSAL.md`](REPLAYABLE_STATE_PROPOSAL.md) | RFC: the replayable-state capture format |
+| [`scripts/replayable/README.md`](scripts/replayable/README.md) | Replayable-state reconstruction + interactive HTML viewer |
 
 ## License
 
