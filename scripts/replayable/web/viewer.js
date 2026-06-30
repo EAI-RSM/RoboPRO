@@ -19,9 +19,13 @@ function status(msg) {
   if (el && el.style.color !== 'rgb(248, 81, 73)') el.textContent = msg;
 }
 
-// ---------------------------------------------------------------- load manifest
+// ---------------------------------------------------------------- load manifest (multi-scene bundle)
+status('fetching scene index …');
+const IDX = await (await fetch('data/scenes.json')).json().catch(err => { fatal('scenes.json: ' + err); throw err; });
+const DEF = IDX.scenes.find(s => s.id === IDX.default) || IDX.scenes[0];
+const SCENE_ID = DEF.id;                                       // glbs are exported for the default scene
 status('fetching scene.json …');
-const SCENE = await (await fetch('data/scenes/clean_baseline/scene.json')).json().catch(err => { fatal('scene.json: ' + err); throw err; });
+const SCENE = await (await fetch(DEF.scene)).json().catch(err => { fatal('scene.json: ' + err); throw err; });
 const M = SCENE.meta, NF = M.n_frames, A = SCENE.objects.length;
 const OP = SCENE.frames.object_pos, OQ = SCENE.frames.object_quat;
 
@@ -34,7 +38,7 @@ renderer.shadowMap.type = THREE.PCFSoftShadowMap;
 host.appendChild(renderer.domElement);
 
 const scene = new THREE.Scene();
-scene.background = new THREE.Color(0x0d1117);
+scene.background = new THREE.Color(0x070a10);
 THREE.Object3D.DEFAULT_UP.set(0, 0, 1);                       // SAPIEN world is Z-up
 
 const camera = new THREE.PerspectiveCamera(45, 1, 0.01, 100);
@@ -114,33 +118,34 @@ const envGroup = new THREE.Group(); scene.add(envGroup);
   wall.position.set(0, 1.0, 2.0); wall.rotation.x = Math.PI / 2; envGroup.add(wall);
 })();
 
-// destination pad (primitive box at its pose) — kept separate so it updates per frame
-let padMesh = null, padIndex = -1;
-
-// ---------------------------------------------------------------- objects
+// ---------------------------------------------------------------- objects (data-driven)
 const objRoots = [];                        // per-actor root Object3D or null
 SCENE.objects.forEach((o, i) => {
-  if (o.glb) {
+  const col = new THREE.Color(o.color[0], o.color[1], o.color[2]);
+  if (o.glb) {                              // real mesh: apply the collected/recovered scale in object frame
     const root = new THREE.Group(); scene.add(root); objRoots[i] = root;
     gltf(o.glb, (g) => {
       const inner = g.scene;
-      // SAPIEN's add_visual_from_file uses the glb coords as-is (each glb bakes its own
-      // up-axis node transform), so we honor the loaded nodes and add NO correction.
+      // SAPIEN spawns the glb with this scale on top of the glb's own baked node transforms;
+      // GLTFLoader honors those nodes, so applying o.scale here matches the collected geometry.
       inner.scale.set(...o.scale);
       inner.traverse((m) => {
         if (m.isMesh) { m.castShadow = true; m.receiveShadow = true; registerSeg(m, o.color); }
       });
       root.add(inner);
     });
-  } else if (o.primitive === 'box' && o.role === 'destination') {
-    padIndex = i;
-    padMesh = new THREE.Mesh(
-      new THREE.BoxGeometry(0.23, 0.17, 0.010),
+  } else if (o.role === 'destination') {    // placement pad: a thin slab sized from the data bbox
+    const h = (o.bbox && o.bbox.half) || [0.115, 0.085, 0.006];
+    const pad = new THREE.Mesh(
+      new THREE.BoxGeometry(2 * h[0], 2 * h[1], Math.max(2 * h[2], 0.008)),
       new THREE.MeshStandardMaterial({ color: 0x2d333d, roughness: 0.7 }));
-    padMesh.castShadow = false; padMesh.receiveShadow = true;
-    registerSeg(padMesh, o.color); scene.add(padMesh); objRoots[i] = padMesh;
+    pad.receiveShadow = true; registerSeg(pad, o.color); scene.add(pad); objRoots[i] = pad;
+  } else if (o.tracked) {                    // mesh-less tracked actor (e.g. furniture): honest marker, not a wrong-sized box
+    const mk = new THREE.Mesh(new THREE.SphereGeometry(0.02, 16, 12),
+      new THREE.MeshStandardMaterial({ color: col, roughness: 0.6 }));
+    mk.castShadow = true; registerSeg(mk, o.color); scene.add(mk); objRoots[i] = mk;
   } else {
-    objRoots[i] = null;                     // ground/table/wall handled by envGroup
+    objRoots[i] = null;                     // env (ground/table/wall) handled by envGroup
   }
 });
 
@@ -235,7 +240,7 @@ function updatePanel(t) {
   chip('c-place', S.placed[t], 'place');
   const placedNow = S.placed[t];
   const el = document.getElementById('s-success');
-  el.textContent = placedNow ? '✓ mouse on pad' : '… in progress';
+  el.textContent = placedNow ? '✓ placed' : '… in progress';
   el.style.color = placedNow ? 'var(--good)' : 'var(--dim)';
   document.getElementById('framelbl').textContent = `frame ${t} / ${NF - 1}`;
 }
@@ -249,7 +254,7 @@ let rgbCam = null;
 const rgbBox = document.getElementById('rgb-compare');
 const rgbImg = document.getElementById('rgb-img');
 function updateRgb(t) {
-  rgbImg.src = `data/rgb/${rgbCam}/f${String(t).padStart(4, '0')}.jpg`;
+  rgbImg.src = `data/scenes/${SCENE_ID}/rgb/${rgbCam}/f${String(t).padStart(4, '0')}.jpg`;
   document.getElementById('rgb-cap').textContent = `collected RGB · ${rgbCam}`;
 }
 
@@ -258,12 +263,18 @@ const camButtons = document.getElementById('cam-buttons');
 const camNote = document.getElementById('cam-note');
 function snapTo(camName) {
   const c = SCENE.cameras.find(x => x.name === camName);
-  const m = (c.cam2world_gl || [])[frame] || c.cam2world_gl[0];
-  const C2W = new THREE.Matrix4().set(
-    m[0], m[1], m[2], m[3], m[4], m[5], m[6], m[7],
-    m[8], m[9], m[10], m[11], m[12], m[13], m[14], m[15]);
+  // Derive the camera pose from extrinsic_cv (world->cam, OpenCV) — the same params the 2D
+  // overlays project through, so the 3D reconstruction lines up with the collected pixels.
+  const e = (c.extrinsic_cv || [])[frame] || c.extrinsic_cv[0];   // row-major [R|t], 12 floats
+  const Mwc = new THREE.Matrix4().set(
+    e[0], e[1], e[2], e[3],
+    e[4], e[5], e[6], e[7],
+    e[8], e[9], e[10], e[11],
+    0, 0, 0, 1);
+  const Mcw = Mwc.clone().invert();                                // cam->world (OpenCV: +Z fwd, +Y down)
+  Mcw.multiply(new THREE.Matrix4().makeScale(1, -1, -1));          // OpenCV cam -> three.js cam (-Z fwd, +Y up)
   const pos = new THREE.Vector3(), quat = new THREE.Quaternion(), scl = new THREE.Vector3();
-  C2W.decompose(pos, quat, scl);
+  Mcw.decompose(pos, quat, scl);
   camera.position.copy(pos); camera.quaternion.copy(quat);
   camera.fov = 2 * Math.atan((c.height / 2) / c.K[1][1]) * 180 / Math.PI;
   camera.updateProjectionMatrix();
@@ -272,12 +283,15 @@ function snapTo(camName) {
 function freeView() {
   controls.enabled = true; controls.target.set(0.0, -0.05, M.table_top_z + 0.04);
   camera.fov = 45; camera.updateProjectionMatrix();
+  robotGroup.visible = document.getElementById('t-robot').checked;   // restore robot in free orbit
 }
+// presets are derived from the scene's actual collected cameras (those with RGB + a pose)
+const camPresets = SCENE.cameras
+  .filter(c => c.rgb && c.cam2world_gl)
+  .map(c => ({ label: c.name.replace('_camera', '').replace(/_/g, ' ') + ' cam', cam: c.name, rgb: true }));
 const PRESETS = [
-  { label: 'Free orbit', collected: false, act: () => { rgbCam = null; rgbBox.style.display = 'none';
-      freeView(); tagFree(); } },
-  { label: 'Head cam', cam: 'head_camera', rgb: true },
-  { label: 'External cam', cam: 'demo_camera', rgb: true },
+  { label: 'Free orbit', act: () => { rgbCam = null; rgbBox.style.display = 'none'; freeView(); tagFree(); } },
+  ...camPresets,
 ];
 PRESETS.forEach((p, idx) => {
   const b = document.createElement('button'); b.className = 'cam'; b.textContent = p.label;
@@ -286,9 +300,11 @@ PRESETS.forEach((p, idx) => {
     if (p.cam) {
       rgbCam = p.rgb ? p.cam : null;
       rgbBox.style.display = p.rgb ? 'block' : 'none';
+      robotGroup.visible = false;     // this camera is mounted on the robot — hide it so its own
+                                      // housing doesn't occlude the reconstructed workspace
       snapTo(p.cam); updateRgb(frame);
-      camNote.innerHTML = `Matching the collected <b>${p.cam}</b>. The 3D scene is reconstructed; ` +
-        `the inset is the real recorded pixels — they line up. Now hit <b>Free orbit</b>.`;
+      camNote.innerHTML = `Matching the collected <b>${p.cam}</b> — the reconstructed workspace ` +
+        `vs. the inset of real recorded pixels. Robot hidden (it carries this camera). Now hit <b>Free orbit</b>.`;
       setTag(`reproducing collected camera: <b>${p.cam}</b>`);
     } else { p.act(); }
   };
@@ -321,11 +337,20 @@ scrub.oninput = () => { frame = +scrub.value; applyFrame(frame); };
 playbtn.onclick = () => { playing = !playing; playbtn.textContent = playing ? '❚❚' : '▶'; };
 
 // ---------------------------------------------------------------- header + storage
+const _oc = M.outcome || '';
+const ocCls = _oc.includes('success') && !_oc.includes('collision') ? 'good'
+            : _oc.includes('collision') ? 'warn' : 'bad';
 document.getElementById('title').innerHTML =
-  `RoboPRO · <b>${M.task_name}</b> <span class="badge good">${M.outcome}</span>`;
+  `RoboPRO · <b>${M.task_name}</b> <span class="badge ${ocCls}">${M.outcome}</span>`;
 document.getElementById('subtitle').innerHTML =
   `“${M.instruction}” &nbsp;·&nbsp; seed ${M.seed} &nbsp;·&nbsp; ${NF} frames &nbsp;·&nbsp; ` +
   `reconstructed offline from the logged state trace`;
+// data-driven semantic labels (this viewer is no longer hard-coded to mouse/pad)
+const _tgt = SCENE.objects.find(o => o.role === 'target');
+const _dst = SCENE.objects.find(o => o.role === 'destination');
+const TGT = (_tgt && _tgt.label) || 'target', DST = (_dst && _dst.label) || 'destination';
+const _ld = document.getElementById('lbl-dist'); if (_ld) _ld.textContent = `distance ${TGT} → ${DST}`;
+const _lh = document.getElementById('lbl-height'); if (_lh) _lh.textContent = `${TGT} height over table`;
 const st = SCENE.storage;
 document.getElementById('st-kb').textContent = st.state_trace_kb + ' KB';
 document.getElementById('st-mb').textContent = st.pixels_mb + ' MB';

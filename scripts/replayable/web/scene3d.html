@@ -3,78 +3,130 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>Replayable State — RoboPRO demo</title>
+<title>Replayable State — 3D reconstruction</title>
 <style>
   :root {
-    --bg:#0d1117; --panel:#161b22; --panel2:#1c2330; --line:#2b3340;
-    --txt:#e6edf3; --dim:#8b949e; --accent:#58a6ff; --good:#3fb950; --warn:#d29922; --bad:#f85149;
+    --bg:#070a10; --bg2:#0b0f17;
+    --panel:#11161f; --panel2:#1c2330;
+    --line:#252e3b; --line-soft:rgba(124,148,184,.14);
+    --txt:#e6edf3; --dim:#8b949e; --faint:#5b6678;
+    --accent:#58a6ff; --accent-br:#7cc0ff; --violet:#a371f7;
+    --good:#3fb950; --warn:#d29922; --bad:#f85149;
+    --grad:linear-gradient(135deg,#58a6ff 0%,#7d8bff 48%,#a371f7 100%);
+    --grad-soft:linear-gradient(135deg,rgba(88,166,255,.16),rgba(163,113,247,.16));
+    --r:10px; --r-sm:7px;
+    --shadow:0 10px 30px -12px rgba(0,0,0,.7);
+    --glow:0 0 18px -2px rgba(88,166,255,.55);
   }
   * { box-sizing:border-box; }
-  html,body { margin:0; height:100%; background:var(--bg); color:var(--txt);
-    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif; }
-  #app { display:grid; grid-template-columns:1fr 360px; grid-template-rows:1fr auto;
+  html,body { margin:0; height:100%; color:var(--txt);
+    font-family:"Inter","SF Pro Display",-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+    font-size:13px; -webkit-font-smoothing:antialiased; }
+  body { background:
+      radial-gradient(1200px 700px at 78% -8%, rgba(88,166,255,.10), transparent 60%),
+      radial-gradient(900px 600px at 8% 108%, rgba(163,113,247,.10), transparent 55%),
+      linear-gradient(180deg,var(--bg2),var(--bg)); }
+  ::selection { background:rgba(88,166,255,.32); }
+  #app { display:grid; grid-template-columns:minmax(0,1fr) 376px; grid-template-rows:minmax(0,1fr) auto;
     height:100vh; gap:0; }
+
+  /* ---------------- 3D stage ---------------- */
   #stage { position:relative; grid-row:1; grid-column:1; overflow:hidden; }
   #canvas-host { position:absolute; inset:0; }
   #overlay-top { position:absolute; top:0; left:0; right:0; padding:14px 18px;
-    background:linear-gradient(180deg,rgba(13,17,23,.85),rgba(13,17,23,0)); pointer-events:none; }
-  #overlay-top h1 { margin:0; font-size:15px; font-weight:600; letter-spacing:.2px; }
+    background:linear-gradient(180deg,rgba(7,10,16,.86),rgba(7,10,16,0)); pointer-events:none; }
+  .brandrow { display:flex; align-items:center; gap:12px; }
+  .logo { width:30px; height:30px; flex:0 0 auto; border-radius:9px; position:relative;
+    background:var(--grad); box-shadow:var(--glow), inset 0 0 0 1px rgba(255,255,255,.18);
+    display:grid; place-items:center; }
+  .logo::before { content:""; width:11px; height:11px; border-radius:3px; background:#0b0f17;
+    box-shadow:inset 0 0 0 2px rgba(255,255,255,.85); }
+  .logo::after { content:""; position:absolute; inset:-5px; border-radius:13px;
+    background:var(--grad); filter:blur(11px); opacity:.45; z-index:-1; animation:breathe 4.5s ease-in-out infinite; }
+  @keyframes breathe { 0%,100%{opacity:.32} 50%{opacity:.6} }
+  #overlay-top h1 { margin:0; font-size:15px; font-weight:650; letter-spacing:.2px; }
+  #overlay-top h1 b { background:var(--grad); -webkit-background-clip:text; background-clip:text;
+    -webkit-text-fill-color:transparent; font-weight:750; }
   #overlay-top .sub { color:var(--dim); font-size:12px; margin-top:3px; }
-  .badge { display:inline-block; padding:2px 8px; border-radius:10px; font-size:11px; font-weight:600;
-    vertical-align:middle; }
-  .badge.good { background:rgba(63,185,80,.18); color:var(--good); }
+  .badge { display:inline-block; padding:3px 10px; border-radius:999px; font-size:11px; font-weight:650;
+    vertical-align:middle; border:1px solid transparent; }
+  .badge.good { background:rgba(63,185,80,.16); color:#56d364; border-color:rgba(63,185,80,.4); box-shadow:0 0 14px -4px rgba(63,185,80,.7); }
+  .badge.warn { background:rgba(210,153,34,.16); color:#e3b341; border-color:rgba(210,153,34,.4); box-shadow:0 0 14px -4px rgba(210,153,34,.6); }
+  .badge.bad  { background:rgba(248,81,73,.16);  color:#ff7b72; border-color:rgba(248,81,73,.4);  box-shadow:0 0 14px -4px rgba(248,81,73,.6); }
   .badge.role { background:rgba(88,166,255,.16); color:var(--accent); margin-left:6px; }
   #view-tag { position:absolute; left:18px; bottom:14px; font-size:12px; padding:6px 11px;
-    border-radius:8px; background:rgba(28,35,48,.85); border:1px solid var(--line);
-    backdrop-filter:blur(4px); }
-  #view-tag b { color:var(--accent); }
+    border-radius:8px; background:rgba(7,10,16,.8); border:1px solid var(--line-soft);
+    backdrop-filter:blur(5px); }
+  #view-tag b { color:var(--accent-br); }
   #rgb-compare { position:absolute; right:14px; bottom:14px; width:240px;
-    border:1px solid var(--line); border-radius:8px; overflow:hidden; background:#000;
-    box-shadow:0 6px 24px rgba(0,0,0,.5); display:none; }
+    border:1px solid var(--line); border-radius:var(--r); overflow:hidden; background:#000;
+    box-shadow:var(--shadow), inset 0 0 0 1px var(--line-soft); display:none; }
   #rgb-compare img { display:block; width:100%; image-rendering:auto; }
-  #rgb-compare .cap { font-size:10.5px; color:var(--dim); padding:4px 7px; background:var(--panel);
+  #rgb-compare .cap { font-size:10.5px; color:var(--dim); padding:5px 8px; background:var(--panel);
     border-top:1px solid var(--line); }
-  #side { grid-row:1; grid-column:2; background:var(--panel); border-left:1px solid var(--line);
-    overflow-y:auto; padding:0 0 16px; }
+
+  /* ---------------- side panel ---------------- */
+  #side { grid-row:1; grid-column:2; overflow-y:auto; padding:0 0 16px;
+    background:linear-gradient(180deg,rgba(17,22,31,.92),rgba(11,15,23,.92));
+    border-left:1px solid var(--line); backdrop-filter:blur(8px); }
+  #side::-webkit-scrollbar { width:10px; }
+  #side::-webkit-scrollbar-thumb { background:#2a3340; border-radius:8px; border:2px solid transparent; background-clip:content-box; }
+  #side::-webkit-scrollbar-thumb:hover { background:#3a465a; background-clip:content-box; }
   .sec { padding:14px 16px; border-bottom:1px solid var(--line); }
-  .sec h2 { margin:0 0 10px; font-size:11px; text-transform:uppercase; letter-spacing:.7px;
-    color:var(--dim); font-weight:600; }
-  .sec h2 .note { text-transform:none; letter-spacing:0; color:#5b6470; font-weight:400; }
-  .kv { display:flex; justify-content:space-between; align-items:baseline; font-size:13px;
-    padding:3px 0; }
-  .kv .v { font-variant-numeric:tabular-nums; font-weight:600; }
-  .relation { font-size:13px; line-height:1.5; color:var(--txt); background:var(--panel2);
-    border:1px solid var(--line); border-radius:6px; padding:8px 10px; }
+  .sec h2 { margin:0 0 10px; font-size:10.5px; text-transform:uppercase; letter-spacing:.9px;
+    color:var(--dim); font-weight:700; display:flex; align-items:center; gap:8px; }
+  .sec h2::before { content:""; width:3px; height:12px; border-radius:2px; background:var(--grad);
+    box-shadow:0 0 8px -1px rgba(88,166,255,.7); flex:0 0 auto; }
+  .sec h2 .note { text-transform:none; letter-spacing:0; color:var(--faint); font-weight:400; }
+  .kv { display:flex; justify-content:space-between; align-items:baseline; font-size:13px; padding:3px 0; }
+  .kv .v { font-variant-numeric:tabular-nums; font-weight:700; font-family:ui-monospace,monospace; }
+  .relation { font-size:13px; line-height:1.5; color:var(--txt); background:var(--grad-soft);
+    border:1px solid var(--line-soft); border-radius:var(--r-sm); padding:9px 11px; }
   .relation .q { color:var(--dim); }
-  .chips { display:flex; gap:6px; flex-wrap:wrap; margin-top:8px; }
-  .chip { font-size:11px; padding:3px 8px; border-radius:11px; border:1px solid var(--line);
-    color:var(--dim); }
-  .chip.on { color:var(--bg); font-weight:600; }
-  .chip.on.lift { background:var(--accent); border-color:var(--accent); }
-  .chip.on.place { background:var(--good); border-color:var(--good); }
-  .chip.on.grasp { background:var(--warn); border-color:var(--warn); }
-  .toggle { display:flex; align-items:center; justify-content:space-between; padding:5px 0;
+  .chips { display:flex; gap:6px; flex-wrap:wrap; margin-top:10px; }
+  .chip { font-size:11px; padding:4px 9px; border-radius:999px; border:1px solid var(--line);
+    color:var(--dim); transition:all .15s; }
+  .chip.on { color:#fff; font-weight:650; border-color:transparent; }
+  .chip.on.lift  { background:var(--grad); box-shadow:var(--glow); }
+  .chip.on.place { background:linear-gradient(135deg,#3fb950,#2ea043); box-shadow:0 0 14px -3px rgba(63,185,80,.7); }
+  .chip.on.grasp { background:linear-gradient(135deg,#e3b341,#d29922); box-shadow:0 0 14px -3px rgba(210,153,34,.6); }
+  .toggle { display:flex; align-items:center; justify-content:space-between; padding:6px 0;
     font-size:13px; cursor:pointer; }
   .toggle input { accent-color:var(--accent); width:15px; height:15px; }
   .btn-row { display:flex; gap:6px; flex-wrap:wrap; }
-  button.cam { flex:1 1 auto; font-size:12px; padding:6px 8px; border-radius:6px; cursor:pointer;
-    background:var(--panel2); color:var(--txt); border:1px solid var(--line); }
-  button.cam:hover { border-color:var(--accent); }
-  button.cam.active { background:var(--accent); color:var(--bg); border-color:var(--accent); font-weight:600; }
+  button.cam { flex:1 1 auto; font-size:12px; font-weight:500; padding:7px 9px; border-radius:var(--r-sm);
+    cursor:pointer; color:var(--txt); border:1px solid var(--line);
+    background:linear-gradient(180deg,rgba(40,49,64,.55),rgba(28,35,48,.55));
+    transition:border-color .16s, transform .12s, box-shadow .16s; }
+  button.cam:hover { border-color:rgba(88,166,255,.6); transform:translateY(-1px); box-shadow:0 6px 16px -10px rgba(88,166,255,.8); }
+  button.cam.active { color:#fff; border-color:transparent; background:var(--grad); font-weight:650; box-shadow:var(--glow); }
   .storage { font-size:12px; line-height:1.6; }
-  .storage .bignum { font-size:22px; font-weight:700; color:var(--good); }
-  .bar { height:8px; border-radius:4px; background:var(--panel2); overflow:hidden;
-    border:1px solid var(--line); margin:6px 0; }
-  .bar > div { height:100%; background:linear-gradient(90deg,var(--accent),var(--good)); }
-  #transport { grid-row:2; grid-column:1 / span 2; background:var(--panel);
-    border-top:1px solid var(--line); padding:10px 16px; display:flex; align-items:center; gap:14px; }
-  #playbtn { width:40px; height:40px; border-radius:50%; border:1px solid var(--line);
-    background:var(--panel2); color:var(--txt); font-size:16px; cursor:pointer; flex:0 0 auto; }
-  #playbtn:hover { border-color:var(--accent); }
-  #scrub { flex:1; accent-color:var(--accent); }
+  .storage .bignum { font-size:23px; font-weight:750; background:var(--grad); -webkit-background-clip:text;
+    background-clip:text; -webkit-text-fill-color:transparent; font-family:ui-monospace,monospace; }
+  .bar { height:9px; border-radius:5px; background:var(--panel2); overflow:hidden;
+    border:1px solid var(--line); margin:7px 0; }
+  .bar > div { height:100%; background:var(--grad); box-shadow:var(--glow); }
+  .legend { font-size:11px; color:var(--dim); margin-top:6px; line-height:1.5; }
+
+  /* ---------------- transport ---------------- */
+  #transport { grid-row:2; grid-column:1 / span 2; padding:10px 16px; display:flex; align-items:center; gap:14px;
+    background:linear-gradient(180deg,rgba(17,22,31,.92),rgba(11,15,23,.96));
+    border-top:1px solid var(--line); box-shadow:0 -8px 22px -18px #000; }
+  #playbtn { width:40px; height:40px; border-radius:50%; border:none; background:var(--grad);
+    color:#fff; font-size:15px; cursor:pointer; flex:0 0 auto; display:grid; place-items:center;
+    box-shadow:var(--glow), inset 0 0 0 1px rgba(255,255,255,.2); transition:transform .12s, box-shadow .16s; }
+  #playbtn:hover { transform:scale(1.08); box-shadow:0 0 24px -2px rgba(88,166,255,.85), inset 0 0 0 1px rgba(255,255,255,.3); }
+  #playbtn:active { transform:scale(.96); }
+  #scrub { flex:1; }
   #framelbl { font-variant-numeric:tabular-nums; font-size:13px; color:var(--dim);
-    min-width:118px; text-align:right; }
-  .legend { font-size:11px; color:var(--dim); margin-top:6px; }
+    min-width:118px; text-align:right; font-family:ui-monospace,monospace; letter-spacing:.3px; }
+  input[type=range] { -webkit-appearance:none; appearance:none; height:5px; border-radius:5px;
+    background:linear-gradient(90deg,rgba(88,166,255,.85),rgba(163,113,247,.85)) no-repeat, #232c3a;
+    background-size:var(--fill,0%) 100%; cursor:pointer; }
+  input[type=range]::-webkit-slider-thumb { -webkit-appearance:none; width:15px; height:15px; border-radius:50%;
+    background:#eaf2ff; border:2px solid var(--accent); box-shadow:0 0 10px -1px rgba(88,166,255,.9); transition:transform .12s; }
+  input[type=range]::-webkit-slider-thumb:hover { transform:scale(1.18); }
+
   a { color:var(--accent); }
   #loading { position:absolute; inset:0; display:flex; align-items:center; justify-content:center;
     background:var(--bg); z-index:10; font-size:13px; color:var(--dim); }
@@ -86,8 +138,13 @@
     <div id="canvas-host"></div>
     <div id="loading">Reconstructing scene from state trace…</div>
     <div id="overlay-top">
-      <h1 id="title">RoboPRO · Replayable State demo</h1>
-      <div class="sub" id="subtitle"></div>
+      <div class="brandrow">
+        <span class="logo" aria-hidden="true"></span>
+        <div>
+          <h1 id="title">RoboPRO · Replayable State</h1>
+          <div class="sub" id="subtitle"></div>
+        </div>
+      </div>
     </div>
     <div id="view-tag"></div>
     <div id="rgb-compare"><img id="rgb-img" alt="collected RGB"/><div class="cap" id="rgb-cap"></div></div>
@@ -98,13 +155,13 @@
       <h2>Derived semantics <span class="note">— computed offline from the trace, never stored</span></h2>
       <div class="relation"><span class="q">language re-annotation:</span><br/><span id="relation"></span></div>
       <div style="height:10px"></div>
-      <div class="kv"><span>distance mouse → pad</span><span class="v" id="s-dist">–</span></div>
-      <div class="kv"><span>mouse height over table</span><span class="v" id="s-height">–</span></div>
+      <div class="kv"><span id="lbl-dist">distance target → destination</span><span class="v" id="s-dist">–</span></div>
+      <div class="kv"><span id="lbl-height">target height over table</span><span class="v" id="s-height">–</span></div>
       <div class="kv"><span>final placement error</span><span class="v" id="s-perr">–</span></div>
       <div class="chips">
         <span class="chip" id="c-lift">lifted</span>
         <span class="chip" id="c-grasp">gripper closed</span>
-        <span class="chip" id="c-place">placed on pad</span>
+        <span class="chip" id="c-place">placed</span>
       </div>
     </div>
 
@@ -122,7 +179,7 @@
         segmentation (free from the renderer)</div>
       <label class="toggle">Robot (from joint qpos via FK) <input type="checkbox" id="t-robot" checked/></label>
       <label class="toggle">Collected-camera frusta <input type="checkbox" id="t-frusta"/></label>
-      <label class="toggle">Trajectories (mouse + gripper) <input type="checkbox" id="t-traj"/></label>
+      <label class="toggle">Trajectories (target + gripper) <input type="checkbox" id="t-traj"/></label>
       <label class="toggle">Table &amp; floor <input type="checkbox" id="t-env" checked/></label>
     </div>
 
@@ -161,5 +218,15 @@
 }}
 </script>
 <script type="module" src="viewer.js"></script>
+<script>
+/* keep the gradient scrub fill in sync (viewer.js sets scrub.value programmatically) */
+(function(){
+  const s = document.getElementById('scrub'); if (!s) return;
+  const fill = () => { const mn=+s.min||0, mx=+s.max||100, v=+s.value;
+    s.style.setProperty('--fill', (mx>mn ? (v-mn)/(mx-mn)*100 : 0).toFixed(2)+'%'); };
+  s.addEventListener('input', fill); let last=null;
+  (function poll(){ if (s.value!==last){ last=s.value; fill(); } requestAnimationFrame(poll); })();
+})();
+</script>
 </body>
 </html>
