@@ -834,7 +834,7 @@ class Bench_base_task(Base_Task):
                         # print(f"[Collision] robot_to_furniture: {robot_link} -> {furniture_name}")
                         self.collision_metrics["robot_to_furniture"] += 1
                         self._counted_furniture_names.add(furniture_name)
-                    count_furniture = True
+                        count_furniture = True
 
             # Static objects: count only when cumulative displacement exceeds threshold
             if ((is_robot_0 and is_static_1 and not is_gripper_0) or (is_robot_1 and is_static_0 and not is_gripper_1)):

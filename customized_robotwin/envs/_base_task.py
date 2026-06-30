@@ -38,8 +38,14 @@ parent_directory = os.path.dirname(current_file_path)
 
 class Base_Task(gym.Env):
     BENCHMARK_SCHEMA_NAME = "robopro_benchmark_support"
-    BENCHMARK_SCHEMA_VERSION = "1.1.0"
+    BENCHMARK_SCHEMA_VERSION = "1.3.0"
     BENCHMARK_EXPORTER_NAME = "robopro_benchmark_export"
+    BENCHMARK_ROBOT_OBJECT_ID = -1
+    BENCHMARK_LEFT_EE_OBJECT_ID = -2
+    BENCHMARK_RIGHT_EE_OBJECT_ID = -3
+    BENCHMARK_ROBOT_NAME = "robot"
+    BENCHMARK_LEFT_EE_NAME = "left_ee"
+    BENCHMARK_RIGHT_EE_NAME = "right_ee"
     BENCHMARK_CANONICAL_RELATION_NAMES = (
         "on",
         "in",
@@ -61,6 +67,21 @@ class Base_Task(gym.Env):
         "held_by",
         "near",
         "collides_with",
+        "part_of",
+    )
+    BENCHMARK_IMPLEMENTED_BINARY_RELATION_NAMES = (
+        "on",
+        "supports",
+        "near",
+        "collides_with",
+        "part_of",
+    )
+    BENCHMARK_IMPLEMENTED_BIPARTITE_RELATION_NAMES = (
+        "held_by",
+    )
+    BENCHMARK_AUXILIARY_RELATION_STATE_NAMES = (
+        "contact",
+        "grasped_by_code",
     )
 
     def __init__(self):
@@ -246,8 +267,27 @@ class Base_Task(gym.Env):
             return set()
         try:
             return set(self._get_target_object_names() or set())
-        except Exception:
+        except Exception as exc:
+            raise RuntimeError(
+                f"Failed to collect target object names for task {type(self).__name__}"
+            ) from exc
+
+    def _get_benchmark_robot_link_names(self) -> set[str]:
+        if not hasattr(self, "robot"):
             return set()
+
+        robot_link_names = set()
+        for entity_attr in ("left_entity", "right_entity"):
+            entity = getattr(self.robot, entity_attr, None)
+            if entity is None:
+                continue
+            try:
+                robot_link_names.update(link.get_name() for link in entity.get_links())
+            except Exception as exc:
+                raise RuntimeError(
+                    f"Failed to enumerate robot links from {entity_attr} for task {type(self).__name__}"
+                ) from exc
+        return robot_link_names
 
     def _build_object_asset_ref_lookup(self) -> dict[str, str]:
         lookup: dict[str, str] = {}
@@ -276,15 +316,7 @@ class Base_Task(gym.Env):
             for record in (getattr(self, "info", {}).get("cluttered_table_info", []) or [])
             if record.get("object_type")
         }
-        robot_link_names = set()
-        if hasattr(self, "robot"):
-            try:
-                robot_link_names = {
-                    link.get_name()
-                    for link in self.robot.left_entity.get_links() + self.robot.right_entity.get_links()
-                }
-            except Exception:
-                robot_link_names = set()
+        robot_link_names = self._get_benchmark_robot_link_names()
 
         seen_ids = set()
         for entity in self.scene.get_all_actors():
@@ -323,8 +355,95 @@ class Base_Task(gym.Env):
             }
             catalog.append(entry)
 
+        catalog.extend(self._build_benchmark_structural_object_entries())
+
         catalog.sort(key=lambda item: item["object_id"])
         return catalog
+
+    def _build_benchmark_structural_object_entries(self) -> list[dict]:
+        if not hasattr(self, "robot"):
+            return []
+
+        return [
+            {
+                "object_id": self.BENCHMARK_ROBOT_OBJECT_ID,
+                "name": self.BENCHMARK_ROBOT_NAME,
+                "entity_kind": "robot",
+                "role": "robot",
+                "semantic_label": "robot",
+                "asset_ref": None,
+                "is_target": False,
+                "is_distractor": False,
+                "is_furniture": False,
+                "is_robot": True,
+                "is_articulated": True,
+                "is_movable": False,
+                "provenance": "privileged",
+                "metadata": {"structural": True},
+            },
+            {
+                "object_id": self.BENCHMARK_LEFT_EE_OBJECT_ID,
+                "name": self.BENCHMARK_LEFT_EE_NAME,
+                "entity_kind": "end_effector",
+                "role": "robot",
+                "semantic_label": "left_end_effector",
+                "asset_ref": None,
+                "is_target": False,
+                "is_distractor": False,
+                "is_furniture": False,
+                "is_robot": True,
+                "is_articulated": False,
+                "is_movable": False,
+                "provenance": "privileged",
+                "metadata": {"structural": True, "side": "left"},
+            },
+            {
+                "object_id": self.BENCHMARK_RIGHT_EE_OBJECT_ID,
+                "name": self.BENCHMARK_RIGHT_EE_NAME,
+                "entity_kind": "end_effector",
+                "role": "robot",
+                "semantic_label": "right_end_effector",
+                "asset_ref": None,
+                "is_target": False,
+                "is_distractor": False,
+                "is_furniture": False,
+                "is_robot": True,
+                "is_articulated": False,
+                "is_movable": False,
+                "provenance": "privileged",
+                "metadata": {"structural": True, "side": "right"},
+            },
+        ]
+
+    @staticmethod
+    def _pose_list_to_array(pose_list) -> np.ndarray:
+        return np.array([float(value) for value in pose_list[:7]], dtype=np.float32)
+
+    def _get_benchmark_robot_pose_world(self) -> np.ndarray:
+        if not hasattr(self, "robot"):
+            return np.zeros(7, dtype=np.float32)
+
+        left_pose = getattr(getattr(self.robot, "left_entity", None), "get_pose", lambda: None)()
+        right_pose = getattr(getattr(self.robot, "right_entity", None), "get_pose", lambda: None)()
+        if left_pose is None and right_pose is None:
+            return np.zeros(7, dtype=np.float32)
+        if right_pose is None:
+            right_pose = left_pose
+        if left_pose is None:
+            left_pose = right_pose
+
+        midpoint = 0.5 * (np.array(left_pose.p, dtype=np.float32) + np.array(right_pose.p, dtype=np.float32))
+        quat = np.array(left_pose.q, dtype=np.float32)
+        return np.concatenate([midpoint, quat], axis=0)
+
+    def _get_benchmark_structural_pose_world(self, object_id: int) -> np.ndarray | None:
+        if object_id == self.BENCHMARK_ROBOT_OBJECT_ID:
+            return self._get_benchmark_robot_pose_world()
+        if object_id == self.BENCHMARK_LEFT_EE_OBJECT_ID and hasattr(self, "robot"):
+            return self._pose_list_to_array(self.robot.get_left_tcp_pose())
+        if object_id == self.BENCHMARK_RIGHT_EE_OBJECT_ID and hasattr(self, "robot"):
+            return self._pose_list_to_array(self.robot.get_right_tcp_pose())
+        return None
 
     def _get_benchmark_object_catalog(self) -> list[dict]:
         self._ensure_benchmark_export_state()
@@ -348,10 +467,17 @@ class Base_Task(gym.Env):
 
         for entry in object_catalog:
             object_id = int(entry["object_id"])
-            entity = actor_by_id.get(object_id)
             object_ids.append(object_id)
             is_target.append(bool(entry.get("is_target", False)))
             is_furniture.append(bool(entry.get("is_furniture", False)))
+
+            structural_pose = self._get_benchmark_structural_pose_world(object_id)
+            if structural_pose is not None:
+                is_present.append(True)
+                pose_world.append(structural_pose)
+                continue
+
+            entity = actor_by_id.get(object_id)
 
             if entity is None:
                 is_present.append(False)
@@ -528,6 +654,25 @@ class Base_Task(gym.Env):
 
         return self._compute_benchmark_xy_overlap_ratio(upper_aabb, lower_aabb) >= 0.2
 
+    def _get_benchmark_effector_state(self, arm_tag: str) -> tuple[np.ndarray | None, bool]:
+        if not hasattr(self, "robot"):
+            return None, False
+
+        pose_method_name = f"get_{arm_tag}_tcp_pose"
+        closed_method_name = f"is_{arm_tag}_gripper_close"
+        pose_method = getattr(self.robot, pose_method_name, None)
+        closed_method = getattr(self.robot, closed_method_name, None)
+        if pose_method is None or closed_method is None:
+            return None, False
+
+        try:
+            tcp_pose = np.array(pose_method()[:3], dtype=np.float64)
+            is_closed = bool(closed_method())
+        except Exception:
+            return None, False
+
+        return tcp_pose, is_closed
+
     def _build_benchmark_relation_state_snapshot(self) -> dict:
         object_catalog = self._get_benchmark_object_catalog()
         actor_by_id = {}
@@ -553,6 +698,7 @@ class Base_Task(gym.Env):
         contact = np.zeros((object_count, object_count), dtype=np.bool_)
         near = np.zeros((object_count, object_count), dtype=np.bool_)
         supports_from = np.zeros((object_count, object_count), dtype=np.bool_)
+        part_of = np.zeros((object_count, object_count), dtype=np.bool_)
         grasped_by_code = np.full((object_count,), -1, dtype=np.int8)
         held_by = np.zeros((object_count, 2), dtype=np.bool_)
 
@@ -627,18 +773,26 @@ class Base_Task(gym.Env):
                     if self._is_benchmark_supported_by(aabb_j, aabb_i):
                         supports_from[j, i] = True
 
-        left_tcp = np.array(self.robot.get_left_tcp_pose()[:3], dtype=np.float64)
-        right_tcp = np.array(self.robot.get_right_tcp_pose()[:3], dtype=np.float64)
-        left_closed = bool(self.robot.is_left_gripper_close())
-        right_closed = bool(self.robot.is_right_gripper_close())
+        left_tcp, left_closed = self._get_benchmark_effector_state("left")
+        right_tcp, right_closed = self._get_benchmark_effector_state("right")
 
         for i, object_id in enumerate(object_ids.tolist()):
             entity = actor_by_id.get(int(object_id))
             if entity is None:
                 continue
             center = np.array(entity.get_pose().p, dtype=np.float64)
-            left_held = left_closed and left_contact[i] and float(np.linalg.norm(center - left_tcp)) <= 0.16
-            right_held = right_closed and right_contact[i] and float(np.linalg.norm(center - right_tcp)) <= 0.16
+            left_held = (
+                left_tcp is not None
+                and left_closed
+                and left_contact[i]
+                and float(np.linalg.norm(center - left_tcp)) <= 0.16
+            )
+            right_held = (
+                right_tcp is not None
+                and right_closed
+                and right_contact[i]
+                and float(np.linalg.norm(center - right_tcp)) <= 0.16
+            )
             held_by[i, 0] = left_held
             held_by[i, 1] = right_held
             if left_held and right_held:
@@ -650,7 +804,18 @@ class Base_Task(gym.Env):
 
         on = supports_from.copy()
         supports = supports_from.T.copy()
-        collides_with = contact.copy()
+        collides_with = np.logical_and(
+            contact,
+            np.logical_not(np.logical_or(on, supports)),
+        )
+
+        robot_idx = index_by_id.get(self.BENCHMARK_ROBOT_OBJECT_ID)
+        left_ee_idx = index_by_id.get(self.BENCHMARK_LEFT_EE_OBJECT_ID)
+        right_ee_idx = index_by_id.get(self.BENCHMARK_RIGHT_EE_OBJECT_ID)
+        if robot_idx is not None and left_ee_idx is not None:
+            part_of[left_ee_idx, robot_idx] = True
+        if robot_idx is not None and right_ee_idx is not None:
+            part_of[right_ee_idx, robot_idx] = True
 
         return {
             "object_ids": object_ids,
@@ -661,9 +826,13 @@ class Base_Task(gym.Env):
             "supports": supports,
             "collides_with": collides_with,
             "held_by": held_by,
-            "held_by_effector_names": np.array(["left_end_effector", "right_end_effector"], dtype="S32"),
+            "part_of": part_of,
+            "held_by_effector_names": np.array([self.BENCHMARK_LEFT_EE_NAME, self.BENCHMARK_RIGHT_EE_NAME], dtype="S32"),
             "canonical_relation_names": np.array(self.BENCHMARK_CANONICAL_RELATION_NAMES, dtype="S32"),
             "implemented_relation_names": np.array(self.BENCHMARK_IMPLEMENTED_RELATION_NAMES, dtype="S32"),
+            "implemented_binary_relation_names": np.array(self.BENCHMARK_IMPLEMENTED_BINARY_RELATION_NAMES, dtype="S32"),
+            "implemented_bipartite_relation_names": np.array(self.BENCHMARK_IMPLEMENTED_BIPARTITE_RELATION_NAMES, dtype="S32"),
+            "auxiliary_relation_state_names": np.array(self.BENCHMARK_AUXILIARY_RELATION_STATE_NAMES, dtype="S32"),
         }
 
     def _record_benchmark_contact_event(
@@ -763,7 +932,7 @@ class Base_Task(gym.Env):
     def _write_benchmark_metadata_to_hdf5(self, hdf5_path):
         self._ensure_benchmark_export_state()
         record = getattr(self, "_benchmark_episode_record", None)
-        if not record:
+        if record is None:
             return
 
         string_dtype = h5py.string_dtype(encoding="utf-8")
@@ -782,7 +951,8 @@ class Base_Task(gym.Env):
             f.attrs["task_name"] = scenario.get("task_name") or ""
             f.attrs["task_config"] = scenario.get("task_config") or ""
             f.attrs["seed"] = -1 if scenario.get("seed") is None else int(scenario["seed"])
-            f.attrs["success"] = bool(scenario.get("success")) if scenario.get("success") is not None else False
+            success_value = scenario.get("success")
+            f.attrs["success"] = -1 if success_value is None else int(bool(success_value))
 
             export_group = f.require_group("benchmark_support")
 
@@ -819,6 +989,9 @@ class Base_Task(gym.Env):
                     "held_by_effector_names",
                     "canonical_relation_names",
                     "implemented_relation_names",
+                    "implemented_binary_relation_names",
+                    "implemented_bipartite_relation_names",
+                    "auxiliary_relation_state_names",
                 ):
                     if dataset_name not in relation_state_group:
                         continue
@@ -839,11 +1012,14 @@ class Base_Task(gym.Env):
                 data=np.array([event["t_step"] for event in contact_events], dtype=np.int64),
             )
             for field in ("body0_name", "body1_name", "event_type"):
-                contact_events_group.create_dataset(
-                    field,
-                    data=np.array([event[field] for event in contact_events], dtype=object),
-                    dtype=string_dtype,
-                )
+                if contact_events:
+                    contact_events_group.create_dataset(
+                        field,
+                        data=np.array([event[field] for event in contact_events], dtype=object),
+                        dtype=string_dtype,
+                    )
+                else:
+                    contact_events_group.create_dataset(field, shape=(0,), dtype=string_dtype)
             for field in ("body0_id", "body1_id"):
                 contact_events_group.create_dataset(
                     field,

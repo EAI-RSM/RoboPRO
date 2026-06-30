@@ -54,6 +54,7 @@ def _load_relation_info(root: h5py.File):
         "near": state["near"][()] if "near" in state else None,
         "collides_with": state["collides_with"][()] if "collides_with" in state else None,
         "held_by": state["held_by"][()] if "held_by" in state else None,
+        "part_of": state["part_of"][()] if "part_of" in state else None,
     }
     effector_names = _decode_string_array(state["held_by_effector_names"]) if "held_by_effector_names" in state else []
     return relations, effector_names
@@ -65,9 +66,9 @@ def _load_gripper_positions(root: h5py.File):
     endpose = root["endpose"]
     positions = {}
     if "left_endpose" in endpose:
-        positions["left_end_effector"] = endpose["left_endpose"][()][:, :3]
+        positions["left_ee"] = endpose["left_endpose"][()][:, :3]
     if "right_endpose" in endpose:
-        positions["right_end_effector"] = endpose["right_endpose"][()][:, :3]
+        positions["right_ee"] = endpose["right_endpose"][()][:, :3]
     return positions
 
 
@@ -150,6 +151,7 @@ def render_relation_frame(hdf5_path: Path, frame_idx: int, output_path: Path, wi
             ("collides_with", (20, 20, 220)),
             ("on", (20, 140, 20)),
             ("supports", (150, 90, 20)),
+            ("part_of", (150, 0, 150)),
         )
         for relation_name, color in relation_order:
             relation = relations.get(relation_name)
@@ -197,6 +199,7 @@ def render_relation_frame(hdf5_path: Path, frame_idx: int, output_path: Path, wi
             ("collides_with", (20, 20, 220)),
             ("on", (20, 140, 20)),
             ("supports", (150, 90, 20)),
+            ("part_of", (150, 0, 150)),
             ("held_by", (170, 0, 170)),
         ]
         cv2.putText(frame, f"frame {frame_idx}", (20, 24), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (40, 40, 40), 2, cv2.LINE_AA)
