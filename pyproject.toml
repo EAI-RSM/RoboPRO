@@ -8,7 +8,7 @@ dependencies = [
     # trimesh, open3d, gymnasium, ...) + lerobot/transformers/torch.
     "openpi",
     # the targeted negative-data library.
-    "robo-negative",
+    "robo-tools",
     # compiled sim stack + extras NOT in openpi's own deps (added here so the root
     # env is inclusive without depending on policy/pi05's pyproject content).
     "nvidia-curobo",
@@ -50,7 +50,7 @@ no-build-isolation-package = ["pytorch3d", "nvidia-curobo"]
 [tool.uv.sources]
 openpi = { path = "customized_robotwin/policy/pi05", editable = true }
 openpi-client = { path = "customized_robotwin/policy/pi05/packages/openpi-client", editable = true }
-robo-negative = { path = "robo_negative", editable = true }
+robo-tools = { path = "robo_tools", editable = true }
 nvidia-curobo = { path = "customized_robotwin/envs/curobo", editable = true }
 pytorch3d = { git = "https://github.com/facebookresearch/pytorch3d.git", rev = "75ebeeaea0908c5527e7b1e305fbc7681382db47" }
 lerobot = { git = "https://github.com/huggingface/lerobot", rev = "a445d9c9da6bea99a8972daa4fe1fdd053d711d2" }

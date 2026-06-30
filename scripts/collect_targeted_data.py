@@ -39,13 +39,13 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 SCRIPT_DIR = Path(__file__).resolve().parent
-REPO_ROOT = SCRIPT_DIR  # this script lives at the repo root
+REPO_ROOT = SCRIPT_DIR.parent  # scripts/ -> repo root
 RUN_EPISODE = SCRIPT_DIR / "run_targeted_episode.py"
 
 # robo_negative is an installed editable package (the single-file PoC library);
 # importing it does not pull in the sim-heavy bench_envs (sapien is lazy there).
-import robo_negative as registry  # was registry + sampler + ...
-from robo_negative import sample_shift_params
+import robo_tools as registry  # was registry + sampler + ...
+from robo_tools import sample_shift_params
 
 _INDEX_LOCK = threading.Lock()
 

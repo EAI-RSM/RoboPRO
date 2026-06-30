@@ -120,6 +120,29 @@ bash collect_data.sh put_mouse_on_pad bench_demo_office_clean 0
 
 Episodes land in `customized_robotwin/data/<task_name>/<task_config>/`.
 
+**The pipeline (`script/collect_data.py`) is enriched by default and extensible by config
+knobs** — the [`robo_tools`](robo_tools/) library does the work, and existing behavior is
+unchanged when the knobs are off:
+
+- **Enrichment (always on).** Every episode HDF5 additionally gets a per-frame `targeted_state`
+  pose trace + a `targeted_labels` annotation — *additive* groups, nothing existing changes.
+  This is the minimal state to re-derive scene semantics offline (see Replayable-state below).
+- **Sibling variations (per-task toggles).** Add to the task config to produce, for each scene
+  seed, **parallel annotations of one scene** — the clean episode (a *good* action) plus
+  alternatives:
+
+  ```yaml
+  negative:   {enabled: true}    # bad actions  — causally-labelled failures (twins of the clean)
+  multimodal: {enabled: true}    # other good actions — N distinct successful behaviors per scene
+  ```
+
+  Variations land under `<save_path>/variations/episode<i>/<variant>/`, linked by
+  `variations/scene_index.jsonl`. Negatives carry a **causal-graph annotation** (HDF5 `causal`
+  group: intervention → mechanism → mediators → outcome, plus the clean counterfactual) for
+  diagnostics/assessment. **Tasks not yet audited for a feature are skipped automatically**
+  (registries in `robo_tools`); roll out more by extending the registry after testing. Example:
+  [`bench_demo_kitchens_variations.yml`](benchmark/bench_task_config/bench_demo_kitchens_variations.yml).
+
 ### Run inference (policy eval)
 
 Eval rolls a trained checkpoint out against a `(task, config)` pair and writes a per-rollout success log. Two modes depending on whether your policy fits in the same Python env as the simulator.
@@ -233,36 +256,36 @@ Naming tip: never reuse an existing RoboTwin task name. Start from an analogous 
 ## Targeted negative data (failure generation)
 
 The perturbation suite above is for *evaluating* a trained policy. Separately, RoboPRO can
-**generate labelled failure demonstrations** via [`robo_negative/`](robo_negative/README.md),
+**generate labelled failure demonstrations** via [`robo_tools/`](robo_tools/),
 a twin-pair desync library. For each scene it records a **baseline** (a clean scripted-expert
 success) and one or more **perturbed twins** in which the expert is driven to fail in a
 *specific, labelled* way — an object shifted right after its grasp is planned, an obstacle
 hidden from the planner, the target moved, etc.
 
-The mechanism is a *causal* desync, not random noise: `robo_negative.TargetedRuntime` attaches
+The mechanism is a *causal* desync, not random noise: `robo_tools.TargetedRuntime` attaches
 to the env (`env.targeted`) and, through one hook in
 [`benchmark/bench_envs/_bench_base_task.py`](benchmark/bench_envs/_bench_base_task.py), keeps
 the CuRobo collision-world out of sync with reality (excluding actors, freezing pre-shift
 poses, firing a shift after the grasp plan commits). Each episode logs a full per-frame
 **state trace** (HDF5 `targeted_state` group: actor poses + contacts) and an offline-computed
 **label record** (`outcome`, WHAT/WHY/quality, progress & safety curves) — all pure,
-versioned, unit-tested functions in `robo_negative`.
+versioned, unit-tested functions in `robo_tools`.
 
 ```bash
 # from the repo root, using the project's sim env (the scripts self-configure BENCH_ROOT etc.)
 
 # minimal — defaults: task put_mouse_on_pad, ptypes {shift_object,shift_target,shift_obstacle},
 # seeds 0:40, 3 baselines + up to 30 perturbed twins per group, written to ./targetted_dataset/
-python collect_targeted_data.py --gpu 0
+python scripts/collect_targeted_data.py --gpu 0
 
 # customised
-python collect_targeted_data.py \
+python scripts/collect_targeted_data.py \
     --tasks put_mouse_on_pad --ptypes shift_object shift_target \
     --seeds 0:10 --n-baseline 3 --target-perturbed 20 \
     --out-root targetted_dataset --gpu 0
 ```
 
-Every episode runs in its own subprocess ([`run_targeted_episode.py`](run_targeted_episode.py))
+Every episode runs in its own subprocess ([`scripts/run_targeted_episode.py`](scripts/run_targeted_episode.py))
 so CuRobo/SAPIEN state never leaks between a baseline and its twin. Per-episode outputs:
 `episode.json` (label record), `data/episode0.hdf5` (standard bench episode + the
 `targeted_state` / `targeted_labels` groups), `video/episode0.mp4`.
@@ -271,11 +294,32 @@ Browse a collected set as an annotated HTML gallery (baseline vs. perturbed side
 computed offline — no simulator):
 
 ```bash
-python visualize_negative_data.py --root targetted_dataset --out gallery.html
+python scripts/visualize_negative_data.py --root targetted_dataset --out gallery.html
 ```
 
 Full walk-through in [`negative_data_demo.ipynb`](negative_data_demo.ipynb); library details in
-[`robo_negative/README.md`](robo_negative/README.md).
+[`robo_tools/`](robo_tools/).
+
+## Multimodal action generation
+
+The same scene usually yields only one demo, so a scene-conditioned action distribution looks
+*unimodal*. `robo_tools.MultimodalRuntime` re-parameterizes the planner to produce **several
+distinct successful behaviors per scene** — it injects a different transport *waypoint* while
+keeping the grasp and place *endpoints* fixed, so the task still succeeds but the arm takes a
+visibly different path (`direct`, `high_arc`, `swing_left`, `swing_right`). It's the
+`multimodal:` toggle in the collection pipeline above, or a standalone collector
+([`scripts/collect_multimodal.py`](scripts/collect_multimodal.py)) with 3D/HTML visualizers
+([`scripts/plot_modes.py`](scripts/plot_modes.py), [`scripts/build_multimodal_demo.py`](scripts/build_multimodal_demo.py)).
+A mode the planner can't reach is honestly labelled `mode_unrealized`; un-audited tasks are skipped.
+
+## Tooling layout
+
+The data-collection tooling lives in two places: the [`robo_tools/`](robo_tools/) package (the
+library — enrichment, the negative-data desync, multimodal generation, the variation planner,
+the causal annotation, the task registries) and the repo-root [`scripts/`](scripts/) (the CLIs —
+`run_targeted_episode.py`, `collect_targeted_data.py`, `run_mode_episode.py`,
+`collect_multimodal.py`, `visualize_negative_data.py`, plotters). The collection entrypoint
+`customized_robotwin/script/collect_data.py` consumes the library directly.
 
 ## Replayable-state capture & demo
 
@@ -305,7 +349,7 @@ offline validation are documented in
 | [`GETTING_STARTED.md`](GETTING_STARTED.md) | Newcomers — mental model, vocabulary, hands-on quickstarts |
 | `README.md` (this file) | Install, eval, perturbation configs, and the two features above |
 | [`CLAUDE.md`](CLAUDE.md) | Contributor / agent guidance — env activation, common commands, gotchas |
-| [`robo_negative/README.md`](robo_negative/README.md) | Targeted negative-data generation (desync, capture, labels) |
+| [`robo_tools/`](robo_tools/) | Targeted negative-data generation (desync, capture, labels) |
 | [`replayable_state_demo/README.md`](replayable_state_demo/README.md) | Replayable-state reconstruction + interactive HTML viewer |
 | [`REPLAYABLE_STATE_PROPOSAL.md`](REPLAYABLE_STATE_PROPOSAL.md) | RFC: the replayable-state capture format |
 

@@ -200,7 +200,7 @@ def card_html(root: Path, ep_dir: Path, ep: dict, d: dict, ep_id: str, cd) -> st
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     here = Path(__file__).resolve().parent  # repo root (this script lives here)
-    ap.add_argument("--root", default=str(here / "targetted_dataset"),
+    ap.add_argument("--root", default=str(here.parent / "targetted_dataset"),
                     help="collection dir to scan for episode.json + rollout videos")
     ap.add_argument("--out", default=None, help="output html (default: <root>/index.html)")
     args = ap.parse_args()

@@ -24,7 +24,7 @@ import traceback
 from pathlib import Path
 
 SCRIPT_DIR = Path(__file__).resolve().parent
-REPO_ROOT = SCRIPT_DIR  # this script lives at the repo root
+REPO_ROOT = SCRIPT_DIR.parent  # scripts/ -> repo root
 
 TRIGGER_BY_PTYPE = {"shift_object": "after_grasp_plan", "shift_target": "immediate",
                     "shift_obstacle": "immediate", "hide_obstacle": "immediate"}
@@ -200,9 +200,9 @@ def main():
     os.chdir(os.environ["ROBOTWIN_ROOT"])
 
     import numpy as np
-    import robo_negative as targeted  # installed package (the single-file PoC library)
+    import robo_tools as targeted  # installed package (the single-file PoC library)
     labels = sampler = registry = targeted
-    from robo_negative import EpisodeDiscard, TargetedRuntime
+    from robo_tools import EpisodeDiscard, TargetedRuntime
 
     record = {
         "label_schema_version": labels.LABEL_SCHEMA_VERSION,

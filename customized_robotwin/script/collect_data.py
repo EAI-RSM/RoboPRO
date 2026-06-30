@@ -19,6 +19,9 @@ import os
 import time
 from argparse import ArgumentParser
 
+import robo_tools as rt                      # data-collection tooling (enrichment + variations)
+from script import collection_extras
+
 current_file_path = os.path.abspath(__file__)
 parent_directory = os.path.dirname(current_file_path)
 bench_root = Path(os.environ["BENCH_ROOT"])
@@ -265,6 +268,7 @@ def run(TASK_ENV, args):
             with open(info_file_path, "r", encoding="utf-8") as file:
                 info_db = json.load(file)
 
+            _enrich = collection_extras.attach_enrichment(TASK_ENV)  # enrichment: default, every episode
             info = TASK_ENV.play_once()
             if info is None:
                 info = getattr(TASK_ENV, "info", None) or {}
@@ -275,6 +279,9 @@ def run(TASK_ENV, args):
 
             TASK_ENV.close_env(clear_cache=((episode_idx + 1) % clear_cache_freq == 0))
             TASK_ENV.merge_pkl_to_hdf5_video()
+            collection_extras.write_clean_enrichment(           # targeted_state trace + clean annotation
+                os.path.join(args["save_path"], "data", f"episode{episode_idx}.hdf5"),
+                _enrich, TASK_ENV, args, seed_list[episode_idx])
             TASK_ENV.remove_data_cache()
             if not TASK_ENV.check_success():
                 print(f"\033[91mCollect Error on episode {episode_idx} (seed={seed_list[episode_idx]}), removing files\033[0m")
@@ -285,6 +292,15 @@ def run(TASK_ENV, args):
                     if os.path.exists(ext_path):
                         os.remove(ext_path)
                 continue
+
+        # ---- sibling variations (negative / multimodal toggles; unsupported tasks skipped) ----
+        if rt.variations_enabled(args):
+            try:
+                TASK_ENV.close_env(clear_cache=True)
+            except Exception:
+                pass
+            collection_extras.collect_scene_variations(
+                args["task_name"], args["task_config"], args, seed_list, str(bench_root.parent))
 
         command = f"cd description && bash gen_episode_instructions.sh {args['task_name']} {args['task_config']} {args['language_num']}"
         os.system(command)

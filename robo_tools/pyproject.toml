@@ -1,0 +1,14 @@
+[project]
+name = "robo-tools"
+version = "0.1.0"
+description = "RoboPRO data-collection tooling: enrichment + targeted negative-data + multimodal generation."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = ["numpy", "h5py"]
+
+[project.scripts]
+robo-tools = "robo_tools:main"
+
+[build-system]
+requires = ["uv_build>=0.11.8,<0.12.0"]
+build-backend = "uv_build"

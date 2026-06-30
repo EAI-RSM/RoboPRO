@@ -680,8 +680,13 @@ class TargetedRuntime:
         """Log raw per-saved-frame state (every actor's world pose) aligned 1:1
         with the saved video/HDF5 frames by hooking `_take_picture`. No metrics
         here — they are derived offline (compute_progress/compute_safety). Settle
-        steps never call `_take_picture`, so this stays video-aligned."""
-        original = env._take_picture
+        steps never call `_take_picture`, so this stays video-aligned.
+
+        Idempotent: always wraps the ORIGINAL `_take_picture`, so re-attaching a
+        fresh runtime each episode (the in-loop collect_data.py pipeline) replaces
+        the previous wrapper instead of stacking on it."""
+        original = getattr(env, "_take_picture_unwrapped", None) or env._take_picture
+        env._take_picture_unwrapped = original
 
         def wrapped(*a, **kw):
             try:
@@ -701,8 +706,10 @@ class TargetedRuntime:
         env._take_picture = wrapped
 
     def _install_contact_logger(self, env, max_entries: int = 500):
-        """Persist per-frame contacts that pass the bench collision filters."""
-        original = env.check_collisions
+        """Persist per-frame contacts that pass the bench collision filters.
+        Idempotent (wraps the original check_collisions across re-attaches)."""
+        original = getattr(env, "_check_collisions_unwrapped", None) or env.check_collisions
+        env._check_collisions_unwrapped = original
 
         def wrapped(*a, **kw):
             result = original(*a, **kw)

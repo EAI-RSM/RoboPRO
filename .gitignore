@@ -80,3 +80,6 @@ enriched_negative_demo/
 targetted_dataset/
 targeted_negative_demo/web/videos/
 targeted_negative_demo/web/manifest.json
+
+# Multimodal PoC collected data (regenerate with scripts/collect_multimodal.py)
+multimodal_data/

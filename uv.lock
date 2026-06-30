@@ -3847,7 +3847,7 @@ wheels = [
 
 [[package]]
 name = "nvidia-curobo"
-version = "0.7.8.post1.dev0+dirty"
+version = "0.7.8"
 source = { editable = "customized_robotwin/envs/curobo" }
 dependencies = [
     { name = "importlib-resources" },
@@ -3917,7 +3917,7 @@ requires-dist = [
     { name = "wheel", marker = "extra == 'isaacsim'" },
     { name = "yourdfpy", specifier = ">=0.0.53" },
 ]
-provides-extras = ["ci", "smooth", "usd", "dev", "isaacsim", "doc"]
+provides-extras = ["ci", "dev", "doc", "isaacsim", "smooth", "usd"]
 
 [[package]]
 name = "nvidia-cusolver-cu12"
@@ -5696,9 +5696,9 @@ wheels = [
 ]
 
 [[package]]
-name = "robo-negative"
+name = "robo-tools"
 version = "0.1.0"
-source = { editable = "robo_negative" }
+source = { editable = "robo_tools" }
 dependencies = [
     { name = "h5py" },
     { name = "numpy" },
@@ -5721,7 +5721,7 @@ dependencies = [
     { name = "nvidia-curobo" },
     { name = "openpi" },
     { name = "pytorch3d" },
-    { name = "robo-negative" },
+    { name = "robo-tools" },
     { name = "setuptools" },
     { name = "setuptools-scm" },
     { name = "transforms3d" },
@@ -5749,7 +5749,7 @@ requires-dist = [
     { name = "nvidia-curobo", editable = "customized_robotwin/envs/curobo" },
     { name = "openpi", editable = "customized_robotwin/policy/pi05" },
     { name = "pytorch3d", git = "https://github.com/facebookresearch/pytorch3d.git?rev=75ebeeaea0908c5527e7b1e305fbc7681382db47" },
-    { name = "robo-negative", editable = "robo_negative" },
+    { name = "robo-tools", editable = "robo_tools" },
     { name = "setuptools" },
     { name = "setuptools-scm" },
     { name = "transforms3d", specifier = "==0.4.2" },
