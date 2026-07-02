@@ -8,7 +8,6 @@ import os
 import sys
 import jax
 import numpy as np
-import open3d as o3d
 from openpi.models import model as _model
 from openpi.policies import aloha_policy
 from openpi.policies import policy_config as _policy_config
@@ -26,6 +25,7 @@ from openpi.training import config as _config
 from openpi.training import data_loader as _data_loader
 
 from depth_anything_3.api import DepthAnything3
+from geometry import unproject_depth, affine_inverse_np
 
 
 class PI0:
@@ -70,7 +70,12 @@ class PI0:
         )
         # TODO: don't inference each timestep
         depth_preds = self.DA3.inference([img_front, img_right, img_left])
-        # TODO: point cloud unprojection and embeddings
+        # TODO: point cloud encoding; project to point cloud embeddings
+        pc = unproject_depth(
+            depth_preds.depth, 
+            depth_preds.intrinsics, 
+            affine_inverse_np(depth_preds.extrinsics),  # w2c -> c2w
+            ).reshape(-1, 3)  # [H, W, 3] -> [num_points, 3]
 
         img_front = np.transpose(img_front, (2, 0, 1))
         img_right = np.transpose(img_right, (2, 0, 1))
@@ -84,13 +89,14 @@ class PI0:
                 "cam_right_wrist": img_right,
             },
             "prompt": self.instruction,
-            "depth_preds": {
-                "cam_high": depth_preds.depth[0],  # [H, W] float32
-                "cam_left_wrist": depth_preds.depth[1],  # [H, W] float32
-                "cam_right_wrist": depth_preds.depth[2],  # [H, W] float32
-                "extrinsics": depth_preds.extrinsics,  # [N, 3, 4] float32
-                "intrinsics": depth_preds.intrinsics,  # [N, 3, 3] float32
-            }
+            "point_cloud": pc,
+            # "depth_preds": {
+            #     "cam_high": depth_preds.depth[0],  # [H, W] float32
+            #     "cam_left_wrist": depth_preds.depth[1],  # [H, W] float32
+            #     "cam_right_wrist": depth_preds.depth[2],  # [H, W] float32
+            #     "extrinsics": depth_preds.extrinsics,  # [N, 3, 4] float32
+            #     "intrinsics": depth_preds.intrinsics,  # [N, 3, 3] float32
+            # }
         }
 
     def get_action(self):
