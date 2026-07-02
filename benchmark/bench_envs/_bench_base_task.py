@@ -750,16 +750,7 @@ class Bench_base_task(Base_Task):
             cumul_ang = 2 * np.arccos(min(1.0, qdot))
             print(f"  start_pos={np.round(start_p, 4)}  curr_pos={np.round(curr_p, 4)}")
             print(f"  cumul_delta={cumul_pos:.4f} m  cumul_ang={np.degrees(cumul_ang):.2f} deg")
-            print(f"  [context] all static object cumulative displacements from start:")
-            for other_id, (other_start_p, _) in self.static_object_pose_start.items():
-                other_entity = next((e for e in self.scene.get_all_actors() if e.per_scene_id == other_id), None)
-                if other_entity is None:
-                    continue
-                other_curr_p = np.array(other_entity.get_pose().p, dtype=np.float64)
-                other_cumul = float(np.linalg.norm(other_curr_p - other_start_p))
-                marker = " <-- MOVED" if other_cumul >= self.STATIC_OBJECT_POSITION_THRESHOLD_M else ""
-                other_name = f"{self._static_id_to_name.get(other_id, str(other_id))}#{other_id}"
-                print(f"    '{other_name}': start={np.round(other_start_p, 4)}  curr={np.round(other_curr_p, 4)}  cumul={other_cumul:.4f} m{marker}")
+           
         else:
             print(f"  curr_pos={np.round(curr_p, 4)}  (no start snapshot — collision before first step)")
 
