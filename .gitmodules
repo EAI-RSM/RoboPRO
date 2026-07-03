@@ -1,0 +1,3 @@
+[submodule "customized_robotwin/thirdparty/DepthAnything"]
+	path = customized_robotwin/thirdparty/DepthAnything
+	url = https://github.com/ByteDance-Seed/Depth-Anything-3.git

@@ -24,3 +24,4 @@ termcolor
 av
 matplotlib
 ffmpeg
+-e thirdparty/DepthAnything
