@@ -380,13 +380,13 @@ class Camera:
         def _get_segmentation(camera, level="mesh"):
             # visual_id is the unique id of each visual shape
             seg_labels = camera.get_picture("Segmentation")  # [H, W, 4]
-            colormap = sorted(set(ImageColor.colormap.values()))
-            color_palette = np.array([ImageColor.getrgb(color) for color in colormap], dtype=np.uint8)
+            # store raw integer ids (uint16) so objects stay identifiable;
+            # actor ids match Entity.per_scene_id (see Base_Task.get_actor_id_map),
+            # colorize at visualization time instead
             if level == "mesh":
-                label0_image = seg_labels[..., 0].astype(np.uint8)  # mesh-level
+                return seg_labels[..., 0].astype(np.uint16)  # mesh-level
             elif level == "actor":
-                label0_image = seg_labels[..., 1].astype(np.uint8)  # actor-level
-            return color_palette[label0_image]
+                return seg_labels[..., 1].astype(np.uint16)  # actor-level
 
         res = {
             # 'left_camera':{},

@@ -1,0 +1,51 @@
+# MMZ v2 "complete" collection config — the candidate template for our training data.
+# Decisions baked in (2026-07, after visual verification of the mmz_* samples):
+#   actor_segmentation ON  -> raw uint16 object ids, PNG-compressed in HDF5;
+#                             decode with actor_id_map in scene_info.json
+#   mesh_segmentation  OFF -> part-level visual-shape ids, no name map, not needed
+#   pointcloud         OFF -> head-cam-only 1024-pt legacy summary; we rebuild dense
+#                             clouds from depth + intrinsic/extrinsic instead
+#   enable_collision_metrics OFF -> collection profile: CuRobo keeps obstacles in its
+#                             world, so the expert plans AROUND clutter
+render_freq: 0
+episode_num: 3
+use_seed: false
+save_freq: 15
+embodiment: [aloha-agilex]
+language_num: 50
+domain_randomization:
+  random_background: false
+  cluttered_table: True
+  clean_background_rate: 0
+  random_head_camera_dis: 0
+  random_table_height: 0
+  random_light: false
+  crazy_random_light_rate: 0
+  obstacle_density: 10
+
+  language_perturbation:
+    enabled: true
+    instruction_bank: benchmark/bench_task_config/instruction_bank.json
+camera:
+  head_camera_type: D435
+  wrist_camera_type: D435
+  demo_camera_type: D435
+  collect_head_camera: true
+  collect_wrist_camera: true
+data_type:
+  rgb: true
+  third_view: false
+  depth: true
+  pointcloud: false
+  observer: false
+  endpose: true
+  qpos: true
+  mesh_segmentation: false
+  actor_segmentation: true
+pcd_down_sample_num: 1024
+pcd_crop: true
+save_path: ./data/mmz_samples
+clear_cache_freq: 1
+collect_data: true
+eval_video_log: true
+enable_collision_metrics: false
