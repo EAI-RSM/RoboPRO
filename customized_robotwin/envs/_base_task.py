@@ -80,7 +80,7 @@ class Base_Task(gym.Env):
         "held_by",
     )
     BENCHMARK_AUXILIARY_RELATION_STATE_NAMES = (
-        "contact",
+        "raw_contact",
         "grasped_by_code",
     )
 
@@ -695,7 +695,7 @@ class Base_Task(gym.Env):
 
         object_ids = np.array([int(entry["object_id"]) for entry in object_catalog], dtype=np.int64)
         object_count = len(object_catalog)
-        contact = np.zeros((object_count, object_count), dtype=np.bool_)
+        raw_contact = np.zeros((object_count, object_count), dtype=np.bool_)
         near = np.zeros((object_count, object_count), dtype=np.bool_)
         supports_from = np.zeros((object_count, object_count), dtype=np.bool_)
         part_of = np.zeros((object_count, object_count), dtype=np.bool_)
@@ -730,8 +730,8 @@ class Base_Task(gym.Env):
             if object_id0 in index_by_id and object_id1 in index_by_id and object_id0 != object_id1:
                 idx0 = index_by_id[object_id0]
                 idx1 = index_by_id[object_id1]
-                contact[idx0, idx1] = True
-                contact[idx1, idx0] = True
+                raw_contact[idx0, idx1] = True
+                raw_contact[idx1, idx0] = True
 
             if object_id0 in index_by_id and name1 in left_gripper_names:
                 left_contact[index_by_id[object_id0]] = True
@@ -767,7 +767,7 @@ class Base_Task(gym.Env):
                     near[i, j] = True
                     near[j, i] = True
 
-                if contact[i, j]:
+                if raw_contact[i, j]:
                     if self._is_benchmark_supported_by(aabb_i, aabb_j):
                         supports_from[i, j] = True
                     if self._is_benchmark_supported_by(aabb_j, aabb_i):
@@ -805,7 +805,7 @@ class Base_Task(gym.Env):
         on = supports_from.copy()
         supports = supports_from.T.copy()
         collides_with = np.logical_and(
-            contact,
+            raw_contact,
             np.logical_not(np.logical_or(on, supports)),
         )
 
@@ -819,7 +819,7 @@ class Base_Task(gym.Env):
 
         return {
             "object_ids": object_ids,
-            "contact": contact,
+            "raw_contact": raw_contact,
             "near": near,
             "grasped_by_code": grasped_by_code,
             "on": on,
@@ -923,7 +923,7 @@ class Base_Task(gym.Env):
             "data_file": f"data/episode{self.ep_num}.hdf5",
             "video_file": f"video/episode{self.ep_num}.mp4",
         }
-        record["contact_events_summary"] = {
+        record["collision_metric_contact_events_summary"] = {
             "count": len(self._benchmark_contact_event_log),
         }
         self._benchmark_episode_record = record
@@ -1003,9 +1003,9 @@ class Base_Task(gym.Env):
                     del relation_state_group[dataset_name]
                     relation_state_group.create_dataset(dataset_name, data=first_frame, dtype=dtype)
 
-            if "contact_events" in export_group:
-                del export_group["contact_events"]
-            contact_events_group = export_group.create_group("contact_events")
+            if "collision_metric_contact_events" in export_group:
+                del export_group["collision_metric_contact_events"]
+            contact_events_group = export_group.create_group("collision_metric_contact_events")
             contact_events = self._benchmark_contact_event_log
             contact_events_group.create_dataset(
                 "t_step",
@@ -1040,6 +1040,11 @@ class Base_Task(gym.Env):
             contact_events_group.create_dataset(
                 "counted_by_metric",
                 data=np.array([event["counted_by_metric"] for event in contact_events], dtype=np.bool_),
+            )
+            contact_events_group.create_dataset(
+                "event_semantics",
+                data=np.array(["collision_metric_filtered"], dtype=object),
+                dtype=string_dtype,
             )
 
             if "scenario_metadata" in export_group:

@@ -49,3 +49,18 @@ relation. It is normalized into the canonical support semantics:
    object is resting on a support surface.
 3. Raw dataset field names such as `support` are treated only as legacy
    storage aliases and should not appear in the exported graph ontology.
+
+## Benchmark Export Note
+
+Some benchmark-support exports also include auxiliary contact-derived signals
+that are useful for debugging and reconstruction but are not part of the
+canonical graph ontology:
+
+1. `relation_state/raw_contact` is the raw simulator contact adjacency between
+   exported objects.
+2. `collision_metric_contact_events` is a filtered event log that records only
+   benchmark-significant contacts that passed the collision-metric logic.
+3. These artifacts have different semantics and should not be compared as if
+   they explained each other one-to-one.
+4. Neither `raw_contact` nor `collision_metric_contact_events` is a canonical
+   graph relation type.

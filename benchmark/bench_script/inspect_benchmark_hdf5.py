@@ -201,7 +201,7 @@ def _summarize_benchmark_support(root: h5py.File):
         print("  relation_state:")
 
         object_ids = state["object_ids"][()].tolist() if "object_ids" in state else []
-        contact = state["contact"][()] if "contact" in state else None
+        raw_contact = state["raw_contact"][()] if "raw_contact" in state else None
         near = state["near"][()] if "near" in state else None
         grasped_by_code = state["grasped_by_code"][()] if "grasped_by_code" in state else None
         on_matrix = state["on"][()] if "on" in state else None
@@ -216,8 +216,8 @@ def _summarize_benchmark_support(root: h5py.File):
         implemented_bipartite_relation_names = _decode_string_array(state["implemented_bipartite_relation_names"]) if "implemented_bipartite_relation_names" in state else []
         auxiliary_relation_state_names = _decode_string_array(state["auxiliary_relation_state_names"]) if "auxiliary_relation_state_names" in state else []
 
-        if contact is not None:
-            print(f"    contact shape: {contact.shape}")
+        if raw_contact is not None:
+            print(f"    raw_contact shape: {raw_contact.shape}")
         if near is not None:
             print(f"    near shape: {near.shape}")
         if grasped_by_code is not None:
@@ -246,8 +246,8 @@ def _summarize_benchmark_support(root: h5py.File):
             print(f"    auxiliary_relation_state_names: {auxiliary_relation_state_names}")
 
         checks = {}
-        if contact is not None:
-            checks["contact dims are (T,N,N)"] = contact.ndim == 3
+        if raw_contact is not None:
+            checks["raw_contact dims are (T,N,N)"] = raw_contact.ndim == 3
         if near is not None:
             checks["near dims are (T,N,N)"] = near.ndim == 3
         if grasped_by_code is not None:
@@ -262,8 +262,8 @@ def _summarize_benchmark_support(root: h5py.File):
             checks["held_by dims are (T,N,E)"] = held_by.ndim == 3
         if part_of is not None:
             checks["part_of dims are (T,N,N)"] = part_of.ndim == 3
-        if object_ids and contact is not None:
-            checks["same N across object_ids/contact"] = contact.shape[1] == len(object_ids)
+        if object_ids and raw_contact is not None:
+            checks["same N across object_ids/raw_contact"] = raw_contact.shape[1] == len(object_ids)
         if object_ids and grasped_by_code is not None:
             checks["same N across object_ids/grasped_by_code"] = grasped_by_code.shape[1] == len(object_ids)
         if object_ids and held_by is not None:
@@ -276,6 +276,17 @@ def _summarize_benchmark_support(root: h5py.File):
             checks["supports is transpose of on (frame0)"] = np.array_equal(supports_matrix[0], on_matrix[0].T)
         for key, value in checks.items():
             print(f"    {key}: {value}")
+
+    if "collision_metric_contact_events" in support:
+        events = support["collision_metric_contact_events"]
+        print("  collision_metric_contact_events:")
+        count = len(events["t_step"]) if "t_step" in events else 0
+        print(f"    count: {count}")
+        if "event_semantics" in events:
+            print(f"    event_semantics: {_decode_string_array(events['event_semantics'])}")
+        if "event_type" in events and count:
+            event_types = sorted(set(_decode_string_array(events["event_type"])))
+            print(f"    event_types: {event_types}")
 
         if contact is not None and contact.shape[0] > 0:
             frame0_edges = int(np.count_nonzero(np.triu(contact[0], k=1)))
@@ -409,11 +420,11 @@ def main():
                     relation_state_summary = {}
                     if "object_ids" in state:
                         relation_state_summary["object_count"] = len(state["object_ids"])
-                    if "contact" in state:
-                        contact = state["contact"][()]
-                        relation_state_summary["contact_shape"] = list(contact.shape)
-                        if contact.ndim == 3 and contact.shape[0] > 0:
-                            relation_state_summary["frame0_contact_edges"] = int(np.count_nonzero(np.triu(contact[0], k=1)))
+                    if "raw_contact" in state:
+                        raw_contact = state["raw_contact"][()]
+                        relation_state_summary["raw_contact_shape"] = list(raw_contact.shape)
+                        if raw_contact.ndim == 3 and raw_contact.shape[0] > 0:
+                            relation_state_summary["frame0_raw_contact_edges"] = int(np.count_nonzero(np.triu(raw_contact[0], k=1)))
                     if "near" in state:
                         relation_state_summary["near_shape"] = list(state["near"].shape)
                     if "grasped_by_code" in state:
@@ -456,6 +467,16 @@ def main():
                     if "auxiliary_relation_state_names" in state:
                         relation_state_summary["auxiliary_relation_state_names"] = _decode_string_array(state["auxiliary_relation_state_names"])
                     summary["relation_state"] = relation_state_summary
+                if "collision_metric_contact_events" in support:
+                    events = support["collision_metric_contact_events"]
+                    events_summary = {}
+                    if "t_step" in events:
+                        events_summary["count"] = len(events["t_step"])
+                    if "event_semantics" in events:
+                        events_summary["event_semantics"] = _decode_string_array(events["event_semantics"])
+                    if "event_type" in events:
+                        events_summary["event_types"] = sorted(set(_decode_string_array(events["event_type"])))
+                    summary["collision_metric_contact_events"] = events_summary
             print("\nJSON summary:")
             print(json.dumps(summary, indent=2, ensure_ascii=False))
 
