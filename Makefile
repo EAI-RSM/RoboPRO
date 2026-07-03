@@ -52,6 +52,17 @@ COLLECT_BRANCH_NOISE_STEPS ?= 1
 ACTION_NOISE_VAR ?= 0.005
 COLLECT_FIXED_SEED ?= 0
 
+# Occluder / reachability analysis flags (issue #35)
+OFFSET ?= 0.2
+OCC_OFFSETS ?= 0.2
+OCC_SEED_START ?= 0
+OCC_NUM_SEEDS ?= 50
+SAVE_IMAGES ?= 0
+REACH_SEED ?= 1
+REACH_Z ?= 0.90
+REACH_ARMS ?= both
+PICKUP_SEEDS ?= 1,2,3,4,5
+
 define RUN_IN_CUSTOMIZED
 	cd "$(CUSTOMIZED_ROOT)"
 	source set_env.sh
@@ -62,7 +73,8 @@ endef
 .PHONY: help check-prereqs bootstrap sync download-assets link-assets configure-curobo-assets \
 	patch-curobo-config setup render-test verify-scene verify-rollout collect-data \
 	precollect-seeds eval-direct eval-client policy-server eval-pi05-single eval-pi05-double \
-	collect-rollout-pi05 diag-kitchen-curobo show-config
+	collect-rollout-pi05 diag-kitchen-curobo occluder-visibility reachability-map \
+	pickup-reachability show-config
 
 help:
 	@printf '%s\n' \
@@ -86,6 +98,14 @@ help:
 	'  make verify-rollout           Headless rollout smoke test; saves video by default.' \
 	'  make precollect-seeds         Generate eval seeds without saving demos.' \
 	'  make diag-kitchen-curobo      Kitchen collision diagnostic script.' \
+	'' \
+	'Occluder / reachability analysis (issue #35):' \
+	'  make occluder-visibility      Occluder visibility sweep (+rollout with ROLLOUT=1).' \
+	'    Vars: OCC_OFFSETS=0.2 OCC_SEED_START=0 OCC_NUM_SEEDS=50 SAVE_IMAGES=0|1 ROLLOUT=0|1' \
+	'  make reachability-map         Collision-free gripper IK reachability map (one scene).' \
+	'    Vars: REACH_SEED=1 OFFSET=0.2 REACH_ARMS=both|left|right REACH_Z=0.90' \
+	'  make pickup-reachability      Per-seed post-pickup reachability maps (backward subgoals).' \
+	'    Vars: PICKUP_SEEDS=1,2,3 OFFSET=0.2 REACH_Z=0.90' \
 	'' \
 	'Data collection:' \
 	'  make collect-data             Run collect_data.sh for one task/config.' \
@@ -273,3 +293,20 @@ collect-rollout-pi05:
 
 diag-kitchen-curobo:
 	$(call RUN_IN_CUSTOMIZED,$(PYTHON) script/bench_script/diag_kitchen_curobo.py)
+
+occluder-visibility:
+	$(call RUN_IN_CUSTOMIZED,\
+		cmd='$(PYTHON) script/bench_script/analyze_occluder_visibility.py --base-config "$(TASK_CONFIG)" --seed-start "$(OCC_SEED_START)" --num-seeds "$(OCC_NUM_SEEDS)" --offsets "$(OCC_OFFSETS)"'; \
+		if [[ "$(ROLLOUT)" == "1" ]]; then cmd+=" --rollout"; fi; \
+		if [[ "$(SAVE_IMAGES)" == "1" ]]; then cmd+=" --save-images"; fi; \
+		eval "$$cmd")
+
+reachability-map:
+	$(call RUN_IN_CUSTOMIZED,\
+		$(PYTHON) script/bench_script/reachability_map.py --base-config "$(TASK_CONFIG)" \
+			--seed "$(REACH_SEED)" --offset "$(OFFSET)" --arms "$(REACH_ARMS)" --z "$(REACH_Z)")
+
+pickup-reachability:
+	$(call RUN_IN_CUSTOMIZED,\
+		$(PYTHON) script/bench_script/pickup_reachability_map.py --base-config "$(TASK_CONFIG)" \
+			--seeds "$(PICKUP_SEEDS)" --offset "$(OFFSET)" --z "$(REACH_Z)")

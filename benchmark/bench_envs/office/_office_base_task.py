@@ -54,6 +54,11 @@ class Office_base_task(Bench_base_task):
 
     FURNITURE_NAMES = {"table", "wall", "121_wall-shelf", "122_file-holder", "ground"}
 
+    # Set False to skip the back furniture (shelf / cabinet / wooden-box / file-holder)
+    # and free up gripper workspace. Default True keeps all existing office tasks
+    # (drawer/shelf/file-holder tasks) unchanged. Subclasses can override to remove it.
+    SPAWN_BACK_FURNITURE = True
+
     def __init__(self):
         pass
 
@@ -87,6 +92,10 @@ class Office_base_task(Bench_base_task):
         self.save_data = kwags.get("save_data", False)
         self.dual_arm = kwags.get("dual_arm", True)
         self.eval_mode = kwags.get("eval_mode", False)
+        # Measurement-only mode (no rollout / no saved RGB data): used by the t=0
+        # visibility-analysis scripts to render only the measured camera. Default
+        # False so real data generation / eval are completely untouched.
+        self.measurement_only = kwags.get("measurement_only", False)
         self.sample_d = kwags.get("sample_d", "objects")
         self.enable_collision_metrics = kwags.get("enable_collision_metrics", False)
 
@@ -374,6 +383,15 @@ class Office_base_task(Bench_base_task):
         self.office_info["table_lims"] = [-self.office_info["table_area"][0]/2, -self.office_info["table_area"][1]/2, self.office_info["table_area"][0]/2, self.office_info["table_area"][1]/2]
         self.cuboid_collision_list.append({"name": "table", "dims": [1.2, 0.7, 0.002], "pose": [0,0,0.74,1,0,0,0]})
         # ------------------------------------------------------------
+        if not self.SPAWN_BACK_FURNITURE:
+            # Back furniture removed (SPAWN_BACK_FURNITURE=False): no shelf/cabinet/
+            # wooden-box/file-holder actors, no collision entries, no prohibited-area
+            # reservations -> maximal gripper workspace. Leave lims as degenerate
+            # off-table rects so any furniture-lims consumer (e.g. shelf clutter) still
+            # indexes safely without reserving working space.
+            self.office_info["shelf_lims"] = [0.0, 0.34, 0.0, 0.34]
+            self.office_info["file_holder_lims"] = [0.0, 0.34, 0.0, 0.34]
+            return
         depth = 0.28
         shelf_scale = [1.7,0.86,1.8] # length, height, depth
         pose = [self.office_info["furn_x_v"]["shelf"][self.arr_v],depth,table_height+0.27]
@@ -605,10 +623,11 @@ class Office_base_task(Bench_base_task):
         table_short_pool = [] if getattr(self, "tall_obstacles_only", False) else obj_names_short
         self.clutter_surface_split(xlim, ylim, zlim, self.prohibited_area["table"], self.obstacle_density, cluttered_item_info, table_short_pool, obj_names_tall)
         # # shelves ----------------------------------------------------
-        xlim = [self.office_info["shelf_lims"][0], self.office_info["shelf_lims"][2]]
-        ylim = [self.office_info["shelf_lims"][1], self.office_info["shelf_lims"][3]]
-        self.clutter_surface(xlim, ylim, [self.office_info["shelf_heights"][0]], self.prohibited_area["shelf0"], 5, cluttered_item_info, obj_names_short)
-        self.clutter_surface(xlim, ylim, [self.office_info["shelf_heights"][1]], self.prohibited_area["shelf1"], 5, cluttered_item_info, obj_names_short)
+        if self.SPAWN_BACK_FURNITURE:  # no shelves to clutter when back furniture is removed
+            xlim = [self.office_info["shelf_lims"][0], self.office_info["shelf_lims"][2]]
+            ylim = [self.office_info["shelf_lims"][1], self.office_info["shelf_lims"][3]]
+            self.clutter_surface(xlim, ylim, [self.office_info["shelf_heights"][0]], self.prohibited_area["shelf0"], 5, cluttered_item_info, obj_names_short)
+            self.clutter_surface(xlim, ylim, [self.office_info["shelf_heights"][1]], self.prohibited_area["shelf1"], 5, cluttered_item_info, obj_names_short)
 
     def _build_handcrafted_clutter(self):
         """

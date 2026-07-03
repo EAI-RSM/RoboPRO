@@ -37,8 +37,8 @@ parent_directory = os.path.dirname(current_file_path)
 # `not_visible` is the special case visible_fraction == 0 (handled separately).
 # Tunable; pass a custom list to classify_visibility / measure_target_visibility.
 DEFAULT_VISIBILITY_BUCKETS = [
-    ("heavily_occluded", 0.25),    # 0    < frac < 0.25
-    ("mostly_occluded", 0.5),      # 0.25 <= frac < 0.5
+    ("heavily_occluded", 0.20),    # 0    < frac < 0.20
+    ("mostly_occluded", 0.5),      # 0.20 <= frac < 0.5
     ("partially_occluded", 0.9),   # 0.5  <= frac < 0.9
     ("fully_visible", float("inf")),  # 0.9 <= frac
 ]
@@ -585,8 +585,8 @@ class Base_Task(gym.Env):
 
         Default taxonomy:
             not_visible        : frac == 0
-            heavily_occluded   : 0    < frac < 0.25
-            mostly_occluded    : 0.25 <= frac < 0.5
+            heavily_occluded   : 0    < frac < 0.20
+            mostly_occluded    : 0.20 <= frac < 0.5
             partially_occluded : 0.5  <= frac < 0.9
             fully_visible      : 0.9  <= frac
         """
@@ -624,7 +624,12 @@ class Base_Task(gym.Env):
         """
         if render:
             self._update_render()
-            self.cameras.update_picture()
+            if getattr(self, "measurement_only", False):
+                # only the camera we read needs rendering (saves rendering the
+                # other ~4 static cameras + wrist cameras every measurement)
+                self.cameras.update_picture(camera_names=[camera_name])
+            else:
+                self.cameras.update_picture()
 
         seg = self.cameras.get_segmentation_raw(level="actor", camera_name=camera_name)
         if camera_name not in seg:

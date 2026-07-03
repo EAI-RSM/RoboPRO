@@ -45,6 +45,9 @@ import numpy as np
 
 from setup_paths import setup_paths
 setup_paths()
+# these analysis scripts are bench-only; default the task mode so build_cfg looks
+# under bench_task_config/ (explicit ROBOTWIN_BENCH_TASK still wins)
+os.environ.setdefault("ROBOTWIN_BENCH_TASK", "bench")
 
 bench_root = Path(os.environ["BENCH_ROOT"])
 robotwin_root = Path(os.environ["ROBOTWIN_ROOT"])
@@ -59,13 +62,13 @@ TARGET_ATTRS = ("target_obj", "target", "mouse")
 
 # Bucket taxonomy (must match DEFAULT_VISIBILITY_BUCKETS in envs/_base_task.py):
 #   not_visible        frac == 0
-#   heavily_occluded   0    < frac < 0.25
-#   mostly_occluded    0.25 <= frac < 0.5
+#   heavily_occluded   0    < frac < 0.20
+#   mostly_occluded    0.20 <= frac < 0.5
 #   partially_occluded 0.5  <= frac < 0.9
 #   fully_visible      0.9  <= frac
 BUCKET_ORDER = ["not_visible", "heavily_occluded", "mostly_occluded",
                 "partially_occluded", "fully_visible"]
-BUCKET_BOUNDARIES = [0.25, 0.5, 0.9]  # interior guide lines (plus 0 for not_visible)
+BUCKET_BOUNDARIES = [0.20, 0.5, 0.9]  # interior guide lines (plus 0 for not_visible)
 BUCKET_COLORS = {
     "not_visible": "#C44E52",        # red
     "heavily_occluded": "#DD8452",   # orange
@@ -82,7 +85,15 @@ def _resolve_target(env):
     raise SystemExit("Could not find a target actor attribute on the env")
 
 
-def build_cfg(task_name, base_config, seed, dr_overrides):
+def build_cfg(task_name, base_config, seed, dr_overrides, rollout=False, ep_num=0, save_path=None):
+    """Build a setup_demo cfg.
+
+    rollout=False (default): a fast t=0 measurement build -- no planning, no saved
+    data, single-camera render (measurement_only).
+    rollout=True: an expert curobo rollout build -- need_plan=True + save_data=True
+    so play_once() plans/executes and frames are captured for merge_pkl_to_hdf5_video()
+    (writes <save_path>/video/episode{ep_num}.mp4). Full render (not measurement_only).
+    """
     if os.getenv("ROBOTWIN_BENCH_TASK") == "bench":
         config_path = bench_root / "bench_task_config" / f"{base_config}.yml"
     else:
@@ -95,10 +106,19 @@ def build_cfg(task_name, base_config, seed, dr_overrides):
 
     cfg["task_name"] = task_name
     cfg["render_freq"] = 0
-    cfg["now_ep_num"] = 0
+    cfg["now_ep_num"] = int(ep_num)
     cfg["seed"] = int(seed)
-    cfg["need_plan"] = False          # no planning/rollout for a t=0 measurement
-    cfg["save_data"] = False
+    if rollout:
+        cfg["need_plan"] = True        # expert curobo plans + executes the task
+        cfg["save_data"] = True        # capture frames so a video can be written
+        cfg["measurement_only"] = False
+        cfg.setdefault("save_freq", 15)
+        if save_path is not None:
+            cfg["save_path"] = str(save_path)
+    else:
+        cfg["need_plan"] = False       # no planning/rollout for a t=0 measurement
+        cfg["save_data"] = False
+        cfg["measurement_only"] = True  # t=0 measurement: render only the measured camera
 
     cfg.setdefault("domain_randomization", {})
     cfg["domain_randomization"].update(dr_overrides)
@@ -144,13 +164,50 @@ def dr_dense(density, tall_only=False, handcrafted=False):
     return dr
 
 
+def run_rollout(env, task_name, base_config, seed, dr_overrides, save_path, ep_num):
+    """Run one expert curobo rollout on the SAME scene (same seed -> same poses)
+    and report whether it solved the task. A video of the attempt is written to
+    <save_path>/video/episode{ep_num}.mp4 via the save_data + merge machinery.
+
+    Returns: success (bool). A planning/execution failure or any exception counts
+    as a failed rollout (success=False), which is exactly what we want to measure.
+    """
+    success = False
+    try:
+        env.setup_demo(**build_cfg(task_name, base_config, seed, dr_overrides,
+                                   rollout=True, ep_num=ep_num, save_path=str(save_path)))
+        env.play_once()
+        success = bool(getattr(env, "plan_success", False) and env.check_success())
+    except Exception as e:
+        print(f"    [rollout seed {seed} ep{ep_num}] failed ({type(e).__name__}: {e})")
+        success = False
+    try:
+        env.close_env()
+    except Exception:
+        pass
+    # write the video only if this episode actually captured frames
+    try:
+        if getattr(env, "FRAME_IDX", 0) > 0:
+            env.merge_pkl_to_hdf5_video()
+            env.remove_data_cache()
+            # keep only the mp4; drop the heavy per-frame hdf5 byproduct
+            hdf5 = Path(str(save_path)) / "data" / f"episode{ep_num}.hdf5"
+            if hdf5.exists():
+                hdf5.unlink()
+    except Exception as e:
+        print(f"    [rollout seed {seed} ep{ep_num}] video merge failed ({type(e).__name__}: {e})")
+    return success
+
+
 def save_overlay(env, mask, out_path, header):
     """Save [countertop RGB | same view with the target's visible pixels in red],
     with a one-line header. Must be called while the render buffers are current
     (i.e. after measure_target_visibility, before close_env)."""
     import imageio
     import cv2
-    rgb = env.cameras.get_rgb()[CAMERA]["rgb"]
+    # measurement_only renders only CAMERA, so request just it (avoids reading
+    # the never-rendered wrist/other static cameras)
+    rgb = env.cameras.get_rgb(camera_names=[CAMERA])[CAMERA]["rgb"]
     overlay = rgb.copy()
     overlay[mask] = (0.5 * np.array([255, 0, 0]) + 0.5 * overlay[mask]).astype(np.uint8)
     side = np.ascontiguousarray(np.concatenate([rgb, overlay], axis=1))
@@ -163,7 +220,7 @@ def run_sweep(args):
     env_class = get_env_class(args.task_name, bench_subdir=args.bench_subdir)
     env = env_class()  # reuse one instance across builds (collect_data pattern)
 
-    out_dir = Path(args.out_dir)
+    out_dir = effective_out_dir(args)
     out_dir.mkdir(parents=True, exist_ok=True)
     jsonl_path = out_dir / "records.jsonl"
     img_dir = out_dir / "images"
@@ -171,9 +228,11 @@ def run_sweep(args):
         img_dir.mkdir(parents=True, exist_ok=True)
     seeds = list(range(args.seed_start, args.seed_start + args.num_seeds))
     densities = [int(d) for d in args.densities.split(",")]
+    rollout = getattr(args, "rollout", False)
+    ep_counter = 0   # unique episode id per rollout (-> video/episode{N}.mp4)
 
     print(f"task={args.task_name} base={args.base_config} camera={CAMERA}")
-    print(f"seeds={seeds[0]}..{seeds[-1]} ({len(seeds)})  densities={densities}")
+    print(f"seeds={seeds[0]}..{seeds[-1]} ({len(seeds)})  densities={densities}  rollout={rollout}")
     print(f"writing -> {jsonl_path}\n")
 
     def safe_close():
@@ -239,6 +298,17 @@ def run_sweep(args):
                     "in_fov": bool(res["in_fov"]),
                     "pose_match": pose_ok,
                 }
+                # --- expert curobo rollout on the same scene (video + success) ---
+                if rollout:
+                    success = run_rollout(env, args.task_name, args.base_config, seed,
+                                          dr_dense(density, args.tall_only, args.handcrafted),
+                                          out_dir, ep_counter)
+                    rec["rollout_success"] = bool(success)
+                    rec["rollout_ep"] = ep_counter
+                    rec["rollout_video"] = f"video/episode{ep_counter}.mp4"
+                    print(f"    seed {seed} d={density} {res['bucket']}: "
+                          f"rollout {'SUCCESS' if success else 'FAIL'} -> episode{ep_counter}.mp4")
+                    ep_counter += 1
                 fout.write(json.dumps(rec) + "\n")
                 fout.flush()
             print(f"[{si+1}/{len(seeds)}] seed {seed}: full_px={full_px} done")
@@ -255,7 +325,10 @@ def load_records(out_dir):
     return [json.loads(l) for l in open(jsonl_path) if l.strip()]
 
 
-def analyze(out_dir, bins, selectable_threshold):
+def analyze(out_dir, bins, selectable_threshold, group_key="density",
+            group_label="obstacle_density",
+            suptitle="Natural visibility distribution on countertop camera",
+            bar_title="Bucket proportions vs clutter density"):
     import csv
     import math as _m
     import matplotlib
@@ -273,7 +346,7 @@ def analyze(out_dir, bins, selectable_threshold):
         print(f"NOTE: {n_drift}/{len(recs)} records had target pose drift; "
               f"{n_over} had frac>1 -> clamped to 1.0 (kept, not dropped).")
 
-    densities = sorted({r["density"] for r in recs})
+    densities = sorted({r[group_key] for r in recs})
     buckets = BUCKET_ORDER
     edges = np.linspace(0.0, 1.0, bins + 1)   # equal-width bins over [0, 1]
 
@@ -293,10 +366,10 @@ def analyze(out_dir, bins, selectable_threshold):
         return buckets[-1]
 
     def fracs_for(d):
-        return [clamped(r) for r in recs if r["density"] == d]
+        return [clamped(r) for r in recs if r[group_key] == d]
 
     def bucket_counts(d):
-        sub = [r for r in recs if r["density"] == d]
+        sub = [r for r in recs if r[group_key] == d]
         n = len(sub)
         counts = {b: 0 for b in buckets}
         for r in sub:
@@ -308,11 +381,11 @@ def analyze(out_dir, bins, selectable_threshold):
     csv_path = Path(out_dir) / "bin_counts.csv"
     with open(csv_path, "w", newline="") as cf:
         writer = csv.writer(cf)
-        writer.writerow(["density", "bin_lo", "bin_hi", "count"])
+        writer.writerow([group_key, "bin_lo", "bin_hi", "count"])
         for d in densities:
             counts, _ = np.histogram(fracs_for(d), bins=edges)
             n = int(counts.sum())
-            print(f"\nobstacle_density = {d}  (n={n})")
+            print(f"\n{group_label} = {d}  (n={n})")
             for i, c in enumerate(counts):
                 lo, hi = edges[i], edges[i + 1]
                 bar = "#" * int(c)
@@ -330,7 +403,7 @@ def analyze(out_dir, bins, selectable_threshold):
         ax.hist(fracs_for(d), bins=edges, color="#4C72B0", edgecolor="white")
         for x in BUCKET_BOUNDARIES:
             ax.axvline(x, color="0.4", ls="--", lw=1.5)
-        ax.set_title(f"obstacle_density = {d}   (n={n})")
+        ax.set_title(f"{group_label} = {d}   (n={n})")
         ax.set_xlabel("visible_fraction")
         ax.set_ylabel("seed count")
         ax.set_xlim(-0.03, 1.05)
@@ -339,8 +412,7 @@ def analyze(out_dir, bins, selectable_threshold):
                 fontsize=11, bbox=dict(boxstyle="round", fc="white", ec="0.7", alpha=0.9))
     for ax in flat[len(densities):]:
         ax.axis("off")
-    fig.suptitle("Natural visibility distribution on countertop camera\n"
-                 "dashed guides at bucket boundaries 0.25 / 0.5 / 0.9", fontsize=16)
+    fig.suptitle(suptitle + "\ndashed guides at bucket boundaries 0.25 / 0.5 / 0.9", fontsize=16)
     fig.tight_layout(rect=[0, 0, 1, 0.93])
     hist_path = Path(out_dir) / "histograms.png"
     fig.savefig(hist_path, dpi=130)
@@ -366,7 +438,7 @@ def analyze(out_dir, bins, selectable_threshold):
     ax3.tick_params(axis="x", labelrotation=90, labelsize=9)
     dens_txt = ",".join(str(d) for d in densities)
     ax3.set_title(f"Pooled visible_fraction histogram — {bins} equal bins  "
-                  f"(densities {dens_txt}, n={len(all_fr)})\n"
+                  f"({group_label} {dens_txt}, n={len(all_fr)})\n"
                   "dashed guides at bucket boundaries 0.25 / 0.5 / 0.9")
     fig3.tight_layout()
     pooled_path = Path(out_dir) / "fraction_histogram.png"
@@ -386,12 +458,24 @@ def analyze(out_dir, bins, selectable_threshold):
                 ax2.text(xi, bo + v / 2, f"{v:.0%}", ha="center", va="center",
                          color="white", fontsize=12, fontweight="bold")
         bottom += vals
+    # uniform target: each of the 5 buckets would occupy 1/5; dotted lines mark the
+    # cumulative boundaries (0.2/0.4/0.6/0.8). KL(observed || uniform) in base 5 lies
+    # in [0,1] (0 = perfectly uniform, 1 = all mass in one bucket); annotate per bar.
+    U = 1.0 / len(buckets)
+    for yv in np.arange(U, 1.0, U):
+        ax2.axhline(yv, color="0.25", ls=":", lw=1.2, zorder=5)
+    for xi, d in enumerate(densities):
+        n, counts = bucket_counts(d)
+        props = [counts[b] / n if n else 0.0 for b in buckets]
+        kl5 = sum(p * _m.log(p / U, 5) for p in props if p > 0)
+        ax2.text(xi, 1.02, f"KL₅={kl5:.3f}", ha="center", va="bottom",
+                 fontsize=11, fontweight="bold")
     ax2.set_xticks(x)
     ax2.set_xticklabels([str(d) for d in densities])
-    ax2.set_xlabel("obstacle_density")
+    ax2.set_xlabel(group_label)
     ax2.set_ylabel("fraction of seeds")
-    ax2.set_ylim(0, 1.0)
-    ax2.set_title("Bucket proportions vs clutter density", fontsize=15)
+    ax2.set_ylim(0, 1.12)
+    ax2.set_title(bar_title + "   (dotted = uniform target, 0.2 each)", fontsize=14)
     ax2.legend(loc="lower center", bbox_to_anchor=(0.5, -0.26), ncol=3, frameon=False)
     fig2.tight_layout()
     summary_fig = Path(out_dir) / "bucket_proportions.png"
@@ -402,7 +486,7 @@ def analyze(out_dir, bins, selectable_threshold):
     # ---- per-bucket readout (selectable vs needs-occluder) ----
     summary = {}
     print("\n================ Per-bucket natural mass (acceptance rate) ================")
-    header = f"{'density':>8} | " + " | ".join(f"{b:>18}" for b in buckets) + " |  needs-occluder"
+    header = f"{group_label[:8]:>8} | " + " | ".join(f"{b:>18}" for b in buckets) + " |  needs-occluder"
     print(header)
     print("-" * len(header))
     for d in densities:
@@ -432,6 +516,99 @@ def analyze(out_dir, bins, selectable_threshold):
     print(f"saved {summary_path}")
 
 
+def effective_out_dir(args):
+    """When --rollout is on, write everything to <out-dir>_rollout so the rollout
+    run never collides with a measurement-only run of the same out-dir."""
+    suffix = "_rollout" if getattr(args, "rollout", False) else ""
+    return Path(str(args.out_dir).rstrip("/") + suffix)
+
+
+def _bucket_of(frac):
+    """Re-derive the visibility bucket from a (clamped) visible_fraction, matching
+    the taxonomy used in analyze()."""
+    frac = min(max(frac, 0.0), 1.0)
+    if frac <= 0.0:
+        return "not_visible"
+    for name, hi in zip(BUCKET_ORDER[1:], BUCKET_BOUNDARIES + [float("inf")]):
+        if frac < hi:
+            return name
+    return BUCKET_ORDER[-1]
+
+
+def analyze_success_by_bucket(out_dir):
+    """Pooled observed P(rollout success | visibility bucket) over all records."""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    recs = [r for r in load_records(out_dir) if "rollout_success" in r]
+    if not recs:
+        print("no rollout records found; skipping success-by-bucket")
+        return
+    buckets = BUCKET_ORDER
+    tot = {b: 0 for b in buckets}
+    suc = {b: 0 for b in buckets}
+    for r in recs:
+        b = _bucket_of(r["visible_fraction"])
+        tot[b] += 1
+        suc[b] += 1 if r["rollout_success"] else 0
+    rates = {b: (suc[b] / tot[b] if tot[b] else 0.0) for b in buckets}
+
+    fig, ax = plt.subplots(figsize=(9, 5.5))
+    x = np.arange(len(buckets))
+    ax.bar(x, [rates[b] for b in buckets],
+           color=[BUCKET_COLORS[b] for b in buckets], edgecolor="white")
+    for xi, b in zip(x, buckets):
+        label = f"{suc[b]}/{tot[b]}\n{rates[b]:.0%}" if tot[b] else "0/0"
+        ax.text(xi, rates[b] + 0.02, label, ha="center", va="bottom", fontsize=11)
+    ax.set_xticks(x)
+    ax.set_xticklabels(buckets, rotation=20, ha="right")
+    ax.set_ylabel("P(successful rollout)")
+    ax.set_ylim(0, 1.12)
+    ax.set_title(f"Observed rollout success rate per visibility bucket  (n={len(recs)})")
+    fig.tight_layout()
+    fig_path = Path(out_dir) / "rollout_success_by_bucket.png"
+    fig.savefig(fig_path, dpi=130)
+    plt.close(fig)
+    print(f"saved {fig_path}")
+
+    out = {b: {"total": tot[b], "success": suc[b], "success_rate": rates[b]} for b in buckets}
+    json_path = Path(out_dir) / "rollout_success_by_bucket.json"
+    with open(json_path, "w") as f:
+        json.dump({"n": len(recs), "per_bucket": out}, f, indent=2)
+    print(f"saved {json_path}")
+
+
+def analyze_rollout(out_dir, bins, selectable_threshold, **analyze_kwargs):
+    """Three rollout outputs: (1) the standard distribution over ALL records,
+    (2) the same distribution over successful rollouts only (success_only/), and
+    (3) the pooled P(success | bucket)."""
+    out_dir = Path(out_dir)
+    # (1) standard distribution, all records (the "same data")
+    analyze(out_dir, bins, selectable_threshold, **analyze_kwargs)
+
+    # (2) distribution over successful rollouts only
+    recs = load_records(out_dir)
+    succ = [r for r in recs if r.get("rollout_success")]
+    succ_dir = out_dir / "success_only"
+    succ_dir.mkdir(parents=True, exist_ok=True)
+    with open(succ_dir / "records.jsonl", "w") as f:
+        for r in succ:
+            f.write(json.dumps(r) + "\n")
+    print(f"\n[success-only] {len(succ)}/{len(recs)} rollouts succeeded; "
+          f"rebuilding distribution on the success subset -> {succ_dir}")
+    if succ:
+        kw = dict(analyze_kwargs)
+        if "suptitle" in kw:
+            kw["suptitle"] += "  [successful rollouts only]"
+        if "bar_title" in kw:
+            kw["bar_title"] += "  [successful only]"
+        analyze(succ_dir, bins, selectable_threshold, **kw)
+
+    # (3) pooled P(success | bucket)
+    analyze_success_by_bucket(out_dir)
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("task_name", nargs="?", default="put_mouse_on_pad")
@@ -448,14 +625,21 @@ def main():
     ap.add_argument("--save-images", action="store_true",
                     help="save per-run countertop overlays (RGB | visible mouse pixels in red) to <out-dir>/images/")
     ap.add_argument("--selectable-threshold", type=float, default=0.05)
-    ap.add_argument("--out-dir", default="./visibility_phase1")
+    ap.add_argument("--out-dir", default="../scripts/validation/results/visibility_phase1")
+    ap.add_argument("--rollout", action="store_true",
+                    help="run an expert curobo rollout per scene (writes to <out-dir>_rollout, "
+                         "saves videos, and adds success-only distribution + P(success) per bucket)")
     ap.add_argument("--plot-only", action="store_true",
                     help="Skip the sweep; just (re)build figures from records.jsonl.")
     args = ap.parse_args()
 
     if not args.plot_only:
         run_sweep(args)
-    analyze(args.out_dir, args.bins, args.selectable_threshold)
+    out_dir = effective_out_dir(args)
+    if args.rollout:
+        analyze_rollout(out_dir, args.bins, args.selectable_threshold)
+    else:
+        analyze(out_dir, args.bins, args.selectable_threshold)
 
 
 if __name__ == "__main__":

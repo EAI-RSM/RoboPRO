@@ -271,14 +271,16 @@ class Camera:
         world_cam_mat44[:3, 3] = world_cam_pos
         self.world_camera2.entity.set_pose(sapien.Pose(world_cam_mat44))
 
-    def update_picture(self):
-        # camera
-        if self.collect_wrist_camera:
+    def update_picture(self, camera_names=None):
+        # camera  (camera_names: optional -> render only those static cameras and
+        # skip the wrist cameras; None -> render all, the data-collection path)
+        if self.collect_wrist_camera and camera_names is None:
             self.left_camera.take_picture()
             self.right_camera.take_picture()
 
-        for camera in self.static_camera_list:
-            camera.take_picture()
+        for camera, name in zip(self.static_camera_list, self.static_camera_name):
+            if camera_names is None or name in camera_names:
+                camera.take_picture()
 
         # ================================= sensor camera =================================
         # self.head_sensor.take_picture()
@@ -321,8 +323,8 @@ class Camera:
         # print(res)
         return res
 
-    def get_rgb(self) -> dict:
-        rgba = self.get_rgba()
+    def get_rgb(self, camera_names=None) -> dict:
+        rgba = self.get_rgba(camera_names=camera_names)
         rgb = {}
         for camera_name, camera_data in rgba.items():
             rgb[camera_name] = {}
@@ -330,7 +332,10 @@ class Camera:
         return rgb
     
     # Get Camera RGBA
-    def get_rgba(self) -> dict:
+    def get_rgba(self, camera_names=None) -> dict:
+        # camera_names restricts to named static cameras (and skips the wrist
+        # cameras), matching update_picture() so we never read an unrendered
+        # camera. None => all cameras (unchanged data-collection path).
 
         def _get_rgba(camera):
             camera_rgba = camera.get_picture("Color")
@@ -345,13 +350,15 @@ class Camera:
 
         res = {}
 
-        if self.collect_wrist_camera:
+        if self.collect_wrist_camera and camera_names is None:
             res["left_camera"] = {}
             res["right_camera"] = {}
             res["left_camera"]["rgba"] = _get_rgba(self.left_camera)
             res["right_camera"]["rgba"] = _get_rgba(self.right_camera)
 
         for camera, camera_name in zip(self.static_camera_list, self.static_camera_name):
+            if camera_names is not None and camera_name not in camera_names:
+                continue
             if camera_name == "head_camera":
                 if self.collect_head_camera:
                     res[camera_name] = {}
