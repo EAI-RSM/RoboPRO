@@ -532,6 +532,40 @@ class Base_Task(gym.Env):
         self.now_obs = deepcopy(pkl_dic)
         return pkl_dic
 
+    def get_actor_id_map(self):
+        # per_scene_id -> entity name; decodes the ids stored in actor_segmentation
+        id_map = {}
+        for actor in self.scene.get_all_actors():
+            pid = getattr(actor, "per_scene_id", None)
+            if pid is not None:
+                id_map[int(pid)] = actor.get_name()
+        for art in self.scene.get_all_articulations():
+            art_name = art.get_name() or "robot"  # the embodiment articulation is unnamed
+            for link in art.get_links():
+                ent = getattr(link, "entity", None)
+                pid = getattr(ent, "per_scene_id", None) if ent is not None else None
+                if pid is not None:
+                    id_map[int(pid)] = f"{art_name}/{link.get_name()}"
+        return id_map
+
+    def get_role_names(self):
+        # actor names the task itself designates (raw facts from task code,
+        # not the method's grounding semantics)
+        roles = {}
+        for attr, key in (("target_obj", "target"), ("des_obj", "destination")):
+            obj = getattr(self, attr, None)
+            if obj is not None:
+                try:
+                    roles[key] = obj.get_name()
+                except Exception:
+                    pass
+        if hasattr(self, "_get_target_object_names"):
+            try:
+                roles["target_object_names"] = sorted(self._get_target_object_names())
+            except Exception:
+                pass
+        return roles
+
     def save_camera_rgb(self, save_path, camera_name='head_camera'):
         self._update_render()
         self.cameras.update_picture()

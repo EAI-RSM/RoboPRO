@@ -268,6 +268,12 @@ def run(TASK_ENV, args):
             info = TASK_ENV.play_once()
             if info is None:
                 info = getattr(TASK_ENV, "info", None) or {}
+            # grounding sidecar: seg-id -> name map + task-designated role names
+            # (must be captured while the scene is still alive)
+            if hasattr(TASK_ENV, "get_actor_id_map"):
+                info["actor_id_map"] = TASK_ENV.get_actor_id_map()
+            if hasattr(TASK_ENV, "get_role_names"):
+                info["role_names"] = TASK_ENV.get_role_names()
             info_db[f"episode_{episode_idx}"] = info
 
             with open(info_file_path, "w", encoding="utf-8") as file:
