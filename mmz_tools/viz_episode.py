@@ -81,6 +81,16 @@ def names_to_ids(names, id_map, substring=False):
     return ids
 
 
+def resolve_role(roles, key, id_map):
+    """Prefer the exact per_scene_id the task recorded (disambiguates
+    same-name objects); fall back to name-matching for older data."""
+    rid = roles.get(f"{key}_id")
+    if rid is not None and int(rid) in id_map:
+        return {int(rid)}, "id"
+    name = roles.get(key)
+    return (names_to_ids([name], id_map, substring=True) if name else set()), "name"
+
+
 # ------------------------------------------------------------- rendering --
 
 def id_color(i):
@@ -243,6 +253,10 @@ def main():
     out_dir = os.path.join(args.run_dir, "viz", f"episode{ep}")
     os.makedirs(out_dir, exist_ok=True)
 
+    print("\n" + "═" * 74)
+    print(f"VIZ · {args.run_dir} · episode {ep}")
+    print("═" * 74)
+
     # ---- sidecar: id map + roles -------------------------------------------
     with open(info_path) as f:
         ep_info = json.load(f).get(f"episode_{ep}", {})
@@ -253,11 +267,15 @@ def main():
     robot_ids = {i for i, n in id_map.items() if n.startswith("robot/")}
     clutter_names = clutter_object_types(ep_info.get("cluttered_table_info"))
 
+    tgt_ids, tgt_how = resolve_role(roles, "target", id_map)
+    dst_ids, dst_how = resolve_role(roles, "destination", id_map)
     role_ids = {
-        "target": names_to_ids([roles.get("target")], id_map, substring=True),
-        "destination": names_to_ids([roles.get("destination")], id_map, substring=True),
+        "target": tgt_ids,
+        "destination": dst_ids,
         "obstacle": names_to_ids(clutter_names, id_map, substring=False),
     }
+    print(f"target matched by {tgt_how}, destination by {dst_how} "
+          "(id = exact instance, name = fallback)")
     role_ids["target"] -= robot_ids
     role_ids["destination"] -= robot_ids
     if not role_ids["target"]:
@@ -275,6 +293,11 @@ def main():
 
     print(f"actor_id_map: {len(id_map)} entries ({len(robot_ids)} robot links)")
     print(f"role_names from task code: {roles}")
+    outcome = ep_info.get("outcome")
+    if outcome:
+        print(f"OUTCOME: {outcome.get('label')} (code={outcome.get('label_code')}, "
+              f"success={outcome.get('success')}, collision={outcome.get('collision')}, "
+              f"planner_blind={outcome.get('planner_blind_to_obstacles')})")
     print(f"clutter object types: {clutter_names}")
     print("role ids: " + ", ".join(f"{r}={sorted(ids)}" for r, ids in role_ids.items()))
     if not id_map:

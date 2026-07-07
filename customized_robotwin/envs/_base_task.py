@@ -549,8 +549,21 @@ class Base_Task(gym.Env):
         return id_map
 
     def get_role_names(self):
-        # actor names the task itself designates (raw facts from task code,
-        # not the method's grounding semantics)
+        # actor names + exact per_scene_ids the task itself designates (raw facts
+        # from task code, not the method's grounding semantics). The *_id keys
+        # disambiguate objects that share a model name (e.g. target cup vs a
+        # same-type clutter cup); name keys are kept for back-compat.
+        def _scene_id(obj):
+            # Actor wrapper -> .actor (Entity); or a raw entity; return its id.
+            for cand in (getattr(obj, "actor", None), getattr(obj, "entity", None), obj):
+                pid = getattr(cand, "per_scene_id", None)
+                if pid is not None:
+                    try:
+                        return int(pid)
+                    except (TypeError, ValueError):
+                        pass
+            return None
+
         roles = {}
         for attr, key in (("target_obj", "target"), ("des_obj", "destination")):
             obj = getattr(self, attr, None)
@@ -559,6 +572,9 @@ class Base_Task(gym.Env):
                     roles[key] = obj.get_name()
                 except Exception:
                     pass
+                sid = _scene_id(obj)
+                if sid is not None:
+                    roles[f"{key}_id"] = sid
         if hasattr(self, "_get_target_object_names"):
             try:
                 roles["target_object_names"] = sorted(self._get_target_object_names())

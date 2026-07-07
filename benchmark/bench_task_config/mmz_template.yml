@@ -1,0 +1,80 @@
+# ============================================================================
+# mmz_template.yml — EXAMPLE grounding data-gen config (copy me, don't run me)
+#
+# Purpose: one working reference showing every knob the data-gen branch adds.
+# Copy → rename → tune episode_num / obstacle_density / the [LABEL] knobs to
+# your own labeling scheme. Full context: DATA_GEN_HANDOFF.md at repo root.
+#
+# Run (from customized_robotwin/, env `robopro`, ROBOTWIN_BENCH_TASK=bench):
+#   bash collect_data.sh <task_name> <this_config_name> <gpu_id>
+#
+# Every [MMZ] knob is ADDITIVE and DEFAULT-PRESERVING: leave it out of a
+# config and the stock RoboPRO behavior applies.
+# ============================================================================
+
+render_freq: 0
+episode_num: 10            # episodes to KEEP (seed search runs until it banks this many)
+use_seed: false            # true = replay seeds from <save_dir>/seed.txt instead of searching
+                           #        (matched pairs: copy seed.txt from a finished twin run first)
+save_freq: 15
+embodiment: [aloha-agilex]
+language_num: 100
+domain_randomization:
+  random_background: false
+  cluttered_table: True    # False + obstacle_density 0 = clean scenes
+  clean_background_rate: 0
+  random_head_camera_dis: 0
+  random_table_height: 0
+  random_light: false
+  crazy_random_light_rate: 0
+  obstacle_density: 10     # 6..15 in the benchmark's cluttered range (0 = clean)
+
+  language_perturbation:
+    enabled: true          # base-language diversity ONLY (instruction_bank.json).
+    instruction_bank: benchmark/bench_task_config/instruction_bank.json
+                           # The colloquial/vision/object-OOD banks are EVAL-ONLY —
+                           # don't bake them into training data.
+camera:
+  head_camera_type: D435   # keep D435 everywhere = matched to eval cameras
+  wrist_camera_type: D435
+  demo_camera_type: D435
+  collect_head_camera: true
+  collect_wrist_camera: true
+data_type:
+  rgb: true
+  third_view: false
+  depth: true              # needed for the 3D lift (dense clouds rebuilt from depth + K/E)
+  pointcloud: false        # stock cloud = head-cam-only 1024 pts — we rebuild instead
+  observer: false
+  endpose: true
+  qpos: true
+  mesh_segmentation: false # sub-part ids, no name map — not needed
+  actor_segmentation: true # [MMZ] per-object masks, saved as RAW uint16 ids (PNG in HDF5)
+pcd_down_sample_num: 1024
+pcd_crop: true
+save_path: ./data/mmz_dataset
+clear_cache_freq: 1
+collect_data: true
+eval_video_log: true
+
+# --- collision / label layer -------------------------------------------------
+enable_collision_metrics: true      # measure collisions during rollout (get_collision_metrics)
+
+planner_exclude_obstacles: false    # [MMZ][LABEL] planner blindness, DECOUPLED from metrics.
+                                    #   false = CuRobo plans AROUND clutter (normal expert)
+                                    #   true  = planner can't see clutter → smooth path may hit it
+                                    #   absent = legacy coupling (blind iff enable_collision_metrics)
+
+replan_on_collect: false            # [MMZ][LABEL] true = re-plan at collection time instead of
+                                    #   replaying the seed-search trajectory (required for blind
+                                    #   runs — cached trajectories are the AVOIDING paths)
+
+seed_require_collision_free: true   # [MMZ][LABEL] seed search accepts only task-success AND
+                                    #   zero-collision seeds → exact episode_num of "pure S".
+                                    #   false/absent = stock acceptance (task success only)
+
+keep_labels: [success]              # [MMZ][LABEL] post-episode filter on the MEASURED outcome:
+                                    #   success | success_with_accident | crashed_and_failed |
+                                    #   failed_no_accident   (= 2x2 task-success x collision)
+                                    #   Episodes with other labels are deleted (audit trail stays
+                                    #   in scene_info.json). Absent = legacy keep-success rule.
