@@ -431,10 +431,45 @@ class Robot:
                 arms_tag="right",
             )
 
+    def left_check_ik_batch(self, target_lst):
+        """Diagnostic only: cheap collision-aware IK feasibility check (no trajectory
+        optimization) for a batch of flat [x,y,z,qw,qx,qy,qz] poses. Returns a bool
+        array, one per pose."""
+        target_lst_copy = deepcopy(target_lst)
+        for i in range(len(target_lst_copy)):
+            target_lst_copy[i] = self._trans_from_gripper_to_endlink(target_lst_copy[i], arm_tag="left")
+        if self.communication_flag:
+            self.left_conn.send({
+                "cmd": "check_ik_batch",
+                "target_pose_list": target_lst_copy,
+                "arms_tag": "left",
+            })
+            return self.left_conn.recv()
+        else:
+            return self.left_planner.check_ik_batch(target_lst_copy, arms_tag="left")
+
+    def right_check_ik_batch(self, target_lst):
+        """Diagnostic only: cheap collision-aware IK feasibility check (no trajectory
+        optimization) for a batch of flat [x,y,z,qw,qx,qy,qz] poses. Returns a bool
+        array, one per pose."""
+        target_lst_copy = deepcopy(target_lst)
+        for i in range(len(target_lst_copy)):
+            target_lst_copy[i] = self._trans_from_gripper_to_endlink(target_lst_copy[i], arm_tag="right")
+        if self.communication_flag:
+            self.right_conn.send({
+                "cmd": "check_ik_batch",
+                "target_pose_list": target_lst_copy,
+                "arms_tag": "right",
+            })
+            return self.right_conn.recv()
+        else:
+            return self.right_planner.check_ik_batch(target_lst_copy, arms_tag="right")
+
     def left_plan_path(
         self,
         target_pose,
         constraint_pose=None,
+        approach_axis=None,
         use_point_cloud=False,
         use_attach=False,
         last_qpos=None,
@@ -454,6 +489,7 @@ class Robot:
                 "qpos": now_qpos,
                 "target_pose": trans_target_pose,
                 "constraint_pose": constraint_pose,
+                "approach_axis": approach_axis,
                 "arms_tag": "left",
             })
             return self.left_conn.recv()
@@ -462,6 +498,7 @@ class Robot:
                 now_qpos,
                 trans_target_pose,
                 constraint_pose=constraint_pose,
+                approach_axis=approach_axis,
                 arms_tag="left",
             )
 
@@ -469,6 +506,7 @@ class Robot:
         self,
         target_pose,
         constraint_pose=None,
+        approach_axis=None,
         use_point_cloud=False,
         use_attach=False,
         last_qpos=None,
@@ -487,6 +525,7 @@ class Robot:
                 "qpos": now_qpos,
                 "target_pose": trans_target_pose,
                 "constraint_pose": constraint_pose,
+                "approach_axis": approach_axis,
                 "arms_tag": "right",
             })
             return self.right_conn.recv()
@@ -495,6 +534,7 @@ class Robot:
                 now_qpos,
                 trans_target_pose,
                 constraint_pose=constraint_pose,
+                approach_axis=approach_axis,
                 arms_tag="right",
             )
 
@@ -728,6 +768,7 @@ def planner_process_worker(conn, args):
                     msg["qpos"],
                     msg["target_pose"],
                     constraint_pose=msg.get("constraint_pose", None),
+                    approach_axis=msg.get("approach_axis", None),
                     arms_tag=msg["arms_tag"],
                 )
                 conn.send(result)
@@ -737,6 +778,13 @@ def planner_process_worker(conn, args):
                     msg["qpos"],
                     msg["target_pose_list"],
                     constraint_pose=msg.get("constraint_pose", None),
+                    arms_tag=msg["arms_tag"],
+                )
+                conn.send(result)
+
+            elif msg["cmd"] == "check_ik_batch":
+                result = planner.check_ik_batch(
+                    msg["target_pose_list"],
                     arms_tag=msg["arms_tag"],
                 )
                 conn.send(result)

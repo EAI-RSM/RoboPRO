@@ -76,3 +76,5 @@ presentation_material/
 # Validation outputs (generated, not tracked)
 scripts/validation/results/
 docs/objaverse_preview/
+docs/references/
+usecase_roadmap.tex

@@ -39,6 +39,7 @@ import os
 import sys
 import json
 import argparse
+import shutil
 from pathlib import Path
 
 import numpy as np
@@ -164,20 +165,56 @@ def dr_dense(density, tall_only=False, handcrafted=False):
     return dr
 
 
+def _bucket_rollout_artifacts(save_path, ep_num, success):
+    base_dir = Path(save_path)
+    bucket = "success" if success else "fail"
+    bucket_dir = base_dir / bucket
+    data_dir = bucket_dir / "data"
+    video_dir = bucket_dir / "video"
+    data_dir.mkdir(parents=True, exist_ok=True)
+    video_dir.mkdir(parents=True, exist_ok=True)
+
+    src_hdf5 = base_dir / "data" / f"episode{ep_num}.hdf5"
+    src_mp4 = base_dir / "video" / f"episode{ep_num}.mp4"
+    dst_hdf5 = data_dir / f"episode{ep_num}.hdf5"
+    dst_mp4 = video_dir / f"episode{ep_num}.mp4"
+
+    if src_hdf5.exists():
+        shutil.move(str(src_hdf5), str(dst_hdf5))
+    if src_mp4.exists():
+        shutil.move(str(src_mp4), str(dst_mp4))
+
+    return {
+        "bucket": bucket,
+        "hdf5_relpath": f"{bucket}/data/episode{ep_num}.hdf5",
+        "video_relpath": f"{bucket}/video/episode{ep_num}.mp4",
+    }
+
+
 def run_rollout(env, task_name, base_config, seed, dr_overrides, save_path, ep_num):
     """Run one expert curobo rollout on the SAME scene (same seed -> same poses)
     and report whether it solved the task. A video of the attempt is written to
     <save_path>/video/episode{ep_num}.mp4 via the save_data + merge machinery.
 
-    Returns: success (bool). A planning/execution failure or any exception counts
-    as a failed rollout (success=False), which is exactly what we want to measure.
+    Returns a dict containing the success flag and relative artifact paths. A
+    planning/execution failure or any exception counts as a failed rollout,
+    which is exactly what we want to measure.
     """
     success = False
+    artifact_info = None
     try:
         env.setup_demo(**build_cfg(task_name, base_config, seed, dr_overrides,
                                    rollout=True, ep_num=ep_num, save_path=str(save_path)))
+        # Capture the initial state so early planning failures still leave behind
+        # a minimal HDF5/MP4 artifact in success/ or fail/.
+        if getattr(env, "save_data", False) and getattr(env, "FRAME_IDX", 0) == 0:
+            env._take_picture()
         env.play_once()
-        success = bool(getattr(env, "plan_success", False) and env.check_success())
+        plan_ok = bool(getattr(env, "plan_success", False))
+        check_ok = bool(env.check_success())
+        if os.environ.get("ROBOTWIN_LOG_MOVE", "") == "1":
+            print(f"    [rollout seed {seed} ep{ep_num}] plan_success={plan_ok} check_success={check_ok}")
+        success = plan_ok and check_ok
     except Exception as e:
         print(f"    [rollout seed {seed} ep{ep_num}] failed ({type(e).__name__}: {e})")
         success = False
@@ -190,13 +227,13 @@ def run_rollout(env, task_name, base_config, seed, dr_overrides, save_path, ep_n
         if getattr(env, "FRAME_IDX", 0) > 0:
             env.merge_pkl_to_hdf5_video()
             env.remove_data_cache()
-            # keep only the mp4; drop the heavy per-frame hdf5 byproduct
-            hdf5 = Path(str(save_path)) / "data" / f"episode{ep_num}.hdf5"
-            if hdf5.exists():
-                hdf5.unlink()
+            artifact_info = _bucket_rollout_artifacts(save_path, ep_num, success)
     except Exception as e:
         print(f"    [rollout seed {seed} ep{ep_num}] video merge failed ({type(e).__name__}: {e})")
-    return success
+    return {
+        "success": bool(success),
+        "artifact_info": artifact_info,
+    }
 
 
 def save_overlay(env, mask, out_path, header):
@@ -336,6 +373,9 @@ def analyze(out_dir, bins, selectable_threshold, group_key="density",
     import matplotlib.pyplot as plt
 
     recs = load_records(out_dir)
+    if not recs:
+        print(f"no records found in {out_dir}; skipping analysis plots")
+        return
     # Keep ALL records. Pose drift (clutter nudging the target during settling) can
     # push visible_fraction above 1 against the clean-build denominator; we clamp to
     # [0, 1] rather than dropping, so genuinely occluded/hidden scenes (the whole
@@ -584,11 +624,14 @@ def analyze_rollout(out_dir, bins, selectable_threshold, **analyze_kwargs):
     (2) the same distribution over successful rollouts only (success_only/), and
     (3) the pooled P(success | bucket)."""
     out_dir = Path(out_dir)
+    recs = load_records(out_dir)
+    if not recs:
+        print(f"no rollout records found in {out_dir}; skipping rollout analysis")
+        return
     # (1) standard distribution, all records (the "same data")
     analyze(out_dir, bins, selectable_threshold, **analyze_kwargs)
 
     # (2) distribution over successful rollouts only
-    recs = load_records(out_dir)
     succ = [r for r in recs if r.get("rollout_success")]
     succ_dir = out_dir / "success_only"
     succ_dir.mkdir(parents=True, exist_ok=True)
