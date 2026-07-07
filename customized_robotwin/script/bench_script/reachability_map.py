@@ -12,9 +12,13 @@ This tells you where a SUBGOAL may legally sit (a valid collision-free EE pose),
 NOT whether a path exists between two cells -- but a chain of nearby reachable
 cells from behind the box to the pad is what trajopt can actually connect.
 
+The milk-box occluder is added to the collision world by default; pass --no-occluder
+to map reachability on the bare (table-only) world instead.
+
 USAGE (from the benchmark folder, env sourced + ROBOTWIN_BENCH_TASK=bench):
     python reachability_map.py --seed 1 --offset 0.2 --res 0.02
     python reachability_map.py --arms right --z 0.90
+    python reachability_map.py --no-occluder            # bare table, no milk box
 
 NOTE: reachability is orientation-specific. By default we use the target's own
 horizontal side-grasp orientation (per arm). Pass --topdown for a top-down quat.
@@ -102,14 +106,16 @@ def _solve_grid(robot, planner, ik, arm_tag, gp_world, chunk=256):
 # ----------------------------------------------------------------------------- run
 def run(args):
     env = make_occluder_task()()
-    env.spawn_occluder = True
+    env.spawn_occluder = args.occluder     # --no-occluder -> empty (table-only) collision world
     env.occluder_offset = args.offset
     env.setup_demo(**build_cfg("put_mouse_on_pad", args.base_config, args.seed, DR_CLEAN))
 
-    box_p = np.array(env.occluder.get_pose().p)
+    # box_p is None when the occluder is disabled; every occluder-specific step below guards on it
+    box_p = np.array(env.occluder.get_pose().p) if getattr(env, "occluder", None) is not None else None
     tgt_p = np.array(env.target_obj.get_pose().p)
     pad_xy = np.array(PAD_XY)
-    print(f"box=({box_p[0]:.3f},{box_p[1]:.3f})  target=({tgt_p[0]:.3f},{tgt_p[1]:.3f})  pad={pad_xy}")
+    box_txt = f"box=({box_p[0]:.3f},{box_p[1]:.3f})  " if box_p is not None else "box=OFF  "
+    print(f"{box_txt}target=({tgt_p[0]:.3f},{tgt_p[1]:.3f})  pad={pad_xy}")
 
     arms = {"left": "left", "right": "right"} if args.arms == "both" else {args.arms: args.arms}
 
@@ -143,9 +149,10 @@ def run(args):
         if grasp_pose is not None:
             chk = _solve_grid(env.robot, planner, ik, name, np.array([grasp_pose]), chunk=args.chunk)
             print(f"[{name}] self-check grasp pose reachable = {bool(chk[0])}  (expect True)")
-        inbox = np.array([[box_p[0], box_p[1], z, *grasp_q]])
-        chk2 = _solve_grid(env.robot, planner, ik, name, inbox, chunk=args.chunk)
-        print(f"[{name}] self-check box-centre reachable = {bool(chk2[0])}  (expect False)")
+        if box_p is not None:      # box-centre should be blocked; meaningless with no occluder
+            inbox = np.array([[box_p[0], box_p[1], z, *grasp_q]])
+            chk2 = _solve_grid(env.robot, planner, ik, name, inbox, chunk=args.chunk)
+            print(f"[{name}] self-check box-centre reachable = {bool(chk2[0])}  (expect False)")
 
         succ = _solve_grid(env.robot, planner, ik, name, gp, chunk=args.chunk).reshape(XX.shape)
         per_arm[name] = succ
@@ -165,20 +172,23 @@ def _plot(XX, YY, reach_any, per_arm, box_p, tgt_p, pad_xy, z, args):
     fig, ax = plt.subplots(figsize=(8, 7))
     extent = [XX.min(), XX.max(), YY.min(), YY.max()]
     ax.imshow(reach_any, origin="lower", extent=extent, cmap="Greens", alpha=0.8, aspect="equal")
-    # box footprint (approx square of half-diagonal OCC_HALF_FOOTPRINT)
-    h = OCC_HALF_FOOTPRINT
-    ax.add_patch(plt.Rectangle((box_p[0] - h, box_p[1] - h), 2 * h, 2 * h,
-                               fill=False, edgecolor="red", lw=2, label="occluder"))
+    # box footprint (approx square of half-diagonal OCC_HALF_FOOTPRINT); skipped when off
+    if box_p is not None:
+        h = OCC_HALF_FOOTPRINT
+        ax.add_patch(plt.Rectangle((box_p[0] - h, box_p[1] - h), 2 * h, 2 * h,
+                                   fill=False, edgecolor="red", lw=2, label="occluder"))
     ax.plot(tgt_p[0], tgt_p[1], "b*", ms=16, label="target")
     ax.plot(pad_xy[0], pad_xy[1], "ms", ms=12, label="pad")
     ax.set_xlabel("x (m)"); ax.set_ylabel("y (m)")
     ax.set_title(f"Collision-free reachability @ z={z:.2f}m, arms={args.arms}"
-                 f"{' (top-down)' if args.topdown else ' (side-grasp quat)'}\n"
+                 f"{' (top-down)' if args.topdown else ' (side-grasp quat)'}"
+                 f"  |  occluder {'ON' if box_p is not None else 'OFF'}\n"
                  f"green = reachable+collision-free (curobo IK)")
     ax.legend(loc="upper right")
     out = Path(args.out_dir); out.mkdir(parents=True, exist_ok=True)
     tag = "topdown" if args.topdown else "sidegrasp"
-    p = out / f"reach_seed{args.seed}_off{args.offset}_z{z:.2f}_{args.arms}_{tag}.png"
+    occ = "occ" if box_p is not None else "noocc"
+    p = out / f"reach_seed{args.seed}_off{args.offset}_z{z:.2f}_{args.arms}_{tag}_{occ}.png"
     fig.tight_layout(); fig.savefig(p, dpi=130)
     print(f"saved {p}")
 
@@ -189,6 +199,10 @@ def main():
                     help="bench_task_config/<name>.yml (same scene config as the occluder experiment)")
     ap.add_argument("--seed", type=int, default=1)
     ap.add_argument("--offset", type=float, default=0.2, help="occluder offset in front of target (m)")
+    ap.add_argument("--no-occluder", dest="occluder", action="store_false",
+                    help="do NOT add the milk-box occluder -> reachability on the bare (table-only) "
+                         "collision world. By default the occluder IS spawned.")
+    ap.set_defaults(occluder=True)
     ap.add_argument("--arms", choices=["both", "left", "right"], default="both")
     ap.add_argument("--z", type=float, default=0.90, help="EE height for the grid (m)")
     ap.add_argument("--topdown", action="store_true", help="use a top-down quat instead of the side grasp")
