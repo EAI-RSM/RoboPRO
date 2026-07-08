@@ -1,15 +1,12 @@
 # ============================================================================
 # mmz_template.yml — EXAMPLE grounding data-gen config (copy me, don't run me)
 #
-# Purpose: one working reference showing every knob the data-gen branch adds.
-# Copy → rename → tune episode_num / obstacle_density / the [LABEL] knobs to
-# your own labeling scheme. Full context: DATA_GEN_HANDOFF.md at repo root.
+# Purpose: one working reference for collecting grounding data (per-object
+# masks + depth + role sidecar). Copy → rename → tune episode_num /
+# obstacle_density. Full context: DATA_GEN_HANDOFF.md at repo root.
 #
 # Run (from customized_robotwin/, env `robopro`, ROBOTWIN_BENCH_TASK=bench):
 #   bash collect_data.sh <task_name> <this_config_name> <gpu_id>
-#
-# Every [MMZ] knob is ADDITIVE and DEFAULT-PRESERVING: leave it out of a
-# config and the stock RoboPRO behavior applies.
 # ============================================================================
 
 render_freq: 0
@@ -57,24 +54,8 @@ clear_cache_freq: 1
 collect_data: true
 eval_video_log: true
 
-# --- collision / label layer -------------------------------------------------
-enable_collision_metrics: true      # measure collisions during rollout (get_collision_metrics)
-
-planner_exclude_obstacles: false    # [MMZ][LABEL] planner blindness, DECOUPLED from metrics.
-                                    #   false = CuRobo plans AROUND clutter (normal expert)
-                                    #   true  = planner can't see clutter → smooth path may hit it
-                                    #   absent = legacy coupling (blind iff enable_collision_metrics)
-
-replan_on_collect: false            # [MMZ][LABEL] true = re-plan at collection time instead of
-                                    #   replaying the seed-search trajectory (required for blind
-                                    #   runs — cached trajectories are the AVOIDING paths)
-
-seed_require_collision_free: true   # [MMZ][LABEL] seed search accepts only task-success AND
-                                    #   zero-collision seeds → exact episode_num of "pure S".
-                                    #   false/absent = stock acceptance (task success only)
-
-keep_labels: [success]              # [MMZ][LABEL] post-episode filter on the MEASURED outcome:
-                                    #   success | success_with_accident | crashed_and_failed |
-                                    #   failed_no_accident   (= 2x2 task-success x collision)
-                                    #   Episodes with other labels are deleted (audit trail stays
-                                    #   in scene_info.json). Absent = legacy keep-success rule.
+# Stock collision-metrics switch. NOTE the stock coupling: when true, the CuRobo
+# planner is also made BLIND to clutter obstacles (eval behavior). The labeling /
+# collision-interpretation layer that will sit on top of this is being redesigned —
+# see DATA_GEN_HANDOFF.md §3.
+enable_collision_metrics: false

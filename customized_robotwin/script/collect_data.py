@@ -14,7 +14,6 @@ from envs import *
 import yaml
 import importlib
 import json
-import h5py
 import traceback
 import os
 import time
@@ -126,25 +125,6 @@ def _banner(text, char="─", width=74):
     print(f"\n\033[96m{line}\n{text}\n{line}\033[0m")
 
 
-def _to_jsonable(x):
-    # numpy-safe conversion for scene_info.json payloads (collision metrics etc.)
-    if isinstance(x, dict):
-        return {str(k): _to_jsonable(v) for k, v in x.items()}
-    if isinstance(x, (list, tuple, set)):
-        return [_to_jsonable(v) for v in x]
-    if hasattr(x, "tolist"):
-        try:
-            return x.tolist()
-        except Exception:
-            return str(x)
-    if hasattr(x, "item") and callable(getattr(x, "item")):
-        try:
-            return x.item()
-        except Exception:
-            return str(x)
-    return x
-
-
 def run(TASK_ENV, args):
     epid, suc_num, fail_num, seed_list = 0, 0, 0, []
 
@@ -184,25 +164,13 @@ def run(TASK_ENV, args):
                     TASK_ENV._maybe_apply_language_perturbation()
                 TASK_ENV.play_once()
 
-                accept = TASK_ENV.plan_success and TASK_ENV.check_success()
-                cf_note = ""
-                if accept and args.get("seed_require_collision_free", False):
-                    # pure-S seed acceptance: bank only collision-free successes so
-                    # the kept positives hit episode_num exactly (requires
-                    # enable_collision_metrics: true)
-                    try:
-                        if bool(TASK_ENV.get_collision_metrics().get("is_collision", False)):
-                            accept = False
-                            cf_note = " — task ok but COLLIDED (pure-S required)"
-                    except Exception as e:
-                        print(f"seed collision check unavailable: {e}")
-                if accept:
+                if TASK_ENV.plan_success and TASK_ENV.check_success():
                     print(f"simulate data episode {suc_num} success! (seed = {epid})")
                     seed_list.append(epid)
                     TASK_ENV.save_traj_data(suc_num)
                     suc_num += 1
                 else:
-                    print(f"simulate data episode {suc_num} fail! (seed = {epid}){cf_note}")
+                    print(f"simulate data episode {suc_num} fail! (seed = {epid})")
                     fail_num += 1
                     if debug_stuck:
                         reason = f"plan_success={TASK_ENV.plan_success} check_success={TASK_ENV.check_success()} seed={epid}"
@@ -266,11 +234,7 @@ def run(TASK_ENV, args):
     if args["collect_data"]:
         print("\033[93m" + "[Start Data Collection]" + "\033[0m")
 
-        # replan_on_collect: plan fresh at collection time instead of replaying the
-        # seed-phase trajectories (negative samples: same seeds, planner re-plans
-        # while blind to obstacles)
-        replan = bool(args.get("replan_on_collect", False))
-        args["need_plan"] = replan
+        args["need_plan"] = False
         args["render_freq"] = 0
         args["save_data"] = True
 
@@ -285,24 +249,24 @@ def run(TASK_ENV, args):
         while exist_hdf5(st_idx):
             st_idx += 1
 
-        outcome_counts, deleted_num = {}, 0
+        attempted_num, deleted_num, error_num = 0, 0, 0
 
         for episode_idx in range(st_idx, args["episode_num"]):
             if exist_hdf5(episode_idx):
                 continue
             _banner(f"COLLECT episode {episode_idx} · seed {seed_list[episode_idx]} · "
                     f"{args['task_name']} / {args['task_config']}")
+            attempted_num += 1
 
             try:
                 TASK_ENV.setup_demo(now_ep_num=episode_idx, seed=seed_list[episode_idx], **args)
                 if hasattr(TASK_ENV, "_maybe_apply_language_perturbation"):
                     TASK_ENV._maybe_apply_language_perturbation()
 
-                if not replan:
-                    traj_data = TASK_ENV.load_tran_data(episode_idx)
-                    args["left_joint_path"] = traj_data["left_joint_path"]
-                    args["right_joint_path"] = traj_data["right_joint_path"]
-                    TASK_ENV.set_path_lst(args)
+                traj_data = TASK_ENV.load_tran_data(episode_idx)
+                args["left_joint_path"] = traj_data["left_joint_path"]
+                args["right_joint_path"] = traj_data["right_joint_path"]
+                TASK_ENV.set_path_lst(args)
 
                 info_file_path = os.path.join(args["save_path"], "scene_info.json")
 
@@ -323,48 +287,17 @@ def run(TASK_ENV, args):
                 if hasattr(TASK_ENV, "get_role_names"):
                     info["role_names"] = TASK_ENV.get_role_names()
 
-                # outcome label (2x2 grid: success x collision) — measured while the
-                # scene is still alive, never assumed
+                # measured while the scene is still alive (used for the keep decision
+                # below — the stock code re-queried after close_env)
                 success = bool(TASK_ENV.check_success())
-                metrics = None
-                if getattr(TASK_ENV, "enable_collision_metrics", False) and hasattr(TASK_ENV, "get_collision_metrics"):
-                    try:
-                        metrics = TASK_ENV.get_collision_metrics()
-                    except Exception as e:
-                        print(f"collision metrics unavailable: {e}")
-                if metrics is not None:
-                    collision = bool(metrics.get("is_collision", False))
-                    label_code = (1 if success and not collision else
-                                  2 if success and collision else
-                                  3 if collision else 4)
-                    label = {1: "success", 2: "success_with_accident",
-                             3: "crashed_and_failed", 4: "failed_no_accident"}[label_code]
-                else:
-                    collision, label_code = None, None
-                    label = "success" if success else "failed"
-                planner_blind = getattr(TASK_ENV, "planner_exclude_obstacles", None)
-                if planner_blind is None:
-                    planner_blind = bool(getattr(TASK_ENV, "enable_collision_metrics", False))
 
-                # only episodes with saved frames become an hdf5 (blind negative plans
-                # sometimes produce no executable motion -> nothing to save, not a crash)
+                # only episodes with saved frames become an hdf5 (a failed plan can
+                # produce no executable motion -> nothing to save, not a crash)
                 cache_dir = os.path.join(args["save_path"], ".cache", f"episode{episode_idx}")
                 has_frames = os.path.isdir(cache_dir) and any(
                     fn.endswith(".pkl") for fn in os.listdir(cache_dir))
 
-                info["outcome"] = {
-                    "success": success,
-                    "collision": collision,
-                    "label_code": label_code,
-                    "label": label,
-                    "plan_success": bool(getattr(TASK_ENV, "plan_success", True)),
-                    "planner_blind_to_obstacles": bool(planner_blind),
-                    "has_trajectory": bool(has_frames),
-                    "collision_metrics": _to_jsonable(metrics) if metrics is not None else None,
-                }
-                print(f"\033[96mepisode {episode_idx}: outcome = {label} "
-                      f"(success={success}, collision={collision}, frames={has_frames})\033[0m")
-                outcome_counts[label] = outcome_counts.get(label, 0) + 1
+                print(f"\033[96mepisode {episode_idx}: success={success} (frames={has_frames})\033[0m")
                 info_db[f"episode_{episode_idx}"] = info
 
                 with open(info_file_path, "w", encoding="utf-8") as file:
@@ -378,23 +311,10 @@ def run(TASK_ENV, args):
                           f"(planner produced no executable motion) — no hdf5 written\033[0m")
                 TASK_ENV.remove_data_cache()
 
-                # dataset filter: keep_labels (e.g. pos -> [success],
-                # neg -> [success_with_accident, crashed_and_failed]);
-                # absent -> legacy rule (keep successes / keep_failed keeps all)
-                keep_labels = args.get("keep_labels", None)
-                if keep_labels is not None:
-                    keep = has_frames and (label in keep_labels)
-                else:
-                    keep = success or bool(args.get("keep_failed_episodes", False))
-                info["outcome"]["kept"] = bool(keep)
-                with open(info_file_path, "w", encoding="utf-8") as file:
-                    json.dump(info_db, file, ensure_ascii=False, indent=4, default=str)
-
-                if not keep:
+                if not success:
                     deleted_num += 1
-                    why = (f"label '{label}' not in keep_labels {keep_labels}"
-                           if keep_labels is not None else "task failed")
-                    print(f"\033[91mepisode {episode_idx} filtered out ({why}) — removing files\033[0m")
+                    print(f"\033[91mCollect Error on episode {episode_idx} "
+                          f"(seed={seed_list[episode_idx]}), removing files\033[0m")
                     for ext_path in [
                         os.path.join(args["save_path"], "data", f"episode{episode_idx}.hdf5"),
                         os.path.join(args["save_path"], "video", f"episode{episode_idx}.mp4"),
@@ -402,43 +322,13 @@ def run(TASK_ENV, args):
                         if os.path.exists(ext_path):
                             os.remove(ext_path)
                     continue
-
-                # stamp the kept episode's HDF5 with its outcome -> self-contained
-                # for the training dataloader (no sidecar dependency)
-                hdf5_path = os.path.join(args["save_path"], "data", f"episode{episode_idx}.hdf5")
-                if has_frames and os.path.exists(hdf5_path):
-                    with h5py.File(hdf5_path, "a") as hf:
-                        hf.attrs["label"] = label
-                        hf.attrs["label_code"] = -1 if label_code is None else int(label_code)
-                        hf.attrs["success"] = bool(success)
-                        hf.attrs["collision"] = -1 if collision is None else int(collision)
-                        hf.attrs["planner_blind_to_obstacles"] = bool(planner_blind)
-                        hf.attrs["seed"] = int(seed_list[episode_idx])
-                        hf.attrs["task_name"] = str(args["task_name"])
-                        hf.attrs["task_config"] = str(args["task_config"])
-                        if metrics is not None:
-                            hf.attrs["collision_metrics_json"] = json.dumps(
-                                _to_jsonable(metrics), default=str)
             except Exception as e:
                 # one bad episode (CuRobo/mesh crash, missing frames, etc.) must NOT
                 # kill the whole run — log it, record it, clean up, move on.
                 print(f"\033[91m[episode {episode_idx}] crashed during collection "
                       f"(seed={seed_list[episode_idx]}): {e}\033[0m")
                 print(traceback.format_exc())
-                outcome_counts["error"] = outcome_counts.get("error", 0) + 1
-                try:
-                    info_file_path = os.path.join(args["save_path"], "scene_info.json")
-                    err_db = {}
-                    if os.path.exists(info_file_path):
-                        with open(info_file_path, "r", encoding="utf-8") as f:
-                            err_db = json.load(f)
-                    err_db[f"episode_{episode_idx}"] = {"outcome": {
-                        "label": "error", "error": str(e),
-                        "seed": int(seed_list[episode_idx])}}
-                    with open(info_file_path, "w", encoding="utf-8") as f:
-                        json.dump(err_db, f, ensure_ascii=False, indent=4, default=str)
-                except Exception:
-                    pass
+                error_num += 1
                 for _cleanup in (TASK_ENV.remove_data_cache, TASK_ENV.close_env):
                     try:
                         _cleanup()
@@ -459,15 +349,12 @@ def run(TASK_ENV, args):
         os.system(command)
 
         _banner(f"COLLECTION SUMMARY · {args['task_name']} / {args['task_config']}")
-        for name in ("success", "success_with_accident", "crashed_and_failed",
-                     "failed_no_accident", "failed", "error"):
-            if name in outcome_counts:
-                print(f"  {name:26s} {outcome_counts[name]}")
-        total = sum(outcome_counts.values())
-        print(f"  {'episodes attempted':26s} {total}")
-        print(f"  {'kept in dataset':26s} {total - deleted_num}")
+        print(f"  {'episodes attempted':26s} {attempted_num}")
+        print(f"  {'kept in dataset':26s} {attempted_num - deleted_num - error_num}")
         if deleted_num:
-            print(f"  {'filtered out (removed)':26s} {deleted_num}")
+            print(f"  {'removed (task failed)':26s} {deleted_num}")
+        if error_num:
+            print(f"  {'errors (skipped)':26s} {error_num}")
 
 
 if __name__ == "__main__":

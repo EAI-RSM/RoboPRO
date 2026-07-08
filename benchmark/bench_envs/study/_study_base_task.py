@@ -83,9 +83,6 @@ class Study_base_task(Bench_base_task):
         self.eval_mode = kwags.get("eval_mode", False)
         self.sample_d = kwags.get("sample_d", "objects")
         self.enable_collision_metrics = kwags.get("enable_collision_metrics", False)
-        # None -> legacy behavior (planner blind iff metrics on); explicit true/false
-        # decouples planner obstacle-awareness from metric recording (negative samples)
-        self.planner_exclude_obstacles = kwags.get("planner_exclude_obstacles", None)
         self.scene_objs = []
         self.scene_obj_info = []
 
@@ -182,14 +179,11 @@ class Study_base_task(Bench_base_task):
                 f'Objects is unstable in seed({kwags.get("seed", 0)}), unstable objects: {", ".join(unstable_list)}')
             # print(f'Objects is unstable in seed({kwags.get("seed", 0)}), unstable objects: {", ".join(unstable_list)}')
 
-        exclude_obs = self.planner_exclude_obstacles
-        if exclude_obs is None:
-            exclude_obs = self.enable_collision_metrics  # legacy coupling
-        if not exclude_obs:
+        if not self.enable_collision_metrics:
             self.update_world()
             print(f"\033[93m{self.task_name} curobo planner consider obstacles\033[0m")
         else:
-            self.update_world(exclude_obstacles=True)  # planner blind to clutter (eval / negative samples)
+            self.update_world(exclude_obstacles=True)  # skip clutter in eval/collision-metrics mode
             print(f"\033[38;5;208m{self.task_name} curobo planner skips clutter obstacles\033[0m")
 
         if self.eval_mode:
