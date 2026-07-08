@@ -155,6 +155,11 @@ def make_occluder_task():
         # Reject a scene when the target bottle's long axis tilts more than this from vertical
         # (see check_stable). Upright ~0 deg; a bottle that toppled during settling ~90 deg.
         TARGET_MAX_TILT_DEG = 25.0
+        # Same uprightness gate for the milk-box occluder: a box that topples during settling
+        # comes to REST (so the base motion-stability check reads it as "stable") but no longer
+        # occludes anything -> a garbage scene. The occluder's model-local up axis is +y, same
+        # as the bottle, so _occluder_tilt_deg reuses the exact target-tilt math.
+        OCCLUDER_MAX_TILT_DEG = 25.0
         # Which expert planner play_once dispatches to:
         #   "subgoal"      -> _play_once_subgoal (this file's forward/backward subgoal author
         #                     + viz/stability machinery; the default).
@@ -165,6 +170,11 @@ def make_occluder_task():
         PLAN_ALGO = "subgoal"
 
         def load_actors(self):
+            # env is REUSED across builds (clean / no-occluder / occluder), so clear any
+            # occluder from a previous setup_demo up front. Otherwise a stale self.occluder
+            # leaks into the next build -- e.g. check_stable's _occluder_tilt_deg would read a
+            # toppled box from the prior scene and wrongly reject a clean/no-occluder build.
+            self.occluder = None
             # target: random within the upper-third band (varies per seed -> distribution)
             target_pose = rand_pose(xlim=list(self.target_xlim), ylim=list(self.target_ylim),
                                     qpos=[0.5, 0.5, 0.5, 0.5], rotate_rand=True, rotate_lim=[0, 3.14, 0])
@@ -220,19 +230,46 @@ def make_occluder_task():
             up = float(np.clip(R[2, 1], -1.0, 1.0))       # world-z component of the local +y axis
             return float(np.degrees(np.arccos(up)))
 
+        def _occluder_tilt_deg(self):
+            """Tilt (deg) of the milk-box occluder's model-local +y axis from world +z --
+            same math as _target_tilt_deg (the occluder's up axis is also local +y). ~0 =
+            upright, ~90 = toppled onto its side. None if no occluder in the scene."""
+            occ = getattr(self, "occluder", None)
+            if occ is None:
+                return None
+            R = t3d.quaternions.quat2mat(np.array(occ.get_pose().q))
+            up = float(np.clip(R[2, 1], -1.0, 1.0))
+            return float(np.degrees(np.arccos(up)))
+
         def check_stable(self):
-            """Stock settle + motion-stability check, PLUS an uprightness gate on the target.
-            The base check only rejects actors still MOVING at the end, so a bottle that fell
-            and came to rest reads as 'stable'. We additionally reject a target tilted past
-            TARGET_MAX_TILT_DEG -> setup_demo raises UnStableError -> the scene is discarded."""
+            """Stock settle + motion-stability check, PLUS an uprightness gate on the target
+            AND (when present) the occluder. The base check only rejects actors still MOVING at
+            the end, so a bottle/box that fell and came to rest reads as 'stable'. We additionally
+            reject a target tilted past TARGET_MAX_TILT_DEG or an occluder tilted past
+            OCCLUDER_MAX_TILT_DEG -> setup_demo raises UnStableError -> the scene is discarded
+            (and re-drawn, so an unstable milk box no longer yields a bogus non-occluding scene)."""
             is_stable, unstable_list = super().check_stable()
             tilt = self._target_tilt_deg()
             if tilt is not None and tilt > self.TARGET_MAX_TILT_DEG:
                 is_stable = False
                 unstable_list.append(f"{self.target_obj.get_name()}(tilted {tilt:.0f}deg)")
+            occ_tilt = self._occluder_tilt_deg()
+            if occ_tilt is not None and occ_tilt > self.OCCLUDER_MAX_TILT_DEG:
+                is_stable = False
+                unstable_list.append(f"{self.occluder.get_name()}(occluder tilted {occ_tilt:.0f}deg)")
             return is_stable, unstable_list
 
         def play_once(self):
+            # The bench config sets enable_collision_metrics=True, so setup_demo left
+            # CuRobo's world built with update_world(exclude_obstacles=True) -- which drops
+            # EVERY is_obstacle=True entry, i.e. all the procedural table clutter from
+            # get_cluttered_surfaces (only the occluder, deliberately left unflagged in
+            # load_actors, survived). For this analysis we DO want curobo to plan around the
+            # clutter, so reload the full obstacle world before planning (the same thing the
+            # eval client does in collect_rollout_client). check_collisions metric tracking is
+            # physics-based and independent of the curobo world, so this doesn't affect it,
+            # and the analysis only reads check_success. Affects BOTH planners below.
+            self.update_world()
             # Dispatch to the selected expert planner (see PLAN_ALGO / --plan-algo). Both
             # share load_actors (identical scene), so only the plan differs.
             if self.PLAN_ALGO == "reachability":
@@ -1224,14 +1261,21 @@ def run(args):
             pass
 
     with open(jsonl_path, "w") as fout:
-        # Draw seeds until we have args.num_seeds STABLE, usable clean scenes. A seed whose
-        # clean build fails or is rejected (e.g. a toppled bottle -> UnStableError from
-        # check_stable) is replaced by the next seed, so the run always yields num_seeds good
-        # scenes instead of silently doing fewer. Seeds stay contiguous from seed_start apart
-        # from the rejected ones, which are skipped entirely (never rolled out).
+        # Draw seeds until we have args.num_seeds FULLY-USABLE seeds -> num_seeds complete
+        # trajectory sets. "Fully usable" now means EVERY build the seed needs succeeds and is
+        # stable: the clean denominator build, AND every (offset x clutter_density) measurement
+        # build (target upright, occluder upright per check_stable, occluder clear of the pad).
+        # If ANY of those is rejected (UnStableError from a toppled bottle/milk box, a
+        # too-close-to-pad occluder, or any build error), the WHOLE seed is discarded and the
+        # next seed is drawn in its place -- nothing partial is written and produced is not
+        # incremented. So `--num-seeds N` always yields N seeds, each with the full grid of
+        # (offset, density) trajectories rolled out (== N trajectories for a single offset+
+        # density run), never fewer with silent holes. Two passes per seed: (1) build+measure
+        # + stability gate, buffering results; (2) only if the whole seed passed, run rollouts,
+        # plot, and commit records.
         produced = 0
         draw = args.seed_start          # incrementing seed to draw from (rejected ones skipped)
-        max_draws = args.num_seeds * 10 + 50   # safety cap: don't loop forever if builds keep failing
+        max_draws = args.num_seeds * 20 + 50   # safety cap: don't loop forever if builds keep failing
         while produced < args.num_seeds and (draw - args.seed_start) < max_draws:
             seed = draw
             draw += 1
@@ -1255,22 +1299,28 @@ def run(args):
             if full_px <= 0:
                 print(f"[seed {seed}] full_target_px=0 on clean scene; drawing another seed.")
                 continue
-            produced += 1
 
+            # ---- Pass 1: build + measure every (offset, density); gate stability ----
+            seed_items = []       # buffered per-build results, committed only if the seed passes
+            seed_ok = True
             for off in offsets:
+                if not seed_ok:
+                    break
                 # per-build coin flip: drop the occluder with prob no_occluder_prob
                 # (keyed on seed+offset so the decision is shared across densities)
                 show = bool(np.random.default_rng(int(seed) * 1000 + int(round(off * 100))).random()
                             >= args.no_occluder_prob)
                 # Reject scenes where the occluder (at target_x, target_y - off) would land
                 # too close to / on the destination pad, blocking the target's placement.
+                # This rejects the whole seed (redraw) so the trajectory count is still met.
                 if show:
                     occ_xy = np.array([clean_pose[0], clean_pose[1] - off])
                     pad_dist = float(np.linalg.norm(occ_xy - np.array(PAD_XY)))
                     if pad_dist < OCC_PAD_MIN_DIST:
                         print(f"[seed {seed}] occluder@off={off} is {pad_dist:.3f}m from pad "
-                              f"(< {OCC_PAD_MIN_DIST:.3f}m); rejecting this build.")
-                        continue
+                              f"(< {OCC_PAD_MIN_DIST:.3f}m); rejecting seed, drawing another.")
+                        seed_ok = False
+                        break
                 env.spawn_occluder = show
                 env.occluder_offset = off
                 for cd in clutter_densities:
@@ -1295,9 +1345,13 @@ def run(args):
                                 f"frac={res['visible_fraction']:.3f} {res['bucket']} pose_match={pose_ok}",
                             )
                     except Exception as e:
-                        print(f"[seed {seed} off{off:.2f} cd{cd}] build failed ({type(e).__name__}: {e}); skipping")
+                        # A toppled bottle/milk box (check_stable -> UnStableError) or any build
+                        # error rejects the ENTIRE seed so we redraw and still hit num_seeds.
+                        print(f"[seed {seed} off{off:.2f} cd{cd}] build failed/unstable "
+                              f"({type(e).__name__}: {e}); rejecting seed, drawing another.")
                         safe_close()
-                        continue
+                        seed_ok = False
+                        break
                     safe_close()
 
                     rec = {"seed": int(seed), "offset": float(off), "full_px": int(full_px),
@@ -1308,39 +1362,52 @@ def run(args):
                            "clutter_density": int(cd),
                            # target spawn position (top-down), for the success/fail scatter
                            "target_x": float(tgt_p[0]), "target_y": float(tgt_p[1])}
-                    # --- expert curobo rollout on the same scene (video + success) ---
-                    # env.spawn_occluder / occluder_offset persist, so the rollout
-                    # build reproduces the same occluder placement as the measurement.
-                    if rollout:
-                        # run_rollout now returns {"success", "artifact_info"} (it moves the
-                        # video/hdf5 into a success/ or fail/ bucket subdir). Unpack the bool
-                        # -- binding the whole dict here made every rollout read as truthy
-                        # (always SUCCESS). Use artifact_info for the true, bucketed paths.
-                        rollout_result = run_rollout(env, "put_mouse_on_pad", args.base_config,
-                                                     seed, dr_measure(cd), out_dir, ep_counter)
-                        success = bool(rollout_result["success"])
-                        artifact = rollout_result.get("artifact_info") or {}
-                        rec["rollout_success"] = success
-                        # diagnostics: check_success is the label; plan_success shows when a
-                        # scene was physically solved despite a mid-plan failure (near-misses
-                        # have check_success False -> genuinely not placed / not released).
-                        rec["plan_success"] = rollout_result.get("plan_success")
-                        rec["check_success"] = rollout_result.get("check_success")
-                        rec["rollout_ep"] = ep_counter
-                        rec["rollout_video"] = artifact.get("video_relpath",
-                                                            f"video/episode{ep_counter}.mp4")
-                        if artifact.get("hdf5_relpath"):
-                            rec["rollout_hdf5"] = artifact["hdf5_relpath"]
-                        print(f"    seed {seed} off={off:.2f} cd={cd} {res['bucket']}: "
-                              f"rollout {'SUCCESS' if success else 'FAIL'} -> {rec['rollout_video']}")
-                        ep_counter += 1
-                    # per-seed top-down layout plot (success/fail from the rollout when on)
-                    if args.scene_plots:
-                        _plot_scene(seed, off, cd, box_p, tgt_p, np.array(PAD_XY),
-                                    rec.get("rollout_success") if rollout else None,
-                                    res, out_dir / "scene_plots")
-                    fout.write(json.dumps(rec) + "\n")
-                    fout.flush()
+                    seed_items.append({"off": off, "cd": cd, "show": show, "rec": rec,
+                                       "res": res, "box_p": box_p, "tgt_p": tgt_p})
+
+            if not seed_ok or not seed_items:
+                continue   # rejected (unstable / pad-blocked / produced nothing) -> next seed
+
+            # ---- Pass 2: seed accepted -> roll out, plot, and commit all its records ----
+            for item in seed_items:
+                off, cd, show, rec = item["off"], item["cd"], item["show"], item["rec"]
+                res, box_p, tgt_p = item["res"], item["box_p"], item["tgt_p"]
+                # --- expert curobo rollout on the same scene (video + success) ---
+                # Re-assert spawn_occluder / occluder_offset so run_rollout's own build
+                # reproduces this item's occluder placement (env is shared across items).
+                if rollout:
+                    env.spawn_occluder = show
+                    env.occluder_offset = off
+                    # run_rollout now returns {"success", "artifact_info"} (it moves the
+                    # video/hdf5 into a success/ or fail/ bucket subdir). Unpack the bool
+                    # -- binding the whole dict here made every rollout read as truthy
+                    # (always SUCCESS). Use artifact_info for the true, bucketed paths.
+                    rollout_result = run_rollout(env, "put_mouse_on_pad", args.base_config,
+                                                 seed, dr_measure(cd), out_dir, ep_counter)
+                    success = bool(rollout_result["success"])
+                    artifact = rollout_result.get("artifact_info") or {}
+                    rec["rollout_success"] = success
+                    # diagnostics: check_success is the label; plan_success shows when a
+                    # scene was physically solved despite a mid-plan failure (near-misses
+                    # have check_success False -> genuinely not placed / not released).
+                    rec["plan_success"] = rollout_result.get("plan_success")
+                    rec["check_success"] = rollout_result.get("check_success")
+                    rec["rollout_ep"] = ep_counter
+                    rec["rollout_video"] = artifact.get("video_relpath",
+                                                        f"video/episode{ep_counter}.mp4")
+                    if artifact.get("hdf5_relpath"):
+                        rec["rollout_hdf5"] = artifact["hdf5_relpath"]
+                    print(f"    seed {seed} off={off:.2f} cd={cd} {res['bucket']}: "
+                          f"rollout {'SUCCESS' if success else 'FAIL'} -> {rec['rollout_video']}")
+                    ep_counter += 1
+                # per-seed top-down layout plot (success/fail from the rollout when on)
+                if args.scene_plots:
+                    _plot_scene(seed, off, cd, box_p, tgt_p, np.array(PAD_XY),
+                                rec.get("rollout_success") if rollout else None,
+                                res, out_dir / "scene_plots")
+                fout.write(json.dumps(rec) + "\n")
+                fout.flush()
+            produced += 1
             print(f"[{produced}/{args.num_seeds}] seed {seed}: full_px={full_px} done")
 
         if produced < args.num_seeds:
