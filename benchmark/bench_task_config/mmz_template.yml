@@ -48,9 +48,11 @@ data_type:
   mesh_segmentation: false # sub-part ids, no name map — not needed
   actor_segmentation: true # [MMZ] per-object masks, saved as RAW uint16 ids (PNG in HDF5)
   actor_bbox: true        # [MMZ] exact per-frame 3D boxes from the physics engine
-                           #   (pose + world AABB per object, incl. occluded extents).
-                           #   Tiny (~KBs/ep) but CANNOT be derived after collection —
-                           #   camera-based boxes can (visualization/export.py).
+                           #   (pose + world AABB per rigid object, incl. occluded
+                           #   extents). Tiny (~KBs/ep) but CANNOT be derived after
+                           #   collection — recommended ON. Read back via
+                           #   `export.py --what bbox3d_exact`; camera-only (visible-
+                           #   surface) boxes are always derivable without it.
 pcd_down_sample_num: 1024
 pcd_crop: true
 save_path: ./data/dataset

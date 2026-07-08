@@ -21,32 +21,36 @@ python visualization/viz_episode.py <run_dir> 0 [--cam head_camera|cam1,cam2|all
 
 Role colors everywhere: target=red, destination=green, obstacles=orange, robot=blue.
 
-## Export derived data (point clouds / boxes / masks)
+## Export derived data (point clouds / boxes / masks / panel)
 
-Nothing below needs a collection-time flag — it's all computed from stored
-depth + camera matrices + masks:
+Everything except `bbox3d_exact` is computed from stored depth + camera matrices +
+masks. `bbox3d_exact` reads the physics boxes recorded at collection time
+(`data_type.actor_bbox: true`).
 
 ```bash
 python visualization/export.py <run_dir> 0 \
-    --what pcd,bbox2d,bbox3d,masks,overlay \   # or 'all'; default pcd,bbox2d,bbox3d
-    --cam head_camera \                        # comma list or 'all'
-    --frames first,mid,last                    # or 'all', 'every:5', '0,40,80'
+    --what pcd,bbox2d,bbox3d,bbox3d_exact,panel \  # or 'all'; this is also the default
+    --cam head_camera \                            # comma list or 'all'
+    --frames first,mid,last                        # or 'all', 'every:5', '0,40,80'
 ```
 
 Outputs under `<run_dir>/export/episode0/`:
 
 | flag | files | content |
 |---|---|---|
-| `pcd` | `pcd_<cam>_f<k>.ply` + `.npz` | dense labeled cloud; npz = `xyz` (float32, m, world), `rgb`, `seg_id` — training-ready |
+| `pcd` | `pcd_<cam>_f<k>.ply` + `.npz` | dense labeled cloud; npz = `xyz` (float32, m, world), `rgb`, `seg_id` — training-ready. `.ply` also carries exact-box wireframes when available. |
 | `bbox2d` | `bbox2d.json` | per frame, per object: pixel box + id + name + role |
-| `bbox3d` | `bbox3d.json` | per frame, per object: world-frame AABB of its *visible* surface |
+| `bbox3d` | `bbox3d.json` | per frame, per object: world AABB of its **visible surface** (what the camera sees) |
+| `bbox3d_exact` | `bbox3d_exact.json` | per frame, per object: **exact full-extent** world AABB + pose, from physx (incl. occluded parts). Needs `actor_bbox` in the HDF5. |
 | `masks` | `masks_*.png` (+`_color`) | raw uint16 id masks + colorized preview |
 | `overlay` | `overlay_*.png` | role-colored RGB |
-| always | `meta.json` | id→name map, role→ids, units, settings |
+| `panel` | `panel[_<cam>].png` | quick-look grid: rows=frames, cols = RGB \| depth \| seg \| role overlay \| 2D boxes |
+| always | `meta.json` | id→name map, role→ids, units, `actor_bbox_available` flag |
 
-**Exact (full-extent) 3D boxes** are the one thing that can't be derived afterwards —
-enable `data_type.actor_bbox: true` in the collection config and they're recorded
-into the HDF5 (`actor_bbox/{id,pose,aabb_min,aabb_max}`) by the physics engine.
+**`bbox3d` vs `bbox3d_exact`:** visible-surface boxes hug only the pixels a camera can
+see (a half-occluded mug → box around the visible half); exact boxes are the physics
+engine's true full-size box for every object, occluded or not. Exact needs
+`data_type.actor_bbox: true` at collection — it can't be reconstructed afterward.
 
 (Per-episode `.mp4`s are written automatically during collection, next to each run's
 data — no tool needed to view runs.)
