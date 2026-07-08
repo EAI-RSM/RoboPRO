@@ -528,6 +528,39 @@ class Base_Task(gym.Env):
         # pointcloud
         if self.data_type.get("pointcloud", False):
             pkl_dic["pointcloud"] = self.cameras.get_pcd(self.data_type.get("conbine", False))
+        # actor_bbox: exact per-frame 6-DoF pose + world AABB for every rigid scene
+        # object, straight from the physics engine. Unlike camera-derived boxes this
+        # includes occluded/out-of-view extents and CANNOT be reconstructed from
+        # rgb/depth after the fact — it must be recorded while the scene exists.
+        if self.data_type.get("actor_bbox", False):
+            ids, poses, mins, maxs = [], [], [], []
+            for actor in self.scene.get_all_actors():
+                pid = getattr(actor, "per_scene_id", None)
+                if pid is None:
+                    continue
+                aabb = None
+                for comp in getattr(actor, "components", []):
+                    fn = getattr(comp, "get_global_aabb_fast", None)
+                    if fn is not None:
+                        try:
+                            aabb = fn()
+                            break
+                        except Exception:
+                            pass
+                if aabb is None:
+                    continue
+                p = actor.get_pose()
+                ids.append(int(pid))
+                poses.append(np.concatenate([p.p, p.q]).astype(np.float32))
+                mins.append(np.asarray(aabb[0], np.float32))
+                maxs.append(np.asarray(aabb[1], np.float32))
+            if ids:
+                pkl_dic["actor_bbox"] = {
+                    "id": np.asarray(ids, np.int32),
+                    "pose": np.stack(poses),
+                    "aabb_min": np.stack(mins),
+                    "aabb_max": np.stack(maxs),
+                }
 
         self.now_obs = deepcopy(pkl_dic)
         return pkl_dic

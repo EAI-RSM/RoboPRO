@@ -1,13 +1,11 @@
 # Data-Gen Branch Handoff (`data-gen`)
 
-**From:** Mehrdad · **Date:** 2026-07-07
-**Base:** `origin/main_rep_learn`
 
 This branch adds a grounding **data-generation pipeline** on top of RoboPRO's
 `customized_robotwin/` collector: per-object masks + depth + role annotations in every
 episode, ready for large-scale collection.
 
-**Division of labor going forward:**
+**Going forward:**
 
 - ✅ **KEEP AS-IS (§2):** the perception/data plumbing — raw-id masks, ID→name/role maps,
   PNG compression, depth-based 3D lift, viz tools. Verified end-to-end; please build on
@@ -18,7 +16,7 @@ episode, ready for large-scale collection.
   was and where to find the full reference implementation in git history.
 - One commented example config remains: `benchmark/bench_task_config/mmz_template.yml`.
 
-Quick start for tools/collection commands: `mmz_tools/README.md`.
+Quick start for tools/collection commands: `visualization/README.md`.
 
 ---
 
@@ -27,10 +25,11 @@ Quick start for tools/collection commands: `mmz_tools/README.md`.
 | File | What changed |
 |---|---|
 | `customized_robotwin/envs/camera/camera.py` | segmentation returns **raw uint16 ids** (was palette-colorized RGB) |
-| `customized_robotwin/envs/_base_task.py` | + `get_actor_id_map()`, + `get_role_names()` |
+| `customized_robotwin/envs/_base_task.py` | + `get_actor_id_map()`, + `get_role_names()`; + optional `data_type.actor_bbox` recording (exact per-frame 3D boxes from physx) |
 | `customized_robotwin/envs/utils/pkl2hdf5.py` | + `seg_encoding()` — PNG-compresses uint16 masks into HDF5 |
 | `customized_robotwin/script/collect_data.py` | writes id-map/role sidecar into `scene_info.json`; organized per-episode output + end-of-run summary; per-episode crash guards (one bad episode no longer kills a run) |
-| `mmz_tools/` (inspect_hdf5, viz_episode, time_run, README) | standalone inspection/viz/timing tools |
+| `visualization/` (viz_episode, export, inspect_hdf5, README) | standalone inspect / viz / **on-demand export** (point clouds, 2D/3D boxes, masks, overlays) tools |
+| `customized_robotwin/time_run.sh` | timing helper (wall time → sec/episode → dataset projection) |
 | `benchmark/bench_task_config/mmz_template.yml` | single commented example config |
 
 Nothing outside these files is modified — the `benchmark/bench_envs/` scene classes and
@@ -77,22 +76,28 @@ Decode on read with any PNG decoder (`cv2.imdecode` → uint16).
   train/test distribution mismatch. Extra viewpoints are inspection-only.
 - `data_type.pointcloud` stays **off**: the stock cloud is head-cam-only, FPS-downsampled
   to 1024 points. Dense labeled clouds are instead **rebuilt from depth + stored
-  intrinsics/extrinsics** (that's also how the method itself lifts masks to 3D).
-  `viz_episode.py` shows the reference implementation, incl. 2D boxes (from masks) and
-  3D visible-surface AABBs (from masked depth points).
+  intrinsics/extrinsics** (that's also how the method itself lifts masks to 3D) —
+  on demand via `visualization/export.py`, or inside a dataloader (same math).
+- Derived data policy: point clouds, 2D boxes, visible-surface 3D boxes, masks-as-images,
+  and overlays are all **computable from the HDF5 after the fact** →
+  `visualization/export.py`, zero collection-time cost. The one thing that can't be
+  derived later, so it's a collection knob: `data_type.actor_bbox` (exact full-extent
+  3D boxes from the physics engine, incl. occluded parts; ~KBs/ep).
 
 ### 2.5 Collection robustness (`collect_data.py`)
 Per-episode try/except (a CuRobo/mesh crash is logged, cleaned up, and the run
 continues) + a no-frames guard (a plan that produces no executable motion yields no
 HDF5 instead of crashing the pkl→HDF5 merge). Generic safety — worth keeping under any
 labeling scheme. Also: per-episode banners + an end-of-run `COLLECTION SUMMARY`
-(`mmz_tools/time_run.sh` parses those summary lines).
+(`customized_robotwin/time_run.sh` parses those summary lines).
 
-### 2.6 Tools (`mmz_tools/`)
-`inspect_hdf5.py` (tree/shapes/attrs) · `viz_episode.py` (panel: RGB | depth | seg |
-role-overlay | 2D-boxes; + labeled .ply clouds + top-down; role colors target=red,
-dest=green, obstacle=orange, robot=blue) · `time_run.sh` (throughput → dataset
-projection). Standalone; no engine imports.
+### 2.6 Tools (`visualization/`)
+`inspect_hdf5.py` (HDF5 tree/shapes/attrs) · `viz_episode.py` (panel: RGB | depth |
+seg | role-overlay | 2D-boxes; + labeled .ply clouds + top-down; role colors
+target=red, dest=green, obstacle=orange, robot=blue) · `export.py` (on-demand:
+dense labeled point clouds as .ply/.npz, 2D boxes, visible-surface 3D boxes, mask
+images, overlays). Standalone; no engine imports.
+Timing helper: `customized_robotwin/time_run.sh`.
 
 ---
 
@@ -150,4 +155,4 @@ episodes, the metrics blob names **which objects were actually hit** — free ca
   anchor. Destination semantics for such tasks are still an open question.
 - Throughput anchor (1× RTX 4080, d10 clutter, put_cup_on_coaster): ≈ **82 s/kept
   episode** including seed-search rejects; seed replay without search ≈ 37 s/episode.
-  Episode ≈ 37 MB. `mmz_tools/time_run.sh` re-measures and projects.
+  Episode ≈ 37 MB. `customized_robotwin/time_run.sh` re-measures and projects.

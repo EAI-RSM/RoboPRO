@@ -91,6 +91,70 @@ def resolve_role(roles, key, id_map):
     return (names_to_ids([name], id_map, substring=True) if name else set()), "name"
 
 
+def load_sidecar(run_dir, ep):
+    """scene_info.json for one episode -> (ep_info, id_map, roles, robot_ids)."""
+    with open(os.path.join(run_dir, "scene_info.json")) as f:
+        ep_info = json.load(f).get(f"episode_{ep}", {})
+    id_map = {}
+    for k, v in ep_info.get("actor_id_map", {}).items():
+        id_map[int(k)] = ("robot" + v) if v.startswith("/") else v  # old data: robot art unnamed
+    roles = ep_info.get("role_names", {})
+    robot_ids = {i for i, n in id_map.items() if n.startswith("robot/")}
+    return ep_info, id_map, roles, robot_ids
+
+
+def compute_role_ids(ep_info, id_map, roles, robot_ids, verbose=True):
+    """target/destination/obstacle(-spawned-clutter) id sets for one episode."""
+    clutter_names = clutter_object_types(ep_info.get("cluttered_table_info"))
+    tgt_ids, tgt_how = resolve_role(roles, "target", id_map)
+    dst_ids, dst_how = resolve_role(roles, "destination", id_map)
+    role_ids = {
+        "target": tgt_ids,
+        "destination": dst_ids,
+        "obstacle": names_to_ids(clutter_names, id_map, substring=False),
+    }
+    if verbose:
+        print(f"target matched by {tgt_how}, destination by {dst_how} "
+              "(id = exact instance, name = fallback)")
+    role_ids["target"] -= robot_ids
+    role_ids["destination"] -= robot_ids
+    if not role_ids["target"]:
+        # tasks without a target_obj attr (e.g. kitchenl) still declare names via
+        # _get_target_object_names(); fall back to those
+        fallback = list(roles.get("target_object_names", []) or [])
+        role_ids["target"] = (names_to_ids(fallback, id_map, substring=True)
+                              - role_ids["destination"] - robot_ids)
+        if role_ids["target"] and verbose:
+            print(f"note: target ids taken from target_object_names fallback: {fallback}")
+    if not role_ids["destination"] and verbose:
+        print("note: no destination OBJECT resolved — this task's goal may be a pose/region "
+              "(e.g. 'next to X'), not an object. That's the semantics question for the manager.")
+    role_ids["obstacle"] -= role_ids["target"] | role_ids["destination"] | robot_ids
+    return role_ids, clutter_names
+
+
+def merge_env_ids(role_ids, id_map, robot_ids, seen_ids, split_env=False, verbose=True):
+    """Environment objects = known, visible, no category (furniture, appliances,
+    task extras). DEFAULT: an obstacle is an obstacle -> merged into the obstacle
+    class; split_env keeps them separate. Returns (env_ids, other_ids); mutates
+    role_ids['obstacle'] when merging."""
+    assigned = role_ids["target"] | role_ids["destination"] | role_ids["obstacle"] | robot_ids
+    env_ids = {i for i in seen_ids
+               if i in id_map and i not in assigned
+               and id_map[i].split("/")[-1] not in SCENE_NAMES
+               and not id_map[i].startswith("robot/")}
+    if split_env:
+        other_ids = env_ids
+    else:
+        role_ids["obstacle"] |= env_ids
+        other_ids = set()
+    if env_ids and verbose:
+        how = "separate (cyan)" if split_env else "merged into obstacle (orange)"
+        print(f"environment objects, {how}: "
+              + ", ".join(sorted({id_map[i] for i in env_ids})))
+    return env_ids, other_ids
+
+
 # ------------------------------------------------------------- rendering --
 
 def id_color(i):
@@ -249,7 +313,6 @@ def main():
 
     ep = args.episode
     h5_path = os.path.join(args.run_dir, "data", f"episode{ep}.hdf5")
-    info_path = os.path.join(args.run_dir, "scene_info.json")
     out_dir = os.path.join(args.run_dir, "viz", f"episode{ep}")
     os.makedirs(out_dir, exist_ok=True)
 
@@ -258,38 +321,8 @@ def main():
     print("═" * 74)
 
     # ---- sidecar: id map + roles -------------------------------------------
-    with open(info_path) as f:
-        ep_info = json.load(f).get(f"episode_{ep}", {})
-    id_map = {}
-    for k, v in ep_info.get("actor_id_map", {}).items():
-        id_map[int(k)] = ("robot" + v) if v.startswith("/") else v  # old data: robot art unnamed
-    roles = ep_info.get("role_names", {})
-    robot_ids = {i for i, n in id_map.items() if n.startswith("robot/")}
-    clutter_names = clutter_object_types(ep_info.get("cluttered_table_info"))
-
-    tgt_ids, tgt_how = resolve_role(roles, "target", id_map)
-    dst_ids, dst_how = resolve_role(roles, "destination", id_map)
-    role_ids = {
-        "target": tgt_ids,
-        "destination": dst_ids,
-        "obstacle": names_to_ids(clutter_names, id_map, substring=False),
-    }
-    print(f"target matched by {tgt_how}, destination by {dst_how} "
-          "(id = exact instance, name = fallback)")
-    role_ids["target"] -= robot_ids
-    role_ids["destination"] -= robot_ids
-    if not role_ids["target"]:
-        # tasks without a target_obj attr (e.g. kitchenl) still declare names via
-        # _get_target_object_names(); fall back to those
-        fallback = list(roles.get("target_object_names", []) or [])
-        role_ids["target"] = (names_to_ids(fallback, id_map, substring=True)
-                              - role_ids["destination"] - robot_ids)
-        if role_ids["target"]:
-            print(f"note: target ids taken from target_object_names fallback: {fallback}")
-    if not role_ids["destination"]:
-        print("note: no destination OBJECT resolved — this task's goal may be a pose/region "
-              "(e.g. 'next to X'), not an object. That's the semantics question for the manager.")
-    role_ids["obstacle"] -= role_ids["target"] | role_ids["destination"] | robot_ids
+    ep_info, id_map, roles, robot_ids = load_sidecar(args.run_dir, ep)
+    role_ids, clutter_names = compute_role_ids(ep_info, id_map, roles, robot_ids)
 
     print(f"actor_id_map: {len(id_map)} entries ({len(robot_ids)} robot links)")
     print(f"role_names from task code: {roles}")
@@ -341,24 +374,9 @@ def main():
     if unmatched:
         print(f"!! seg ids with NO name in actor_id_map: {unmatched}")
 
-    # environment objects = known, visible, no category (furniture, appliances,
-    # task extras). DEFAULT: an obstacle is an obstacle -> merge them into orange.
-    # --split-env keeps them as a separate cyan class instead.
-    assigned = role_ids["target"] | role_ids["destination"] | role_ids["obstacle"] | robot_ids
-    env_ids = {i for i in seen_ids
-               if i in id_map and i not in assigned
-               and id_map[i].split("/")[-1] not in SCENE_NAMES
-               and not id_map[i].startswith("robot/")}
     spawned_obstacle_ids = set(role_ids["obstacle"])
-    if args.split_env:
-        other_ids = env_ids
-    else:
-        role_ids["obstacle"] |= env_ids
-        other_ids = set()
-    if env_ids:
-        how = "separate (cyan)" if args.split_env else "merged into obstacle (orange)"
-        print(f"environment objects, {how}: "
-              + ", ".join(sorted({id_map[i] for i in env_ids})))
+    env_ids, other_ids = merge_env_ids(role_ids, id_map, robot_ids, seen_ids,
+                                       split_env=args.split_env)
 
     # ---- panels (one per camera) ---------------------------------------------
     for cam in cams:

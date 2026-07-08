@@ -2,9 +2,9 @@
 # time_run.sh — time one collect_data.sh run and project full-dataset generation time.
 #
 # Usage (from customized_robotwin/):
-#   bash ../mmz_tools/time_run.sh <task> <config> [gpu]
+#   bash time_run.sh <task> <config> [gpu]
 # Example:
-#   bash ../mmz_tools/time_run.sh put_cup_on_coaster mmz_template 1
+#   bash time_run.sh put_cup_on_coaster mmz_template 1
 #
 # Prints: wall time, episodes attempted vs kept, seconds per attempt / per kept,
 # and a projection for TARGET_EPISODES total kept episodes on 1/4/20 GPUs.
@@ -15,7 +15,7 @@ CONFIG="${2:?usage: time_run.sh <task> <config> [gpu]}"
 GPU="${3:-0}"
 
 # full-dataset target (kept episodes); override per call:
-#   TARGET_EPISODES=24000 bash ../mmz_tools/time_run.sh ...
+#   TARGET_EPISODES=24000 bash time_run.sh ...
 TARGET_EPISODES="${TARGET_EPISODES:-16000}"
 
 LOG="$(mktemp /tmp/mmz_time_XXXXXX.log)"

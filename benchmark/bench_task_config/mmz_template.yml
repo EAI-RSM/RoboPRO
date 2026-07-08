@@ -47,9 +47,13 @@ data_type:
   qpos: true
   mesh_segmentation: false # sub-part ids, no name map — not needed
   actor_segmentation: true # [MMZ] per-object masks, saved as RAW uint16 ids (PNG in HDF5)
+  actor_bbox: true        # [MMZ] exact per-frame 3D boxes from the physics engine
+                           #   (pose + world AABB per object, incl. occluded extents).
+                           #   Tiny (~KBs/ep) but CANNOT be derived after collection —
+                           #   camera-based boxes can (visualization/export.py).
 pcd_down_sample_num: 1024
 pcd_crop: true
-save_path: ./data/mmz_dataset
+save_path: ./data/dataset
 clear_cache_freq: 1
 collect_data: true
 eval_video_log: true
