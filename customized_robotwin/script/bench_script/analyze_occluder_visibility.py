@@ -1191,8 +1191,15 @@ def _plot_rollout_target_positions(out_dir):
     print(f"saved {p}")
 
 
+def algo_out_dir(args):
+    """effective_out_dir (with its _rollout suffix) plus a per-planner subfolder, so a
+    `subgoal` run and a `reachability` run of the same --out-dir land in
+    <out-dir>[_rollout]/subgoal and .../reachability instead of overwriting each other."""
+    return effective_out_dir(args) / getattr(args, "plan_algo", "subgoal")
+
+
 def run(args):
-    out_dir = effective_out_dir(args)
+    out_dir = algo_out_dir(args)
     out_dir.mkdir(parents=True, exist_ok=True)
     img_dir = out_dir / "images"
     if args.save_images:
@@ -1305,13 +1312,27 @@ def run(args):
                     # env.spawn_occluder / occluder_offset persist, so the rollout
                     # build reproduces the same occluder placement as the measurement.
                     if rollout:
-                        success = run_rollout(env, "put_mouse_on_pad", args.base_config, seed,
-                                              dr_measure(cd), out_dir, ep_counter)
-                        rec["rollout_success"] = bool(success)
+                        # run_rollout now returns {"success", "artifact_info"} (it moves the
+                        # video/hdf5 into a success/ or fail/ bucket subdir). Unpack the bool
+                        # -- binding the whole dict here made every rollout read as truthy
+                        # (always SUCCESS). Use artifact_info for the true, bucketed paths.
+                        rollout_result = run_rollout(env, "put_mouse_on_pad", args.base_config,
+                                                     seed, dr_measure(cd), out_dir, ep_counter)
+                        success = bool(rollout_result["success"])
+                        artifact = rollout_result.get("artifact_info") or {}
+                        rec["rollout_success"] = success
+                        # diagnostics: check_success is the label; plan_success shows when a
+                        # scene was physically solved despite a mid-plan failure (near-misses
+                        # have check_success False -> genuinely not placed / not released).
+                        rec["plan_success"] = rollout_result.get("plan_success")
+                        rec["check_success"] = rollout_result.get("check_success")
                         rec["rollout_ep"] = ep_counter
-                        rec["rollout_video"] = f"video/episode{ep_counter}.mp4"
+                        rec["rollout_video"] = artifact.get("video_relpath",
+                                                            f"video/episode{ep_counter}.mp4")
+                        if artifact.get("hdf5_relpath"):
+                            rec["rollout_hdf5"] = artifact["hdf5_relpath"]
                         print(f"    seed {seed} off={off:.2f} cd={cd} {res['bucket']}: "
-                              f"rollout {'SUCCESS' if success else 'FAIL'} -> episode{ep_counter}.mp4")
+                              f"rollout {'SUCCESS' if success else 'FAIL'} -> {rec['rollout_video']}")
                         ep_counter += 1
                     # per-seed top-down layout plot (success/fail from the rollout when on)
                     if args.scene_plots:
@@ -1364,7 +1385,7 @@ def main():
         run(args)
     group_label = {"offset": "occluder offset (m)",
                    "clutter_density": "table clutter density"}[args.group_by]
-    out_dir = effective_out_dir(args)
+    out_dir = algo_out_dir(args)
     analyze_kwargs = dict(group_key=args.group_by, group_label=group_label,
                           suptitle="Visibility with one milk-box occluder (countertop)",
                           bar_title=f"Bucket proportions vs {group_label}")
