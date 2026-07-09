@@ -30,6 +30,7 @@ USAGE (from the benchmark folder):
 import os
 import json
 import argparse
+from copy import deepcopy
 from pathlib import Path
 
 import numpy as np
@@ -85,6 +86,23 @@ PAD_BOTTLE_X_INSET = 0.05      # <-- TUNE ME: pad+bottle subgoals shifted this f
 # The subgoal planner above does not read any of these; they drive the candidate-search
 # algorithm ported from 35-occluder-spawn-hamid-A (see _select_pick_place_candidate).
 GRASP_CANDIDATE_LIMIT = 4
+# The pre_beside_box move (right after lift+attach_object+enable_table) was found
+# empirically to fail with MotionGenStatus.INVALID_START_STATE_WORLD_COLLISION in
+# 100% of its failures (5/5 in a 24-seed sweep) -- meaning the STARTING qpos for
+# that plan is already colliding with the just-re-enabled table, before any target
+# pose even matters. A 0.1m lift isn't always enough clearance for the held
+# object's true collision volume (voxelized via attach_object) to clear the table
+# once its collision is turned back on. Bumping the post-grasp lift height directly
+# targets this; must stay consistent across dry-run and real execution.
+# 0.15 (first attempt) reduced this failure 5/5 -> 4/24 seeds and raised the
+# occluder-present success rate to 5/16. Pushing further to 0.2 was WORSE on both
+# counts (4/16 successes, 6 pre_beside_box collisions) -- not monotonic, likely
+# because more lift shifts the arm into a different (sometimes worse) posture
+# rather than simply buying more clearance. Reverted to the better-validated 0.15;
+# some of the 0.2 regression is plausibly sampling noise (documented CuRobo
+# run-to-run nondeterminism) rather than a true causal effect, but 0.15 is the
+# only value with two consistent, positive data points.
+GRASP_LIFT_HEIGHT = 0.15
 SIDE_WAYPOINT_GAPS = (0.20, 0.24, 0.28)
 # A direct IK-reachability sweep (check_ik_batch diagnostic) showed the waypoint's
 # feasibility roughly DOUBLES at +0.15m above grasp height (64%) vs the +0.0/+0.06m
@@ -602,17 +620,16 @@ def make_occluder_task():
             cp_id = candidate_plan["contact_point_id"]
 
             if candidate_plan["grasp_waypoint"] is not None:
-                self.move(self.move_to_pose(arm_tag, candidate_plan["grasp_waypoint"]))
+                wp_trajectory = candidate_plan.get("grasp_waypoint_trajectory")
+                if wp_trajectory is not None:
+                    self._replay_planned_move(arm_tag, wp_trajectory)
+                else:
+                    self.move(self.move_to_pose(arm_tag, candidate_plan["grasp_waypoint"]))
                 checkpoint("waypoint_move")
-            self.grasp_actor_from_table_reach(
-                self.target_obj,
-                arm_tag=arm_tag,
-                pre_grasp_dis=0.1,
-                contact_point_id=cp_id,
-            )
+            self._grasp_via_cached_trajectories(arm_tag, candidate_plan)
             checkpoint("grasp")
 
-            self.move(self.move_by_displacement(arm_tag=arm_tag, z=0.1))
+            self.move(self.move_by_displacement(arm_tag=arm_tag, z=GRASP_LIFT_HEIGHT))
             checkpoint("lift")
             if self.PICKUP_ONLY:        # stop at the picked-up state (reachability probe)
                 return
@@ -654,7 +671,21 @@ def make_occluder_task():
             self.move(self.move_to_pose(arm_tag, mid_to_beside_box))
             checkpoint("placement:pre_beside_box")
 
+            prev_pose = None  # overwritten before use -- "beside_box" is always first
             for name, pose in candidate_plan["placement_subgoals"]:
+                if name == "lift_above_box":
+                    # Same large-jump shape as place_actor's pre_place_descent and the
+                    # arm-pose -> beside_box entry: beside_box (~grasp height, ~0.85m)
+                    # to lift_above_box (clearance_z, 1.05-1.25m) is another single big
+                    # vertical jump with no intermediate waypoint. Seeds 9/12 die here;
+                    # unlike seeds 11/19's beside_box failures (confirmed genuinely
+                    # unreachable at every geometry combo via pure-IK), lift_above_box's
+                    # pose IS pure-IK verified reachable by _pick_reachable_placement_
+                    # geometry -- so a failure here is the same path-smoothness problem,
+                    # not a dead zone. Apply the identical fix.
+                    mid_to_lift_above_box = self._verified_intermediate(arm_tag, prev_pose, pose)
+                    self.move(self.move_to_pose(arm_tag, mid_to_lift_above_box))
+                    checkpoint("placement:pre_lift_above_box")
                 if log_move and self.plan_success:
                     # Same diagnostic as place_actor below: is THIS subgoal reachable
                     # via pure collision-aware IK (object attached, live qpos), before
@@ -667,6 +698,7 @@ def make_occluder_task():
                     print(f"[placement:{name}] pure-IK reachability (attached, live qpos): {list(ik_ok)}")
                 self.move(self.move_to_pose(arm_tag, pose))
                 checkpoint(f"placement:{name}")
+                prev_pose = pose
             # place_actor lowers the object from the last subgoal onto the pad.
             # constrain="free": check_success is position-only, so alignment buys nothing
             # and was a likely IK_FAIL cause for a tall object held near its top.
@@ -721,7 +753,7 @@ def make_occluder_task():
                 move_poses = [a.target_pose for a in place_actions if a.action == "move"]
                 ik_ok = check_ik(move_poses)
                 print(f"[place_actor] pure-IK reachability (attached, live qpos): {list(ik_ok)}")
-            self.move((place_arm_tag, place_actions))
+            self._execute_actions_via_plan_and_replay(place_arm_tag, place_actions, retries=4)
             checkpoint("place_actor")
 
         def _blend_pose(self, pose_a, pose_b, t=0.5):
@@ -889,6 +921,115 @@ def make_occluder_task():
             q = t3d.quaternions.mat2quat(R)
             return list(p) + list(q)
 
+        def _replay_planned_move(self, arm_tag, cached_result):
+            """Execute an ALREADY-PLANNED trajectory (position/velocity arrays from a
+            prior plan_path call) directly via take_dense_action, skipping a fresh
+            plan_path call entirely. Mirrors left_move_to_pose/right_move_to_pose's
+            need_plan/joint_path bookkeeping but never re-plans.
+
+            Why this exists: CuRobo's trajopt has no uniqueness guarantee for a given
+            Cartesian target -- re-planning to the SAME pose independently (as
+            left_move_to_pose/right_move_to_pose normally do) can converge to a
+            genuinely different, equally-valid arm posture. Confirmed empirically
+            (qpos drift up to 1.47 rad between a dry-run-verified plan and a fresh
+            live re-plan to the identical waypoint pose), and that drift flips
+            downstream grasp reachability in ~50% of cases -- explaining most of the
+            grasp-stage failures seen despite the dry run having just verified a
+            working grasp. Replaying the exact verified trajectory removes the
+            divergence: the live qpos after this call is guaranteed to match what the
+            dry run assumed, since it's the same trajectory, not a new one."""
+            if not self.plan_success:
+                return
+            if cached_result is None or cached_result.get("status") != "Success":
+                self.plan_success = False
+                return
+            if str(arm_tag) == "left":
+                if self.need_plan:
+                    self.left_joint_path.append(deepcopy(cached_result))
+                else:
+                    cached_result = deepcopy(self.left_joint_path[self.left_cnt])
+                    self.left_cnt += 1
+                control_seq = {"left_arm": cached_result, "left_gripper": None, "right_arm": None, "right_gripper": None}
+            else:
+                if self.need_plan:
+                    self.right_joint_path.append(deepcopy(cached_result))
+                else:
+                    cached_result = deepcopy(self.right_joint_path[self.right_cnt])
+                    self.right_cnt += 1
+                control_seq = {"left_arm": None, "left_gripper": None, "right_arm": cached_result, "right_gripper": None}
+            self.take_dense_action(control_seq)
+
+        def _execute_actions_via_plan_and_replay(self, arm_tag, actions, retries=1):
+            """Plan every 'move' Action in the list upfront (chained through a
+            tracked virtual qpos, exactly like _plan_grasp_side), then replay each
+            via _replay_planned_move; non-move actions (gripper open/close) execute
+            normally through self.move. Extends the same plan-once-then-replay
+            pattern already applied to the waypoint and grasp moves to place_actor.
+            Unlike those, there's no separate earlier dry-run pass here (place_actor's
+            target poses are computed live, not pre-verified) -- so this doesn't
+            eliminate a proven duplicate-plan divergence the way it did there.
+
+            retries: place_actor's failures are 100% MotionGenStatus.FINETUNE_TRAJOPT_FAIL
+            (confirmed empirically) -- a marginal-feasibility trajopt-difficulty problem,
+            not a reachability one. We've directly observed the SAME setup succeed on
+            one run and fail on another (CuRobo's trajopt has internal randomized
+            seeding), so retrying a failed plan_func call with fresh internal seeding
+            has a real chance of finding a solution the first attempt missed. Each
+            retry re-attempts ONLY the failed action, not the whole chain."""
+            if not self.plan_success:
+                return
+            plan_func = self._arm_plan_func(arm_tag)
+            start_qpos = self.robot.left_entity.get_qpos() if str(arm_tag) == "left" else self.robot.right_entity.get_qpos()
+            qpos = np.array(start_qpos, dtype=np.float64, copy=True)
+            trajectories = []
+            for a in actions:
+                if a.action != "move":
+                    continue
+                for attempt in range(retries):
+                    result = plan_func(a.target_pose, last_qpos=qpos,
+                                       constraint_pose=a.args.get("constraint_pose"),
+                                       approach_axis=a.args.get("approach_axis"))
+                    if result.get("status") == "Success":
+                        break
+                    if os.environ.get("ROBOTWIN_LOG_MOVE", "") == "1":
+                        print(f"[plan_and_replay] attempt {attempt + 1}/{retries} failed "
+                              f"({result.get('fail_reason')}) for target {np.round(np.asarray(a.target_pose, dtype=float), 4)}")
+                if result.get("status") != "Success":
+                    self.plan_success = False
+                    return
+                trajectories.append(result)
+                qpos = self._roll_qpos_forward(arm_tag, qpos, result)
+            for traj in trajectories:
+                self._replay_planned_move(arm_tag, traj)
+                if not self.plan_success:
+                    return
+            for a in actions:
+                if a.action != "move":
+                    self.move((arm_tag, [a]))
+                    if not self.plan_success:
+                        return
+
+        def _grasp_via_cached_trajectories(self, arm_tag, candidate_plan, gripper_pos=0.0):
+            """Replay the dry-run-verified pre_grasp/grasp trajectories (see
+            _plan_grasp_side) instead of calling grasp_actor_from_table, which
+            independently re-derives and re-plans the grasp via choose_grasp_pose --
+            exactly the re-plan-diverges-from-verified-plan failure mode already
+            fixed for the waypoint, recurring one step later. Table is disabled
+            between the two moves, matching grasp_actor_from_table's own sequencing
+            (drop the table right after clearing pre_grasp, before the final
+            approach). Falls back to the live re-plan path if no cached trajectory
+            exists (e.g. a fallback candidate that never got this far)."""
+            pre_traj = candidate_plan.get("pre_grasp_trajectory")
+            grasp_traj = candidate_plan.get("grasp_trajectory")
+            if pre_traj is None or grasp_traj is None:
+                return self.grasp_actor_from_table_reach(
+                    self.target_obj, arm_tag=arm_tag, pre_grasp_dis=0.1,
+                    contact_point_id=candidate_plan["contact_point_id"])
+            self._replay_planned_move(arm_tag, pre_traj)
+            self.enable_table(enable=False)
+            self._replay_planned_move(arm_tag, grasp_traj)
+            self.move(self.close_gripper(arm_tag, pos=gripper_pos))
+
         def grasp_actor_from_table_reach(self, actor, arm_tag, pre_grasp_dis=0.1, grasp_dis=0,
                                    gripper_pos=0.0, contact_point_id=None):
             # Same as Office_base_task.grasp_actor_from_table, but (Lever A) strips the
@@ -949,7 +1090,7 @@ def make_occluder_task():
                 if grasp_pre_pose is None or grasp_pose is None:
                     continue
                 lift_pose = list(grasp_pose)
-                lift_pose[2] += 0.1
+                lift_pose[2] += GRASP_LIFT_HEIGHT
                 occluder_present = self.spawn_occluder and getattr(self, "occluder", None) is not None
                 gaps = SIDE_WAYPOINT_GAPS if occluder_present else (SIDE_WAYPOINT_GAPS[1],)
                 z_lifts = SIDE_WAYPOINT_Z_LIFTS if occluder_present else (0.0,)
@@ -988,7 +1129,23 @@ def make_occluder_task():
             _candidate_specs yields one candidate per clearance_z sharing the same
             waypoint/grasp, so without caching this (expensive: get_grasp_pose does a
             real 10-rotation CuRobo batch-plan) work would be redone 3x for nothing.
-            Returns (ok, failed_stage, fail_reason, qpos, lift_pose)."""
+            Returns (ok, failed_stage, fail_reason, qpos, lift_pose, trajectories).
+            trajectories is {"waypoint"/"pre_grasp"/"grasp": <raw plan_path result>},
+            captured so real execution can REPLAY these EXACT verified trajectories
+            instead of independently re-planning to the same poses: confirmed
+            empirically that an independent re-plan to the same Cartesian pose can
+            converge to a genuinely different (though equally valid) joint
+            configuration -- CuRobo's trajopt has no uniqueness guarantee -- with
+            qpos drift up to 1.47 rad between the two, which flips downstream grasp
+            reachability in ~50% of cases with large drift. This already fixed the
+            waypoint; pre_grasp/grasp trajectories are captured the same way here
+            because grasp_actor_from_table's own independent re-plan to the SAME
+            pose choose_best_pose already verified is exactly the same failure mode,
+            one step later in the chain.
+            pre_grasp/grasp trajectories are planned CHAINED (pre_grasp's landed
+            qpos feeds grasp's start), matching how they're physically executed one
+            after another -- unlike the get_grasp_pose feasibility checks below,
+            which mirror choose_grasp_pose's own unchained pose determination."""
             key = (candidate["contact_point_id"], candidate["gap"], candidate["z_lift"],
                   candidate["orient"], candidate["y_offset"])
             if key in cache:
@@ -996,14 +1153,18 @@ def make_occluder_task():
 
             start_qpos = self.robot.left_entity.get_qpos() if str(arm_tag) == "left" else self.robot.right_entity.get_qpos()
             qpos = np.array(start_qpos, dtype=np.float64, copy=True)
+            trajectories = {}
+            plan_func = self._arm_plan_func(arm_tag)
 
             if candidate["grasp_waypoint"] is not None:
-                ok, failed_stage, fail_reason, qpos = self._plan_pose_sequence(
-                    arm_tag, [candidate["grasp_waypoint"]], qpos, stage_labels=["waypoint"])
-                if not ok:
-                    result = (ok, failed_stage, fail_reason, None, None)
+                waypoint_trajectory = plan_func(candidate["grasp_waypoint"], last_qpos=qpos)
+                if waypoint_trajectory.get("status") != "Success":
+                    result = (False, "waypoint", waypoint_trajectory.get("fail_reason", "unknown"), None, None, None)
                     cache[key] = result
                     return result
+                trajectories["waypoint"] = waypoint_trajectory
+                qpos = self._roll_qpos_forward(arm_tag, qpos, waypoint_trajectory)
+            grasp_side_start_qpos = qpos  # pre_grasp/grasp poses are both determined from here (unchained)
 
             # Validate the SAME grasp-pose selection real execution uses
             # (get_grasp_pose -> choose_best_pose's rotation search + batch-plan
@@ -1015,35 +1176,61 @@ def make_occluder_task():
             # pre_grasp's landed state) -- mirrored here for consistency.
             cp_id = candidate["contact_point_id"]
             pre_grasp_pose = self.get_grasp_pose(self.target_obj, arm_tag, contact_point_id=cp_id,
-                                                 pre_dis=0.1, last_qpos=qpos)
+                                                 pre_dis=0.1, last_qpos=grasp_side_start_qpos)
             if pre_grasp_pose is None:
-                result = (False, "pre_grasp", "no_reachable_rotation", None, None)
+                result = (False, "pre_grasp", "no_reachable_rotation", None, None, None)
                 cache[key] = result
                 return result
             grasp_pose = self.get_grasp_pose(self.target_obj, arm_tag, contact_point_id=cp_id,
-                                             pre_dis=0.0, last_qpos=qpos)
+                                             pre_dis=0.0, last_qpos=grasp_side_start_qpos)
             if grasp_pose is None:
-                result = (False, "grasp", "no_reachable_rotation", None, None)
+                result = (False, "grasp", "no_reachable_rotation", None, None, None)
                 cache[key] = result
                 return result
 
+            # Now plan+capture the ACTUAL trajectories to replay, CHAINED (pre_grasp
+            # then grasp from wherever pre_grasp lands), matching physical execution.
+            pre_grasp_trajectory = plan_func(pre_grasp_pose, last_qpos=qpos)
+            if pre_grasp_trajectory.get("status") != "Success":
+                result = (False, "pre_grasp", pre_grasp_trajectory.get("fail_reason", "unknown"), None, None, None)
+                cache[key] = result
+                return result
+            trajectories["pre_grasp"] = pre_grasp_trajectory
+            qpos = self._roll_qpos_forward(arm_tag, qpos, pre_grasp_trajectory)
+
+            grasp_trajectory = plan_func(grasp_pose, last_qpos=qpos)
+            if grasp_trajectory.get("status") != "Success":
+                result = (False, "grasp", grasp_trajectory.get("fail_reason", "unknown"), None, None, None)
+                cache[key] = result
+                return result
+            trajectories["grasp"] = grasp_trajectory
+            qpos = self._roll_qpos_forward(arm_tag, qpos, grasp_trajectory)
+
             lift_pose = list(grasp_pose)
-            lift_pose[2] += 0.1
+            lift_pose[2] += GRASP_LIFT_HEIGHT
             ok, failed_stage, fail_reason, qpos = self._plan_pose_sequence(
                 arm_tag, [lift_pose], qpos, stage_labels=["lift"])
             if not ok:
-                result = (ok, failed_stage, fail_reason, None, None)
+                result = (ok, failed_stage, fail_reason, None, None, None)
                 cache[key] = result
                 return result
 
-            result = (True, None, None, qpos, lift_pose)
+            result = (True, None, None, qpos, lift_pose, trajectories)
             cache[key] = result
             return result
 
         def _plan_candidate(self, arm_tag, candidate, grasp_side_cache):
-            ok, failed_stage, fail_reason, qpos, lift_pose = self._plan_grasp_side(arm_tag, candidate, grasp_side_cache)
+            ok, failed_stage, fail_reason, qpos, lift_pose, trajectories = self._plan_grasp_side(
+                arm_tag, candidate, grasp_side_cache)
             if not ok:
                 return ok, failed_stage, fail_reason
+            # Carried to play_once so real execution can REPLAY these exact verified
+            # trajectories for the waypoint/pre_grasp/grasp moves instead of
+            # independently re-planning to the same poses (see _plan_grasp_side's
+            # docstring for why that matters).
+            candidate["grasp_waypoint_trajectory"] = trajectories.get("waypoint")
+            candidate["pre_grasp_trajectory"] = trajectories.get("pre_grasp")
+            candidate["grasp_trajectory"] = trajectories.get("grasp")
 
             # Placement subgoal orientation is derived from the grasp orientation --
             # rebuild from the REAL lift_pose above (candidate["placement_subgoals"]
