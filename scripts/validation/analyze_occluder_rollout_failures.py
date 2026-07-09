@@ -55,6 +55,47 @@ def classify_episode(record: dict, hdf5_path: Path) -> dict:
     }
 
 
+def summarize_structured_failures(records: list[dict]) -> None:
+    """Group by the structured fields play_once/_select_pick_place_candidate write
+    directly into records.jsonl (rollout_failure_stage, rollout_failure_reason,
+    rollout_candidate_info.verified) -- exact and immediate, unlike
+    classify_episode's HDF5-displacement heuristic, and needs no artifact files."""
+    by_stage: Counter = Counter()
+    by_stage_reason: Counter = Counter()
+    by_verified: Counter = Counter()
+    by_stage_verified: Counter = Counter()
+
+    for r in records:
+        success = bool(r.get("rollout_success"))
+        stage = r.get("rollout_failure_stage") or ("success" if success else "unknown")
+        reason = r.get("rollout_failure_reason") or "-"
+        candidate_info = r.get("rollout_candidate_info") or {}
+        verified = candidate_info.get("verified")
+
+        by_stage[stage] += 1
+        by_stage_reason[(stage, reason)] += 1
+        by_verified[verified] += 1
+        by_stage_verified[(stage, verified)] += 1
+
+    print("Structured failure-stage summary (rollout_failure_stage)")
+    for stage, count in sorted(by_stage.items(), key=lambda kv: -kv[1]):
+        print(f"  {stage}: {count}")
+
+    print("\nStage x reason breakdown (rollout_failure_reason)")
+    for (stage, reason), count in sorted(by_stage_reason.items(), key=lambda kv: -kv[1]):
+        print(f"  {stage:<28} {reason:<40} {count}")
+
+    print("\nCandidate verified vs fallback (rollout_candidate_info.verified)")
+    for verified, count in sorted(by_verified.items(), key=lambda kv: str(kv[0])):
+        print(f"  verified={verified}: {count}")
+
+    print("\nStage x verified -- distinguishes 'dry run found a working plan and it "
+          "still failed for real' (verified=True) from 'dry run never found anything "
+          "workable to begin with' (verified=False)")
+    for (stage, verified), count in sorted(by_stage_verified.items(), key=lambda kv: -kv[1]):
+        print(f"  {stage:<28} verified={str(verified):<6} {count}")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument(
@@ -66,6 +107,10 @@ def main() -> None:
 
     results_dir = Path(args.results_dir)
     records = load_records(results_dir)
+
+    summarize_structured_failures(records)
+    print()
+
     rows = []
     for record in records:
         rel = record.get("rollout_data")
@@ -77,7 +122,7 @@ def main() -> None:
         rows.append(classify_episode(record, hdf5_path))
 
     counts = Counter(row["mode"] for row in rows)
-    print("Failure-mode summary")
+    print("HDF5-derived failure-mode summary (geometric heuristic; needs artifacts)")
     for mode, count in sorted(counts.items()):
         print(f"  {mode}: {count}")
 

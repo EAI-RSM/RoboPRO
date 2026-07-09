@@ -165,6 +165,7 @@ try:
             constraint_pose=None,
             approach_axis=None,
             arms_tag=None,
+            relax_orientation=False,
         ):
             world_base_pose = np.concatenate([
                 np.array(self.robot_origion_pose.p),
@@ -229,6 +230,24 @@ try:
                     hold_vec_weight=self.motion_gen.tensor_args.to_device(constraint_pose),
                 )
                 plan_config.pose_cost_metric = pose_cost_metric
+            elif relax_orientation:
+                # Position-only goal: for transit-only moves (carrying an already-
+                # grasped object around/over an obstacle) the held object's exact
+                # orientation en route doesn't matter -- check_success() only checks
+                # final x/y position. A check_ik_batch(relax_orientation=True) sweep
+                # confirmed this opens up real, currently-dead combos at the
+                # lift_above_box stage (e.g. seed 8/9: several gap x clearance_z
+                # combos flip from IK-infeasible to feasible once orientation is
+                # freed). MotionGen resets pose_cost_metric automatically at the end
+                # of _plan_attempts, same as the approach_axis/constraint_pose cases
+                # above -- no manual reset needed here.
+                if os.environ.get("ROBOTWIN_LOG_MOVE", "") == "1":
+                    print("[plan_path] using relax_orientation pose_cost_metric")
+                plan_config.pose_cost_metric = PoseCostMetric(
+                    reach_partial_pose=True,
+                    reach_vec_weight=self.motion_gen.tensor_args.to_device(
+                        [0.0, 0.0, 0.0, 1.0, 1.0, 1.0]),
+                )
 
             result = self.motion_gen.plan_single(start_joint_states, goal_pose_of_ee, plan_config)
 
@@ -346,12 +365,20 @@ try:
             res_result["velocity"] = np.array(result.interpolated_plan.velocity.to("cpu"))
             return res_result
 
-        def check_ik_batch(self, target_gripper_pose_list, arms_tag=None):
+        def check_ik_batch(self, target_gripper_pose_list, arms_tag=None, relax_orientation=False):
             """Diagnostic only: batched collision-aware IK feasibility check (no
             trajectory optimization), much cheaper than plan_batch. Used to map out
             the arm's real reachable envelope directly rather than inferring it from
             full-motion-plan failures. Returns a bool numpy array, one per pose,
-            True if a collision-free IK solution exists for that pose."""
+            True if a collision-free IK solution exists for that pose.
+
+            relax_orientation=True: position-only IK (via PoseCostMetric.
+            reach_partial_pose with rotation weights zeroed) -- for probing whether
+            a position that fails strict full-pose IK is reachable under ANY
+            orientation. Reuses this method's own (already-correct) world/base
+            frame transform instead of a separate reimplementation, after an
+            earlier standalone prototype script got the transform wrong (missing
+            the gripper->endlink conversion) and produced misleading results."""
             world_base_pose = np.concatenate([
                 np.array(self.robot_origion_pose.p),
                 np.array(self.robot_origion_pose.q),
@@ -388,11 +415,21 @@ try:
             # solve_batch trips a CUDA-graph batch-size mismatch against whatever
             # batch size motion_gen.warmup() already fixed the ik_solver's graph to;
             # solve_single one at a time matches the graph's original (batch=1) shape.
-            results = []
-            for i in range(poses_cuda.shape[0]):
-                goal_pose = CuroboPose(poses_cuda[i:i + 1, :3], poses_cuda[i:i + 1, 3:])
-                ik_result = self.motion_gen.ik_solver.solve_single(goal_pose)
-                results.append(bool(ik_result.success.reshape(-1)[0].item()))
+            if relax_orientation:
+                self.motion_gen.ik_solver.update_pose_cost_metric(PoseCostMetric(
+                    reach_partial_pose=True,
+                    reach_vec_weight=self.motion_gen.tensor_args.to_device(
+                        [0.0, 0.0, 0.0, 1.0, 1.0, 1.0]),
+                ))
+            try:
+                results = []
+                for i in range(poses_cuda.shape[0]):
+                    goal_pose = CuroboPose(poses_cuda[i:i + 1, :3], poses_cuda[i:i + 1, 3:])
+                    ik_result = self.motion_gen.ik_solver.solve_single(goal_pose)
+                    results.append(bool(ik_result.success.reshape(-1)[0].item()))
+            finally:
+                if relax_orientation:
+                    self.motion_gen.ik_solver.update_pose_cost_metric(PoseCostMetric.reset_metric())
             return np.array(results, dtype=bool)
 
         def plan_grippers(self, now_val, target_val):
