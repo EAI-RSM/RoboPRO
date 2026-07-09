@@ -238,6 +238,12 @@ def make_occluder_task():
         #                     planner ported from 35-occluder-spawn-hamid-A). Requires the
         #                     curobo check_ik_batch/approach_axis plumbing merged from that
         #                     branch. Set via --plan-algo.
+        #   "baseline"     -> _play_once_subgoal with routing suppressed (no forced side grasp,
+        #                     no forward/backward subgoals): a plain grasp -> lift -> place that
+        #                     reproduces dev's vanilla expert. The box still spawns and is in
+        #                     curobo's world, so curobo plans around it directly -- this is the
+        #                     "old planner" A/B baseline. Uses byte-identical grasp/lift/place
+        #                     calls to "subgoal", so the ONLY difference is the routing.
         PLAN_ALGO = "subgoal"
 
         def load_actors(self):
@@ -355,11 +361,20 @@ def make_occluder_task():
             self._place_target_y = float(target_p0[1])      # available to backward subgoals
             arm_tag = ArmTag("right" if target_p0[0] > 0 else "left")
 
+            # --plan-algo baseline: reproduce dev's vanilla expert. The box still spawns and is
+            # in curobo's world (update_world above), so curobo plans around it directly; we just
+            # suppress OUR routing (forced side grasp + forward/backward subgoals) so the plan is
+            # a plain grasp -> lift -> place. Everything else (grasp/lift/place calls) is identical
+            # to "subgoal", so the A/B isolates the routing contribution.
+            plain = (self.PLAN_ALGO == "baseline")
+
             # No occluder in the scene -> nothing to route around. Skip the forced side grasp
             # AND the around-box subgoals, and run a plain grasp -> lift -> place (a normal
             # rollout). Both _forward_/_backward_subgoal_poses already return [] with no box,
-            # so nothing below this dereferences self.occluder.
-            has_box = self.spawn_occluder and getattr(self, "occluder", None) is not None
+            # so nothing below this dereferences self.occluder. `plain` forces the same path
+            # even WITH the box present (the baseline planner).
+            has_box = (self.spawn_occluder and getattr(self, "occluder", None) is not None
+                       and not plain)
 
             # Force a horizontal, arm-side-facing grasp -- but ONLY when reaching around the
             # box. choose_grasp_pose otherwise biases toward top-down / away-facing grips (its
@@ -408,7 +423,9 @@ def make_occluder_task():
             self.enable_table(enable=True)
 
             # ---- BACKWARD (placement): edit self._backward_subgoal_poses() to change ----
-            for name, pose in self._backward_subgoal_poses(arm_tag):
+            # `plain` (baseline planner) suppresses the placement subgoals even with the box
+            # present -- _backward_subgoal_poses keys off actual box presence, not has_box.
+            for name, pose in ([] if plain else self._backward_subgoal_poses(arm_tag)):
                 frm = list(self.get_arm_pose(arm_tag)) if self.subgoal_hook is not None else None
                 self.move(self.move_to_pose(arm_tag, pose))
                 self._emit_subgoal(name, pose, arm_tag, frm)
@@ -2029,9 +2046,12 @@ def main():
                     help="run an expert curobo rollout per scene (writes to <out-dir>_rollout, "
                          "saves videos, and adds success-only distribution + P(success) per bucket)")
     ap.add_argument("--plot-only", action="store_true")
-    ap.add_argument("--plan-algo", default="subgoal", choices=["subgoal", "reachability"],
-                    help="expert planner: 'subgoal' (this file's default) or 'reachability' "
-                         "(check_ik_batch candidate search from 35-occluder-spawn-hamid-A)")
+    ap.add_argument("--plan-algo", default="subgoal",
+                    choices=["subgoal", "reachability", "baseline"],
+                    help="expert planner: 'subgoal' (this file's default), 'reachability' "
+                         "(check_ik_batch candidate search from 35-occluder-spawn-hamid-A), or "
+                         "'baseline' (dev's vanilla grasp->lift->place, box present but no "
+                         "routing -- the 'old planner' A/B baseline)")
     args = ap.parse_args()
 
     if not args.plot_only:

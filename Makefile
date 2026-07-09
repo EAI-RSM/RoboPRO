@@ -120,7 +120,7 @@ help:
 	'    Vars: OCC_OFFSETS=0.2 OCC_SEED_START=0 OCC_NUM_SEEDS=50 SAVE_IMAGES=0|1 ROLLOUT=0|1 CUROBO_TRAJOPT_SEEDS=16 CUROBO_MAX_ATTEMPTS=24' \
 	'      CUROBO_FINETUNE_ATTEMPTS= CUROBO_FINETUNE_DT_SCALE= (empty = CuRobo default 5 / 0.85)' \
 	'      CUROBO_ATTACH_SPHERE_RADIUS=0.001 LOCAL_WAYPOINT_ATTEMPTS=9 OUT_DIR= (timestamp a validation run, e.g. results/2026-07-07-10-10-12)' \
-	'      PLAN_ALGO=subgoal|reachability (expert planner; reachability = check_ik_batch candidate search)' \
+	'      PLAN_ALGO=subgoal|reachability|baseline (expert planner; reachability = check_ik_batch candidate search; baseline = dev vanilla, no routing)' \
 	'  make analyze-occluder-rollout Summarize saved rollout success/failure modes.' \
 	'  make reachability-map         Collision-free gripper IK reachability map (one scene).' \
 	'    Vars: REACH_SEED=1 OFFSET=0.2 REACH_ARMS=both|left|right REACH_Z=0.90' \
