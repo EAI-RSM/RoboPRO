@@ -239,7 +239,8 @@ def main():
         _src = os.path.join(_td, f"episode{TEMP}{_suf}")
         if os.path.exists(_src):
             os.replace(_src, os.path.join(_td, f"episode{episode_idx}{_suf}"))
-    cd._stamp_provenance_attrs(hdf5_path, args, seed=seed, success=success)
+    cd._stamp_provenance_attrs(hdf5_path, args, seed=seed, success=success,
+                               timestep=getattr(task, 'timestep', None))
     info["seed"] = seed
     update_scene_info(run_dir, episode_idx, info)
     print(f"[seed {seed}] episode {episode_idx} saved")

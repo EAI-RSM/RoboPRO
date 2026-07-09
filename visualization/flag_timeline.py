@@ -134,6 +134,7 @@ def show_episode(run_dir, ep_idx, min_impulse):
         T = f["joint_action/vector"].shape[0] if "joint_action/vector" in f else None
 
     pose_ids, amap = _load_episode_meta(run_dir, ep_idx)
+    dt = float(attrs.get("physics_timestep", 1.0 / 250.0))  # J (N*s) -> F ~ J/dt
 
     regime = {1: "BLIND planner (collision-unaware)",
               0: "AWARE planner (collision-aware)",
@@ -163,7 +164,7 @@ def show_episode(run_dir, ep_idx, min_impulse):
         for a, b in _ranges(mask):
             peak = float(c_imp[a:b + 1].max()) if c_imp is not None else float("nan")
             print(f"      frames {a:4d}-{b:<4d}  ->  video {_fmt_t(a / fps)} - "
-                  f"{_fmt_t((b + 1) / fps)}   (peak impulse {peak:.3f})")
+                  f"{_fmt_t((b + 1) / fps)}   (peak impulse {peak:.3f} N*s ~ {peak/dt:.0f} N)")
             if contact_pairs is not None:
                 for pr in sorted({p for i in range(a, b + 1) for p in contact_pairs[i]}):
                     print(f"          · {pr.replace('|', '  <->  ')}")

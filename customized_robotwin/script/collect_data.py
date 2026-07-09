@@ -132,7 +132,7 @@ def main(task_name=None, task_config=None):
     run(task, args)
 
 
-def _stamp_provenance_attrs(hdf5_path, args, seed=None, success=None):
+def _stamp_provenance_attrs(hdf5_path, args, seed=None, success=None, timestep=None):
     """Make each episode self-describing: which planner/metric regime (and seed)
     produced it.
 
@@ -161,6 +161,9 @@ def _stamp_provenance_attrs(hdf5_path, args, seed=None, success=None):
             # slot), so kept files always read True here; policy-rollout datasets
             # keep failures too and record success per episode the same way.
             f.attrs["success"] = bool(success)
+        if timestep is not None:
+            # physics dt (s): converts recorded impulses (N*s) to avg force, F = J/dt
+            f.attrs["physics_timestep"] = float(timestep)
         f.attrs["task_name"] = str(args.get("task_name", ""))
         f.attrs["task_config"] = str(args.get("task_config", ""))
 
@@ -379,7 +382,8 @@ def run(TASK_ENV, args):
                     TASK_ENV.merge_pkl_to_hdf5_video()
                     _stamp_provenance_attrs(
                         os.path.join(args["save_path"], "data", f"episode{episode_idx}.hdf5"),
-                        args, seed=seed_list[episode_idx], success=success)
+                        args, seed=seed_list[episode_idx], success=success,
+                        timestep=getattr(TASK_ENV, 'timestep', None))
                 else:
                     print(f"\033[93mepisode {episode_idx}: no frames saved "
                           f"(planner produced no executable motion) — no hdf5 written\033[0m")

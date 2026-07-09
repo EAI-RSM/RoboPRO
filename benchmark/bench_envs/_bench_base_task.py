@@ -814,7 +814,6 @@ class Bench_base_task(Base_Task):
         """Snapshot poses of all static objects before scene.step() for cumulative displacement tracking."""
         if not hasattr(self, 'static_object_ids'):
             return
-        first_call = len(self.static_object_pose_start) == 0
         for entity in self.scene.get_all_actors():
             actor_id = entity.per_scene_id
             if actor_id not in self.static_object_ids:
@@ -822,7 +821,13 @@ class Bench_base_task(Base_Task):
             p = entity.get_pose()
             snapshot = (np.array(p.p, dtype=np.float64), np.array(p.q, dtype=np.float64))
             self.static_object_pose_prev[actor_id] = snapshot
-            if first_call:
+            # Baseline per OBJECT at its first-seen snapshot (not only on the first
+            # snapshot CALL of the episode): the old first_call gate left any id
+            # missed by that single call permanently baseline-less, silently
+            # disabling its collision detection (observed: a bottle tipped 67 deg
+            # by a carried book registered no collision). First-seen == episode-
+            # start pose, since snapshots precede every physics step.
+            if actor_id not in self.static_object_pose_start:
                 self.static_object_pose_start[actor_id] = snapshot
 
     def check_collisions(self):
@@ -864,10 +869,14 @@ class Bench_base_task(Base_Task):
             name0 = entity0.name
             name1 = entity1.name
 
-            has_impulse = any(
-                np.linalg.norm(point.impulse) > self.collision_impulse_threshold
-                for point in contact.points
-            )
+            # Total impulse transferred by this contact PAIR this substep: vector
+            # sum over the manifold points (N*s). Point-wise max/any under-reports
+            # spread contacts badly — a 12 N press split across 4 points at 3 N
+            # each never tripped the 10 N furniture gate and read ~4x too small.
+            _pair_impulse = float(np.linalg.norm(
+                np.sum([np.asarray(p.impulse) for p in contact.points], axis=0))) \
+                if contact.points else 0.0
+            has_impulse = _pair_impulse > self.collision_impulse_threshold
 
             is_robot_0    = name0 in self.robot_link_names
             is_robot_1    = name1 in self.robot_link_names
@@ -951,7 +960,7 @@ class Bench_base_task(Base_Task):
             # the displacement threshold (so the frames where the robot is pushing
             # a knocked object are flagged).  Flushed by _take_picture().
             _pair = "|".join(sorted((name0, name1)))  # stable "a|b" label
-            _cimp = max((float(np.linalg.norm(p.impulse)) for p in contact.points), default=0.0)
+            _cimp = _pair_impulse  # total pair impulse (N*s) this substep
             if is_robot_0 != is_robot_1:  # robot <-> world only (self-contacts excluded)
                 _robot_side = name0 if is_robot_0 else name1
                 _other_name = name1 if is_robot_0 else name0
