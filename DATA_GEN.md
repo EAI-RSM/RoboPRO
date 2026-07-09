@@ -157,3 +157,113 @@ episodes, the metrics blob names **which objects were actually hit** — free ca
 - Throughput anchor (1× RTX 4080, d10 clutter, put_cup_on_coaster): ≈ **82 s/kept
   episode** including seed-search rejects; seed replay without search ≈ 37 s/episode.
   Episode ≈ 37 MB. `customized_robotwin/time_run.sh` re-measures and projects.
+
+---
+
+## 5. Dataset contents & format (current pipeline — 2026-07-09)
+
+Everything below is written by `bash collect_data.sh <task> <config> <gpu|gpu,gpu>`
+(single-GPU stock, or comma list = dynamic multi-GPU dispatch via
+`script/collect_parallel.py` + `script/collect_one_episode.py`). One run dir per
+(task, config):
+
+```
+<save_path>/<task>/<config>/
+├── data/episodeN.hdf5            the episode (schema below)
+├── video/episodeN.mp4            countertop cam, 30 fps, 1 video frame per dataset frame
+├── scene/episodeN/
+│   ├── scene.npz                 samples (M,3) f32 + normals (M,3) f32 + obj_id (M,) i32
+│   │                             — surface samples of every scene object at t=0
+│   │                             (0.5 cm spacing objects, 4 cm furniture/articulations)
+│   ├── objects.json              per object: per_scene_id, name, tags
+│   │                             (target/container/furniture/clutter/articulation),
+│   │                             t=0 reference pose (pose_p, pose_q), n_samples
+│   └── scene_hash.txt            sha1 over (name, id, rounded pose) — scene identity
+├── _traj_data/
+│   ├── episodeN.pkl              planned left/right joint paths (replay input)
+│   └── episodeN_init.json        t=0 state: all actor poses, articulation root+qpos,
+│                                 robot qpos/arm state, seed  (replay input)
+├── scene_info.json               per episode: actor_id_map (id→name, incl. robot links),
+│                                 role_names (target/destination + ids), object_pose_ids
+│                                 (column order of /object_poses), seed, collision_metrics
+│                                 (episode totals + hit-object names), language_perturbation,
+│                                 cluttered_table_info, texture_info
+├── seed.txt                      space-separated seeds; POSITION = episode index
+├── slots.json · logs/ · instructions/   collection progress, per-seed logs, language variants
+```
+
+### 5.1 `episodeN.hdf5` schema (T = saved frames, one per `save_freq`=15 physics substeps)
+
+| Path | Shape / dtype | Content |
+|---|---|---|
+| `observation/<cam>/rgb` | (T,) JPEG bytes → 240×320×3 u8 | cams: head, left/right wrist, front, countertop, demo, demo_2 (all D435) |
+| `observation/<cam>/depth` | (T,) PNG bytes → 240×320 u16 | depth in mm |
+| `observation/<cam>/actor_segmentation` | (T,) PNG bytes → 240×320 u16 | per-object masks; pixel value = `per_scene_id`, decode via `actor_id_map` |
+| `observation/<cam>/intrinsic_cv / extrinsic_cv / cam2world_gl` | (T,3,3)/(T,3,4)/(T,4,4) f32 | camera model per frame |
+| `joint_action/{left_arm,left_gripper,right_arm,right_gripper,vector}` | vector: (T,14) f64 | joint-space action (vector = both arms + grippers) |
+| `endpose/…` | | task-space EE poses + normalized grippers |
+| `object_poses` | (T, N, 7) f32 | pose of every non-robot actor per frame `[x,y,z,qw,qx,qy,qz]`; column j = object `object_pose_ids[j]` (scene_info) |
+| `contact` | (T,) u8 | robot↔world contact in the frame window (see 5.2) |
+| `contact_impulse` | (T,) f32 | max contact impulse (N·s) behind the contact flag that frame |
+| `contact_pairs` | (T,) JSON bytes | list of `"a\|b"` body pairs touching that frame |
+| `collision` / `collision_impulse` / `collision_pairs` | as above | same triple for the collision flag (see 5.2) |
+| `pointcloud` | (T, 0) | EMPTY stock placeholder — ignore (pointcloud stays off; rebuild dense clouds from depth+K/E+masks) |
+
+**HDF5 attrs (self-describing provenance):** `generator` (words:
+`curobo_collision_aware` / `curobo_collision_unaware` / policy name e.g. `pi05`),
+`seed`, `success` (task check_success at episode end — CuRobo datasets keep only
+successes so this reads True; policy-rollout datasets keep failures too),
+`task_name`, `task_config`, `enable_collision_metrics`,
+`planner_exclude_obstacles` (−1 omitted / 0 aware / 1 blind),
+`planner_blind_to_obstacles` (resolved).
+
+### 5.2 Per-frame contact / collision semantics (recorded AT COLLECTION TIME)
+
+Both flags are OR-accumulated over each frame's ~15 physics substeps inside
+`check_collisions()` and flushed per saved frame — **the labels ship with the
+data; no postprocessing needed.** Current thresholds: **1 cm / 0.1 rad
+displacement, 10 N furniture impulse gate** (`_bench_base_task.py` constants).
+
+- `contact[t]` = the robot touched something it was NOT supposed to touch —
+  directly (a robot link), through the HELD TARGET object (a carried book
+  knocking a bottle), or through a robot-ACTUATED body (the drawer being closed
+  shoving an item). Excludes robot self-contacts, base wheel↔ground support,
+  the task TARGET itself, ALL DESTINATIONS (`des_obj*`), and INTENDED contacts
+  (anything the task passed to `grasp_actor` — drawer/appliance handles + their
+  articulation links).
+- `collision[t]` = impulse-gated robot↔furniture hit, OR robot/held-target
+  touching a static object whose pose has moved ≥ threshold from its episode-
+  start pose (no baseline snapshot ⇒ NOT a collision — no phantom flags).
+- Episode-level counts (scene_info `collision_metrics`; categories
+  robot/target/intended_to_static_object + robot_to_furniture) use
+  displacement-driven counting: a touched static object is counted once when its cumulative pose
+  change crosses threshold, watched for 30 substeps after last touch (catches
+  slow topples; ignores settling creep and object→object chains).
+
+**Recompute-later guarantee:** if thresholds/definitions ever change, collision
+can be recomputed offline from `/object_poses` + `contact_pairs`/impulse without
+re-collecting; link/sphere proximity from `scene.npz` + `objects.json` +
+`joint_action` qpos + robot FK (`fk_basis.npz`). The shipped flags remain valid
+for the thresholds they were recorded with.
+
+### 5.3 Replay — collect forgotten modalities later
+
+Every episode is replayable (bit-exact joint trajectory, verified max |Δq| = 0):
+
+```
+python script/replay_trajectory.py <task> <collection_config> --replay-config replay_rich
+```
+
+rebuilds the seeded scene, restores `_traj_data/episodeN_init.json` (authoritative),
+re-runs the saved joint paths with `need_plan=False`, and records the extra
+`data_type` modalities from `replay_rich.yml` into
+`./data/replay_data/<task>/<config>_replay/`.
+
+### 5.4 Inspection
+
+```
+python visualization/flag_timeline.py <run_dir> [ep] [--min-impulse 0.04]
+```
+prints impulse-filtered contact windows (+peak impulse), collision windows with
+each hit object's t0→window-end pose movement (cm, deg), and video timecodes;
+`visualization/inspect_hdf5.py` dumps raw hdf5 trees.

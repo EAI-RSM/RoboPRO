@@ -621,6 +621,23 @@ class Base_Task(gym.Env):
         rgb = self.cameras.get_rgb()
         save_img(save_path, rgb[camera_name]['rgb'])
 
+    def get_object_poses(self):
+        """Poses of every non-robot rigid actor (clutter / target / container),
+        in a deterministic per_scene_id order so the columns are stable across
+        frames. Returns (ids: list[int], poses: float32[N,7]) where each pose is
+        [x, y, z, qw, qx, qy, qz]. Enables recomputing displacement/collision/
+        proximity offline against any definition (id -> name via actor_id_map)."""
+        actors = sorted(
+            (a for a in self.scene.get_all_actors()
+             if getattr(a, "per_scene_id", None) is not None),
+            key=lambda a: a.per_scene_id)
+        ids = [int(a.per_scene_id) for a in actors]
+        if not actors:
+            return ids, np.zeros((0, 7), dtype=np.float32)
+        poses = np.array([[*a.get_pose().p, *a.get_pose().q] for a in actors],
+                         dtype=np.float32)
+        return ids, poses
+
     def _take_picture(self):  # save data
         if not self.save_data:
             return
@@ -637,6 +654,32 @@ class Base_Task(gym.Env):
                         os.remove(directory + file)
 
         pkl_dic = self.get_obs()
+        # [data-gen] per-timestep engine flags: any PhysX contact / filtered
+        # collision since the previous saved frame (OR-accumulated over the
+        # save_freq substeps this frame represents; set in check_collisions).
+        # Always present so frame 0 fixes the hdf5 schema; all-zero when
+        # enable_collision_metrics is off or the task has no bench metrics.
+        pkl_dic["contact"] = np.uint8(getattr(self, "_win_contact", False))
+        pkl_dic["collision"] = np.uint8(getattr(self, "_win_collision", False))
+        # which bodies touched / collided in this frame's window ("a|b" labels),
+        # so the boolean flags above are auditable per timestep.
+        pkl_dic["contact_pairs"] = sorted(getattr(self, "_win_contact_pairs", set()))
+        pkl_dic["collision_pairs"] = sorted(getattr(self, "_win_collision_pairs", set()))
+        # max contact impulse (N·s) behind the contact / collision flag this frame
+        pkl_dic["contact_impulse"] = np.float32(getattr(self, "_win_contact_impulse", 0.0))
+        pkl_dic["collision_impulse"] = np.float32(getattr(self, "_win_collision_impulse", 0.0))
+        self._win_contact = False
+        self._win_collision = False
+        if hasattr(self, "_win_contact_pairs"):
+            self._win_contact_pairs = set()
+            self._win_collision_pairs = set()
+            self._win_contact_impulse = 0.0
+            self._win_collision_impulse = 0.0
+        # [data-gen] per-timestep OBJECT POSES (all non-robot actors) so collision/
+        # displacement/proximity can be recomputed offline with any definition
+        # -> /object_poses [T, N, 7]; column order (ids) recorded once in scene_info.
+        if self.data_type.get("object_poses", True):
+            pkl_dic["object_poses"] = self.get_object_poses()[1]
         save_pkl(self.folder_path["cache"] + f"{self.FRAME_IDX}.pkl", pkl_dic)  # use cache
         self.FRAME_IDX += 1
 
@@ -648,12 +691,184 @@ class Base_Task(gym.Env):
         }
         save_pkl(file_path, traj_data)
 
+    def _traj_root(self):
+        """Directory to READ saved trajectory + init-state from. Defaults to
+        self.save_dir; replay points reads at a source dir via self.traj_src_dir
+        while writing new HDF5 under self.save_dir."""
+        return getattr(self, "traj_src_dir", None) or self.save_dir
+
     def load_tran_data(self, idx):
         assert self.save_dir is not None, "self.save_dir is None"
-        file_path = os.path.join(self.save_dir, "_traj_data", f"episode{idx}.pkl")
+        file_path = os.path.join(self._traj_root(), "_traj_data", f"episode{idx}.pkl")
         with open(file_path, "rb") as f:
             traj_data = pickle.load(f)
         return traj_data
+
+    # ============================ Initial State (record + replay) ============================
+    # The recorded initial state makes a saved trajectory reloadable for faithful
+    # replay: on replay we run the seeded setup only to wire task object handles +
+    # gripper/attach structure that play_once needs, then OVERRIDE every object
+    # pose / articulation & robot qpos from this record (the record is authoritative).
+
+    def _init_state_path(self, idx):
+        return os.path.join(self._traj_root(), "_traj_data", f"episode{idx}_init.json")
+
+    def capture_init_state(self) -> dict:
+        """Snapshot the scene + robot state at episode start (t=0, after setup).
+        Enumerates the live scene directly so it captures every object regardless
+        of which builder created it. Call BEFORE play_once mutates the scene."""
+
+        def _pose_to_list(pose):
+            return [np.asarray(pose.p, dtype=float).tolist(),
+                    np.asarray(pose.q, dtype=float).tolist()]
+
+        actors = []
+        for ent in self.scene.get_all_actors():
+            name = ent.get_name()
+            if name == "" or name == "ground":
+                continue
+            try:
+                actors.append({"name": name, "pose": _pose_to_list(ent.get_pose())})
+            except Exception as e:
+                print(f"[capture_init_state] skip actor {name}: {e}")
+
+        articulations = []
+        for art in self.scene.get_all_articulations():
+            try:
+                pose = art.get_root_pose() if hasattr(art, "get_root_pose") else art.get_pose()
+                qpos = np.asarray(art.get_qpos(), dtype=float).tolist()
+                articulations.append({"name": art.get_name(),
+                                      "root_pose": _pose_to_list(pose),
+                                      "qpos": qpos})
+            except Exception as e:
+                print(f"[capture_init_state] skip articulation {art.get_name()}: {e}")
+
+        robot = {
+            "embodiment_name": getattr(self, "embodiment_name", None),
+            "left_arm": [float(v) for v in self.robot.get_left_arm_jointState()],
+            "right_arm": [float(v) for v in self.robot.get_right_arm_jointState()],
+        }
+        try:
+            robot["left_qpos"] = np.asarray(self.robot.left_entity.get_qpos(), dtype=float).tolist()
+            robot["right_qpos"] = np.asarray(self.robot.right_entity.get_qpos(), dtype=float).tolist()
+        except Exception:
+            robot["left_qpos"] = robot["right_qpos"] = None
+
+        scaffold = {
+            "table_z_bias": float(getattr(self, "table_z_bias", 0.0)),
+            "texture_info": self.info.get("texture_info") if hasattr(self, "info") else None,
+        }
+        meta = {
+            "seed": getattr(self, "seed", None),
+            "task_name": getattr(self, "task_name", None),
+            "task_config": getattr(self, "task_config", None),
+        }
+        return {"actors": actors, "articulations": articulations, "robot": robot,
+                "scaffold": scaffold, "meta": meta}
+
+    @staticmethod
+    def _json_default(o):
+        if isinstance(o, np.generic):
+            return o.item()
+        if isinstance(o, np.ndarray):
+            return o.tolist()
+        raise TypeError(f"Object of type {type(o).__name__} is not JSON serializable")
+
+    def save_init_state(self, idx, state=None):
+        # Must be captured BEFORE play_once mutates the scene. Pass a t=0-captured
+        # `state`; otherwise it is captured now (only correct if nothing has moved).
+        if state is None:
+            state = self.capture_init_state()
+        path = self._init_state_path(idx)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(state, f, ensure_ascii=False, indent=2, default=self._json_default)
+
+    def load_init_state(self, idx):
+        with open(self._init_state_path(idx), "r", encoding="utf-8") as f:
+            return json.load(f)
+
+    def _zero_actor_velocity(self, ent):
+        try:
+            import sapien.physx as _physx
+            comp = ent.find_component_by_type(_physx.PhysxRigidDynamicComponent)
+            if comp is not None:
+                comp.set_linear_velocity([0.0, 0.0, 0.0])
+                comp.set_angular_velocity([0.0, 0.0, 0.0])
+        except Exception:
+            pass
+
+    def restore_init_state(self, state):
+        """Override the freshly-built (seeded) scene with the recorded explicit
+        state. Call AFTER setup_demo. Match live objects to recorded ones by name,
+        preserving duplicate order (the seed reproduces creation order)."""
+        from collections import defaultdict, deque
+
+        actor_recs = defaultdict(deque)
+        for rec in state.get("actors", []):
+            actor_recs[rec["name"]].append(rec)
+        for ent in self.scene.get_all_actors():
+            name = ent.get_name()
+            if name == "" or name == "ground":
+                continue
+            q = actor_recs.get(name)
+            if not q:
+                continue
+            rec = q.popleft()
+            p, qq = rec["pose"]
+            try:
+                ent.set_pose(sapien.Pose(p=p, q=qq))
+                self._zero_actor_velocity(ent)
+            except Exception as e:
+                print(f"[restore_init_state] actor '{name}' set_pose failed: {e}")
+        leftover = sum(len(v) for v in actor_recs.values())
+        if leftover:
+            print(f"\033[93m[restore_init_state] {leftover} recorded actor(s) had no live match\033[0m")
+
+        artic_recs = defaultdict(deque)
+        for rec in state.get("articulations", []):
+            artic_recs[rec["name"]].append(rec)
+        for art in self.scene.get_all_articulations():
+            q = artic_recs.get(art.get_name())
+            if not q:
+                continue
+            rec = q.popleft()
+            p, qq = rec["root_pose"]
+            try:
+                if hasattr(art, "set_root_pose"):
+                    art.set_root_pose(sapien.Pose(p=p, q=qq))
+                else:
+                    art.set_pose(sapien.Pose(p=p, q=qq))
+                if rec.get("qpos") is not None:
+                    qpos = np.asarray(rec["qpos"], dtype=float)
+                    art.set_qpos(qpos)
+                    if hasattr(art, "set_qvel"):
+                        art.set_qvel(np.zeros_like(qpos))
+            except Exception as e:
+                print(f"[restore_init_state] articulation '{art.get_name()}' restore failed: {e}")
+
+        self._restore_robot_state(state.get("robot", {}))
+
+    def _restore_robot_state(self, robot_state):
+        if not robot_state:
+            return
+        try:
+            if robot_state.get("left_qpos") is not None:
+                self.robot.left_entity.set_qpos(np.asarray(robot_state["left_qpos"], dtype=float))
+            if robot_state.get("right_qpos") is not None:
+                self.robot.right_entity.set_qpos(np.asarray(robot_state["right_qpos"], dtype=float))
+            left_arm = robot_state.get("left_arm")
+            right_arm = robot_state.get("right_arm")
+            if left_arm is not None:
+                self.robot.set_arm_joints(np.asarray(left_arm[:-1], dtype=float),
+                                          np.zeros(len(left_arm) - 1), "left")
+                self.robot.set_gripper(float(left_arm[-1]), "left")
+            if right_arm is not None:
+                self.robot.set_arm_joints(np.asarray(right_arm[:-1], dtype=float),
+                                          np.zeros(len(right_arm) - 1), "right")
+                self.robot.set_gripper(float(right_arm[-1]), "right")
+        except Exception as e:
+            print(f"[restore_init_state] robot restore failed: {e}")
 
     def merge_pkl_to_hdf5_video(self):
         if not self.save_data:
@@ -1051,7 +1266,13 @@ class Base_Task(gym.Env):
                 )
                 now_right_id += 1
 
+            # per-substep collision detection (bench tasks with metrics enabled);
+            # same gating as Bench_base_task.take_dense_action / take_action
+            if getattr(self, 'enable_collision_metrics', False) and hasattr(self, 'robot_link_names'):
+                self._snapshot_static_object_poses()
             self.scene.step()
+            if getattr(self, 'enable_collision_metrics', False) and hasattr(self, 'robot_link_names'):
+                self.check_collisions()
             if self.render_freq and i % self.render_freq == 0:
                 self._update_render()
                 self.viewer.render()

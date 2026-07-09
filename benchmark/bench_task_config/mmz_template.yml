@@ -3,7 +3,7 @@
 #
 # Purpose: one working reference for collecting grounding data (per-object
 # masks + depth + role sidecar). Copy → rename → tune episode_num /
-# obstacle_density. Full context: DATA_GEN_HANDOFF.md at repo root.
+# obstacle_density. Full context: DATA_GEN.md at repo root.
 #
 # Run (from customized_robotwin/, env `robopro`, ROBOTWIN_BENCH_TASK=bench):
 #   bash collect_data.sh <task_name> <this_config_name> <gpu_id>
@@ -53,6 +53,14 @@ data_type:
                            #   collection — recommended ON. Read back via
                            #   `export.py --what bbox3d_exact`; camera-only (visible-
                            #   surface) boxes are always derivable without it.
+  proximity: true          # build the obstacle mesh cache + export per-episode
+                           # scene geometry (scene/episodeN/{scene.npz,objects.json})
+                           # so link/sphere proximity is computed OFFLINE from
+                           # per-frame qpos + robot FK (no per-step cost at collect)
+  object_poses: true       # per-frame poses of all non-robot actors
+                           # -> /object_poses [T,N,7] (x,y,z,qw,qx,qy,qz); column
+                           # ids in scene_info.object_pose_ids (name via actor_id_map).
+                           # lets you recompute collision/displacement offline.
 pcd_down_sample_num: 1024
 pcd_crop: true
 save_path: ./data/dataset
@@ -60,8 +68,35 @@ clear_cache_freq: 1
 collect_data: true
 eval_video_log: true
 
-# Stock collision-metrics switch. NOTE the stock coupling: when true, the CuRobo
-# planner is also made BLIND to clutter obstacles (eval behavior). The labeling /
-# collision-interpretation layer that will sit on top of this is being redesigned —
-# see DATA_GEN_HANDOFF.md §3.
-enable_collision_metrics: false
+# ---------------------------------------------------------------------------
+# Collision detection & planner obstacle-awareness (DECOUPLED)
+#
+# enable_collision_metrics: builds the collision name-sets and runs per-substep
+#   PhysX contact checks. Required for (a) the per-timestep "contact"/"collision"
+#   uint8 arrays (+impulse +object pairs) written into each episode hdf5, aligned
+#   1:1 with saved frames: contact = robot touches something UNINTENDED, directly
+#   (link) or via the held target or an actuated body (drawer) — grasps, targets,
+#   destinations, wheels excluded; collision = impulse-gated furniture hits +
+#   displacement-evidenced static hits (1cm/0.1rad from episode start), and
+#   (b) the episode-level collision metrics. See DATA_GEN.md §5.2.
+#   With this off the per-timestep arrays still exist but are all zeros.
+#
+# planner_exclude_obstacles: decouples CuRobo clutter-awareness from the metrics
+#   (restored from the e248b2d prototype):
+#     omitted/null -> legacy behavior (planner blind iff metrics on)
+#     false        -> planner SEES clutter  = collision-AWARE   (collisions rare-but-real)
+#     true         -> planner BLIND to clutter = collision-UNAWARE (frequent collisions,
+#                     negative/contrast data). Furniture & fixtures are always avoided.
+#
+#   Variant A  aware planner + detection:   enable_collision_metrics: true
+#                                           planner_exclude_obstacles: false
+#   Variant B  blind planner + detection:   enable_collision_metrics: true
+#                                           planner_exclude_obstacles: true
+#   Matched pairs: collect A, copy its seed.txt into B's run dir + use_seed: true.
+#
+# Each episode hdf5 records the regime in attrs: enable_collision_metrics,
+# planner_exclude_obstacles (-1 omitted / 0 aware / 1 blind),
+# planner_blind_to_obstacles (resolved value actually used).
+# ---------------------------------------------------------------------------
+enable_collision_metrics: true
+planner_exclude_obstacles: false

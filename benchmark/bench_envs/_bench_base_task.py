@@ -47,8 +47,12 @@ class Bench_base_task(Base_Task):
     COLLISION_FORCE_THRESHOLD_N = 10.0
     # Static object pose thresholds: only count robot/target-to-static collisions when
     # the static object has moved beyond these from the previous step.
-    STATIC_OBJECT_POSITION_THRESHOLD_M = 0.02   # 1 cm
-    STATIC_OBJECT_ORIENTATION_THRESHOLD_RAD = 0.2  # ~11.5 deg
+    STATIC_OBJECT_POSITION_THRESHOLD_M = 0.01   # 1 cm
+    STATIC_OBJECT_ORIENTATION_THRESHOLD_RAD = 0.1  # ~5.7 deg
+    # Substeps to keep watching a touched static object for a delayed topple after
+    # its last contact. A new touch resets the window, so objects dragged in
+    # continuous contact stay watched; only settled objects stop being checked.
+    STATIC_SETTLE_WINDOW_STEPS = 30
 
     def __init__(self):
         pass
@@ -675,19 +679,54 @@ class Bench_base_task(Base_Task):
     def _init_collision_metrics(self):
         """Reset collision tracking state. Call early in _init_task_env_ before load_actors()."""
         self.target_object_names: set[str] = set()
+        # Destination object (the task's `des_obj` role, e.g. board/plate/can);
+        # resolved lazily on the first check_collisions() call once des_obj exists.
+        # Empty for pick / pose-destination tasks. Excluded from the contact flag
+        # (placing onto the destination is intended, like grasping the target).
+        self.destination_object_names: set[str] = set()
+        # Actors the task deliberately touches (populated by grasp_actor via
+        # _mark_intended_contact: grasp targets, drawer/appliance handles + their
+        # articulation links). Excluded from the contact flag.
+        self._intended_contact_names: set[str] = set()
         self.collision_metrics = {
             "robot_to_furniture": 0,
             "robot_to_static_object": 0,
             "target_to_static_object": 0,
+            "intended_to_static_object": 0,  # pushed via a robot-actuated body (drawer, ...)
         }
-        # Track which static objects have already been counted (once per episode) — keyed by per_scene_id
-        self._counted_robot_static_objects: set[int] = set()
-        self._counted_target_static_objects: set[int] = set()
+        # Displacement-driven static-collision counting state (ported from the
+        # collison_free_data_gen branch): a collision IS a static object moving
+        # past threshold from its episode-start pose; contacts only attribute
+        # which body (robot / held target) last touched it.
+        self._static_last_toucher: dict[int, str] = {}   # per_scene_id -> "robot"|"target"
+        self._static_last_touch_step: dict[int, int] = {}  # per_scene_id -> _metric_step of last touch
+        self._counted_displaced_ids: set[int] = set()    # counted once per episode
+        self._displaced_categories: dict[int, str] = {}  # per_scene_id -> counted category
         self._counted_furniture_names: set[str] = set()
         self._hit_furniture_names: set[str] = set()
         self.filtered_contacts_for_log = []
         self.static_object_pose_prev: dict[int, tuple] = {}   # per_scene_id -> (pos, quat)
         self.static_object_pose_start: dict[int, tuple] = {}  # per_scene_id -> (pos, quat), captured once per episode
+        # Optional per-step JSONL streams (opened via start_metric_streams): a
+        # contacts stream (every robot/target<->static contact point, zero-impulse
+        # included) and a collisions stream (displacement events). None = disabled;
+        # the primary per-timestep record is the hdf5 contact/collision arrays below.
+        self._contact_stream = None
+        self._collision_stream = None
+        self._metric_step = -1
+        # Per-timestep window flags: OR-accumulated inside check_collisions() every
+        # physics substep, flushed + reset by _take_picture() into each saved frame
+        # (-> per-frame "contact"/"collision" uint8 arrays in the episode hdf5).
+        self._win_contact = False
+        self._win_collision = False
+        # per-window max contact impulse (N·s) for the flagged contact / collision
+        self._win_contact_impulse = 0.0
+        self._win_collision_impulse = 0.0
+        # per-window sets of "a|b" object-pair labels (flushed by _take_picture),
+        # so each saved frame records WHICH bodies touched / collided that window.
+        self._win_contact_pairs = set()
+        self._win_collision_pairs = set()
+        self._win_contact_pairs_seen = set()  # TSL_DEBUG_CONTACTS one-shot log
 
     def _get_target_object_names(self) -> set[str]:
         """Return the names of target objects for this task.
@@ -709,21 +748,29 @@ class Bench_base_task(Base_Task):
         self.furniture_names = set(self.FURNITURE_NAMES)
         self.target_object_names = self._get_target_object_names()
 
-        # Key static objects by per_scene_id — unique per actor, stable across Python object accesses
+        # Key static objects by per_scene_id — unique per actor, stable across Python access.
+        # Cache the entity handle too so the displacement sweep can look up only the
+        # touched objects instead of re-scanning scene.get_all_actors() every step.
         self.static_object_ids: set[int] = set()
         self._static_id_to_name: dict[int, str] = {}
+        self._static_id_to_entity: dict = {}
         for entity in self.scene.get_all_actors():
             n = entity.get_name()
             if not n or n in self.furniture_names or n in self.target_object_names:
                 continue
             self.static_object_ids.add(entity.per_scene_id)
             self._static_id_to_name[entity.per_scene_id] = n
+            self._static_id_to_entity[entity.per_scene_id] = entity
 
     def _static_object_has_significant_pose_change(self, actor_id: int, entity) -> bool:
         """Return True if cumulative displacement from episode start exceeds thresholds."""
         start = self.static_object_pose_start.get(actor_id)
         if start is None:
-            return True  # not yet snapshotted — count the collision
+            # No baseline -> no displacement evidence -> NOT a collision. (The old
+            # "return True" fallback produced phantom per-frame collision flags on
+            # objects that never moved, with zero impulse, whenever a contact was
+            # checked before the object's first pose snapshot.)
+            return False
         start_p, start_q = start
         curr = entity.get_pose()
         curr_p = np.array(curr.p, dtype=np.float64)
@@ -791,6 +838,25 @@ class Bench_base_task(Base_Task):
         """
         contacts = self.scene.get_contacts()
         self.filtered_contacts_for_log = []
+        self._metric_step = getattr(self, "_metric_step", -1) + 1
+        _stream_pairs = []   # [toucher, "obj#id", impulse, [x,y,z]] per contact point
+
+        # Lazily resolve destination object names once they exist (des_obj* attrs
+        # are set during setup, before motion). Multi-destination tasks (e.g.
+        # move_items_around's des_obj_1/2/3) are all excluded. Cached once found.
+        if not self.destination_object_names:
+            _des_names = set()
+            for _attr in list(vars(self)):
+                if _attr.startswith("des_obj"):
+                    _d = getattr(self, _attr, None)
+                    if _d is None:
+                        continue
+                    try:
+                        _des_names.add(_d.get_name())
+                    except Exception:
+                        pass
+            if _des_names:
+                self.destination_object_names = _des_names
 
         for contact in contacts:
             entity0 = contact.bodies[0].entity
@@ -813,10 +879,15 @@ class Bench_base_task(Base_Task):
             is_target_1   = name1 in self.target_object_names
             is_static_0   = entity0.per_scene_id in self.static_object_ids
             is_static_1   = entity1.per_scene_id in self.static_object_ids
+            # robot-ACTUATED bodies (grasped objects / operated articulation links,
+            # e.g. a drawer being closed) — contacts they cause are robot-caused
+            is_intended_0 = name0 in self._intended_contact_names
+            is_intended_1 = name1 in self._intended_contact_names
 
             count_furniture = False
             count_static = False
             count_target_static = False
+            count_intended_static = False
 
 
             # Furniture: require impulse (actual force exchange); exclude gripper links (expected contact);
@@ -832,28 +903,96 @@ class Bench_base_task(Base_Task):
                         self._counted_furniture_names.add(furniture_name)
                     count_furniture = True
 
-            # Static objects: count only when cumulative displacement exceeds threshold
-            if ((is_robot_0 and is_static_1 and not is_gripper_0) or (is_robot_1 and is_static_0 and not is_gripper_1)):
+            # Static objects: contacts only RECORD the most recent toucher —
+            # counting is displacement-driven (sweep after the loop). Gripper
+            # links COUNT here: targets are excluded from static_object_ids, so a
+            # gripper<->static contact is a bump, never an expected grasp.
+            if (is_robot_0 and is_static_1) or (is_robot_1 and is_static_0):
                 static_entity = entity1 if is_static_1 else entity0
-                static_id = static_entity.per_scene_id
-                if static_id not in self._counted_robot_static_objects:
-                    if self._static_object_has_significant_pose_change(static_id, static_entity):
-                        self._print_significant_collision(static_id, static_entity, "robot_to_static_object")
-                        self.collision_metrics["robot_to_static_object"] += 1
-                        self._counted_robot_static_objects.add(static_id)
-                        count_static = True
+                self._static_last_toucher[static_entity.per_scene_id] = "robot"
+                self._static_last_touch_step[static_entity.per_scene_id] = self._metric_step
+                count_static = True
 
             if (is_target_0 and is_static_1) or (is_target_1 and is_static_0):
                 static_entity = entity1 if is_static_1 else entity0
-                static_id = static_entity.per_scene_id
-                if static_id not in self._counted_target_static_objects:
-                    if self._static_object_has_significant_pose_change(static_id, static_entity):
-                        self._print_significant_collision(static_id, static_entity, "target_to_static_object")
-                        self.collision_metrics["target_to_static_object"] += 1
-                        self._counted_target_static_objects.add(static_id)
-                        count_target_static = True
+                self._static_last_toucher[static_entity.per_scene_id] = "target"
+                self._static_last_touch_step[static_entity.per_scene_id] = self._metric_step
+                count_target_static = True
 
-            if count_furniture or count_static or count_target_static:
+            # Robot-actuated body (e.g. the drawer being closed) hitting a static
+            # object: robot-caused through the operated body. One side intended,
+            # the other a plain static — intended<->intended (drawer's own links)
+            # and robot<->intended (the grasp itself) never land here.
+            if ((is_intended_0 and is_static_1 and not is_intended_1)
+                    or (is_intended_1 and is_static_0 and not is_intended_0)):
+                static_entity = entity1 if is_static_1 else entity0
+                self._static_last_toucher[static_entity.per_scene_id] = "intended"
+                self._static_last_touch_step[static_entity.per_scene_id] = self._metric_step
+                count_intended_static = True
+
+            # Optional dataset stream: every robot/target<->static contact POINT,
+            # zero-impulse resting pairs included ("force" is a label, not a filter).
+            if self._contact_stream is not None and (count_static or count_target_static or count_intended_static):
+                static_entity = entity1 if is_static_1 else entity0
+                toucher_name  = name0 if (is_robot_0 or is_target_0) else name1
+                obj_key = f"{static_entity.get_name()}#{static_entity.per_scene_id}"
+                for pt in contact.points:
+                    _stream_pairs.append([
+                        toucher_name, obj_key,
+                        round(float(np.linalg.norm(pt.impulse)), 6),
+                        [round(float(x), 4) for x in pt.position],
+                    ])
+
+            # --- Per-timestep window flags (un-deduped, hdf5 record) ----------
+            # Independent of the episode counting above: give every SAVED frame a
+            # contact/collision boolean + object pairs.  contact: any robot<->world
+            # contact minus self/wheel/target/destination.  collision: impulse
+            # furniture hit, or a static object being touched while already past
+            # the displacement threshold (so the frames where the robot is pushing
+            # a knocked object are flagged).  Flushed by _take_picture().
+            _pair = "|".join(sorted((name0, name1)))  # stable "a|b" label
+            _cimp = max((float(np.linalg.norm(p.impulse)) for p in contact.points), default=0.0)
+            if is_robot_0 != is_robot_1:  # robot <-> world only (self-contacts excluded)
+                _robot_side = name0 if is_robot_0 else name1
+                _other_name = name1 if is_robot_0 else name0
+                _other_is_target = is_target_1 if is_robot_0 else is_target_0
+                _other_is_dest = _other_name in self.destination_object_names
+                _other_is_intended = _other_name in self._intended_contact_names
+                # exclude base wheels (ground support, zero-impulse) and the
+                # TARGET / DESTINATION / INTENDED objects (grasping the target,
+                # placing on the destination, operating a drawer/appliance handle
+                # passed to grasp_actor — all deliberate manipulation, not contact)
+                if ("wheel" not in _robot_side and not _other_is_target
+                        and not _other_is_dest and not _other_is_intended):
+                    self._win_contact = True
+                    self._win_contact_pairs.add(_pair)
+                    self._win_contact_impulse = max(self._win_contact_impulse, _cimp)
+                    if os.environ.get("TSL_DEBUG_CONTACTS") and _pair not in self._win_contact_pairs_seen:
+                        self._win_contact_pairs_seen.add(_pair)
+                        print(f"[TSL contact pair] {_pair}")
+            # held/TARGET object or robot-ACTUATED body (drawer being closed, ...)
+            # bumping a static (clutter) object is a contact too: the robot causes
+            # it through the grasped/operated body. Destination / intended objects
+            # excluded on the static side as above.
+            if count_target_static or count_intended_static:
+                _stat_name = (entity1 if is_static_1 else entity0).get_name()
+                if (_stat_name not in self.destination_object_names
+                        and _stat_name not in self._intended_contact_names):
+                    self._win_contact = True
+                    self._win_contact_pairs.add(_pair)
+                    self._win_contact_impulse = max(self._win_contact_impulse, _cimp)
+            if count_furniture:  # impulse-gated furniture hit this step
+                self._win_collision = True
+                self._win_collision_pairs.add(_pair)
+                self._win_collision_impulse = max(self._win_collision_impulse, _cimp)
+            if count_static or count_target_static or count_intended_static:  # robot/target/actuated-body touching a static
+                _step_static = entity1 if is_static_1 else entity0
+                if self._static_object_has_significant_pose_change(_step_static.per_scene_id, _step_static):
+                    self._win_collision = True
+                    self._win_collision_pairs.add(_pair)
+                    self._win_collision_impulse = max(self._win_collision_impulse, _cimp)
+
+            if count_furniture or count_static or count_target_static or count_intended_static:
                 for pt in contact.points:
                     impulse = float(np.linalg.norm(pt.impulse))
                     # Log furniture contacts by impulse; log static contacts regardless
@@ -864,7 +1003,7 @@ class Bench_base_task(Base_Task):
                             "impulse": impulse,
                             "position": [float(x) for x in pt.position],
                         })
-                    elif (count_static or count_target_static) and impulse > 0:
+                    elif (count_static or count_target_static or count_intended_static) and impulse > 0:
                         self.filtered_contacts_for_log.append({
                             "body0": name0,
                             "body1": name1,
@@ -872,24 +1011,166 @@ class Bench_base_task(Base_Task):
                             "position": [float(x) for x in pt.position],
                         })
 
+        if self._contact_stream is not None and _stream_pairs:
+            _max_imp = max(p[2] for p in _stream_pairs)
+            self._contact_stream.write(json.dumps({
+                "t": self._metric_step,
+                "ta": int(getattr(self, "take_action_cnt", -1)),
+                "pairs": _stream_pairs,
+                "max_impulse": _max_imp,
+                "force": _max_imp > 1e-3,
+            }) + "\n")
+
+        # Displacement-driven counting: a static object whose cumulative pose
+        # change from episode start crosses the thresholds is counted as one
+        # collision — whether or not anything touches it at that instant (slow
+        # topples finish after contact ends) — but ONLY if the robot or held
+        # target touched it, and only for STATIC_SETTLE_WINDOW_STEPS after the
+        # last touch. This checks just the handful of recently-touched objects
+        # (via cached entity handles) instead of re-scanning every actor forever:
+        # object→object chains and settling creep (never-touched) are excluded,
+        # and an object that settled without moving stops being re-checked.
+        for sid, toucher in self._static_last_toucher.items():
+            if (sid in self._counted_displaced_ids
+                    or self.static_object_pose_start.get(sid) is None
+                    or self._metric_step - self._static_last_touch_step.get(sid, -1)
+                       > self.STATIC_SETTLE_WINDOW_STEPS):
+                continue
+            entity = self._static_id_to_entity.get(sid)
+            if entity is None:
+                continue
+            if self._static_object_has_significant_pose_change(sid, entity):
+                category = {"robot": "robot_to_static_object",
+                            "target": "target_to_static_object",
+                            "intended": "intended_to_static_object"}[toucher]
+                self.collision_metrics[category] = self.collision_metrics.get(category, 0) + 1
+                self._counted_displaced_ids.add(sid)
+                self._displaced_categories[sid] = category
+                self._print_significant_collision(sid, entity, category)
+                if self._collision_stream is not None:
+                    start_p, start_q = self.static_object_pose_start[sid]
+                    curr = entity.get_pose()
+                    cum_p = float(np.linalg.norm(np.asarray(curr.p) - start_p))
+                    qdot  = abs(float(np.dot(np.asarray(curr.q), start_q)))
+                    cum_a = float(np.degrees(2 * np.arccos(min(1.0, qdot))))
+                    self._collision_stream.write(json.dumps({
+                        "t": self._metric_step,
+                        "ta": int(getattr(self, "take_action_cnt", -1)),
+                        "category": category,
+                        "object": f"{self._static_id_to_name.get(sid, '?')}#{sid}",
+                        "cumul_delta_m": round(cum_p, 4),
+                        "cumul_ang_deg": round(cum_a, 2),
+                        "last_toucher": toucher,
+                    }) + "\n")
+
+    def start_metric_streams(self, contacts_path, collisions_path):
+        """Open per-episode jsonl streams: contacts (every robot/target<->static
+        contact point per step) and collisions (displacement events)."""
+        self.stop_metric_streams()
+        self._contact_stream = open(contacts_path, "w", encoding="utf-8")
+        self._collision_stream = open(collisions_path, "w", encoding="utf-8")
+        self._metric_step = -1
+
+    def stop_metric_streams(self):
+        for attr in ("_contact_stream", "_collision_stream"):
+            fh = getattr(self, attr, None)
+            if fh is not None:
+                try:
+                    fh.close()
+                except Exception:
+                    pass
+                setattr(self, attr, None)
 
     def get_collision_metrics(self):
         """Return a copy of current collision metrics dict."""
-        total = (
-            self.collision_metrics["robot_to_furniture"]
-            + self.collision_metrics["robot_to_static_object"]
-            + self.collision_metrics["target_to_static_object"]
-        )
+        total = sum(self.collision_metrics.values())
         return {
             **self.collision_metrics,
             "is_collision": total > 0,
             "total_collision_count": total,
             "robot_to_furniture_names": sorted(self._hit_furniture_names),
-            "robot_to_static_object_names": sorted(f"{getattr(self, '_static_id_to_name', {}).get(i, str(i))}#{i}" for i in self._counted_robot_static_objects),
-            "target_to_static_object_names": sorted(f"{getattr(self, '_static_id_to_name', {}).get(i, str(i))}#{i}" for i in self._counted_target_static_objects),
+            **{f"{cat}_names": sorted(
+                   f"{getattr(self, '_static_id_to_name', {}).get(i, str(i))}#{i}"
+                   for i, c in self._displaced_categories.items() if c == cat)
+               for cat in ("robot_to_static_object", "target_to_static_object",
+                           "intended_to_static_object")},
         }
 
-    # =========================================================== Camera ===========================================================
+    # =========================================================== Proximity Tracking ===========================================================
+
+    def _init_proximity_tracking(self, config):
+        """
+        Build the scaled-trimesh cache used by export_scene to sample each
+        obstacle's surface. Call after collision_list is fully populated.
+        Skips ArticulationActor entries (export_scene boxes them via AABB).
+        No per-step distance is computed at collection time — link/sphere
+        proximity is a post-hoc relabel from scene.npz + per-frame qpos.
+        """
+        from envs.utils.actor_utils import ArticulationActor
+
+        self._held_actors = {"left": None, "right": None}
+        self._proximity_enabled = True
+
+        self._proximity_mesh_cache: dict = {}  # actor_name -> scaled trimesh.Trimesh
+
+        for entry in self.collision_list:
+            actor = entry["actor"]
+            if isinstance(actor, ArticulationActor):
+                continue
+
+            collision_path = entry["collision_path"]
+            actor_name = actor.get_name()
+            scale = actor.scale if actor.scale is not None else [1.0, 1.0, 1.0]
+
+            try:
+                if os.path.isdir(collision_path):
+                    files_override = entry.get("files")
+                    if files_override:
+                        obj_files = [
+                            Path(collision_path) / f
+                            for f in files_override
+                            if (Path(collision_path) / f).is_file()
+                        ]
+                    else:
+                        obj_files = sorted(Path(collision_path).glob("*.obj"))
+                    meshes = []
+                    for p in obj_files:
+                        try:
+                            m = trimesh.load(str(p), force="mesh", process=False)
+                            if isinstance(m, trimesh.Scene):
+                                if m.geometry:
+                                    m = trimesh.util.concatenate(list(m.geometry.values()))
+                                else:
+                                    continue
+                            if len(getattr(m, "vertices", [])) > 0 and len(getattr(m, "faces", [])) > 0:
+                                meshes.append(m)
+                        except Exception:
+                            continue
+                    if not meshes:
+                        continue
+                    base_mesh = trimesh.util.concatenate(meshes) if len(meshes) > 1 else meshes[0]
+                else:
+                    base_mesh = trimesh.load(collision_path, force="mesh", process=False)
+                    if isinstance(base_mesh, trimesh.Scene):
+                        if base_mesh.geometry:
+                            base_mesh = trimesh.util.concatenate(list(base_mesh.geometry.values()))
+                        else:
+                            continue
+                    if len(getattr(base_mesh, "vertices", [])) == 0 or len(getattr(base_mesh, "faces", [])) == 0:
+                        continue
+
+                scaled_mesh = base_mesh.copy()
+                scaled_mesh.apply_scale(scale)
+
+                # Pre-warm BVH to avoid first-step latency spike
+                trimesh.proximity.closest_point(scaled_mesh, np.zeros((1, 3)))
+
+                self._proximity_mesh_cache[actor_name] = scaled_mesh
+            except Exception as e:
+                print(f"[Proximity] failed to load mesh for {actor_name}: {e}")
+
+        print(f"[Proximity] scene mesh cache ready: "
+              f"{sorted(self._proximity_mesh_cache.keys())}")
 
     def load_camera(self, **kwags):
         """
@@ -1050,6 +1331,26 @@ class Bench_base_task(Base_Task):
         # print(f"choose_grasp_pose: selected contact_point_id={res_id} (combined)")
         return res_pre_pose, res_pose
 
+    def _mark_intended_contact(self, actor):
+        """Record an actor the task deliberately touches (grasp target, drawer
+        handle, appliance door, ...) so the per-frame `contact` flag can exclude
+        it — generic: fires for whatever the task passes to grasp_actor."""
+        if not hasattr(self, "_intended_contact_names"):
+            self._intended_contact_names = set()
+        for cand in (actor, getattr(actor, "actor", None), getattr(actor, "entity", None)):
+            if cand is None:
+                continue
+            try:
+                self._intended_contact_names.add(cand.get_name())
+            except Exception:
+                pass
+            if hasattr(cand, "get_links"):  # articulation: include all link names
+                try:
+                    for link in cand.get_links():
+                        self._intended_contact_names.add(link.get_name())
+                except Exception:
+                    pass
+
     def grasp_actor(
         self,
         actor: Actor,
@@ -1059,6 +1360,7 @@ class Bench_base_task(Base_Task):
         gripper_pos=0.0,
         contact_point_id: list | float = None,
     ):
+        self._mark_intended_contact(actor)
         if not self.plan_success:
             return None, []
         if self.need_plan == False:
@@ -1516,8 +1818,19 @@ class Bench_base_task(Base_Task):
 
     # =========================================================== Extra Curobo Utils ===========================================================
 
-    def update_world(self, exclude_obstacles: bool = False):
-        """Updates CuRobo Collision World Model with new collision objects"""
+    def update_world(self, exclude_obstacles: bool = None):
+        """Updates CuRobo Collision World Model with new collision objects.
+
+        exclude_obstacles=None (the default) resolves from the run's planner
+        regime (planner_exclude_obstacles, legacy-coupled to
+        enable_collision_metrics) so the 19 bare mid-task update_world() calls
+        in task files keep the configured blindness instead of silently
+        re-including clutter. Pass an explicit bool to override.
+        """
+        if exclude_obstacles is None:
+            exclude_obstacles = getattr(self, "planner_exclude_obstacles", None)
+            if exclude_obstacles is None:
+                exclude_obstacles = bool(getattr(self, "enable_collision_metrics", False))
         collision_dict = {"mesh": {}, "cuboid": {}}
         if self.collision_list:
             for info in self.collision_list:
@@ -1661,13 +1974,17 @@ class Bench_base_task(Base_Task):
             "scale": actor.scale,
         }
         self.robot.attach_object(object, arms_tag=arms_tag)
+        if hasattr(self, "_held_actors"):  # exclude the grasped object from proximity
+            self._held_actors[arms_tag] = actor.get_name()
 
     def detach_object(self, arms_tag: str):
         """
         Detach the attached objects from the robot in Curobo Planning.
         """
         self.robot.detach_object(arms_tag=arms_tag)
-    
+        if hasattr(self, "_held_actors"):
+            self._held_actors[arms_tag] = None
+
     def enable_obstacle(self, enable: bool, mesh_names: list[str] = [], obb_names: list[str] = []):
         self.robot.enable_obstacle(enable, mesh_names=mesh_names, obb_names=obb_names)
 

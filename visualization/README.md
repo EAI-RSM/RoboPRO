@@ -65,3 +65,15 @@ data — no tool needed to view runs.)
 cd customized_robotwin
 bash time_run.sh <task> <config> [gpu]      # wall time, sec/episode, dataset projection
 ```
+
+## flag_timeline.py — contact/collision timelines
+
+Per-episode contact/collision frame ranges with video timecodes, peak impulses,
+per-window object pairs, and each hit object's t0→window-end pose movement:
+
+```bash
+python visualization/flag_timeline.py <run_dir> [ep] [--min-impulse 0.01]
+```
+
+Default shows ALL contacts (incl. zero-impulse resting); `--min-impulse` hides
+light touches. Full label semantics: DATA_GEN.md §5.2.

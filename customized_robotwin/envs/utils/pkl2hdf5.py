@@ -1,6 +1,7 @@
 import h5py, pickle
 import numpy as np
 import os
+import json
 import cv2
 from collections.abc import Mapping, Sequence
 import shutil
@@ -53,6 +54,17 @@ def seg_encoding(segs):
     return padded_data, max_len
 
 
+def pairs_encoding(frame_lists):
+    # Per-frame variable-length list of "a|b" object-pair labels -> one JSON
+    # byte-string per frame, padded (same scheme as depth/seg encoding).
+    encode_data, max_len = [], 1
+    for fl in frame_lists:
+        b = json.dumps(list(fl)).encode("utf-8")
+        encode_data.append(b)
+        max_len = max(max_len, len(b))
+    return [b.ljust(max_len, b"\0") for b in encode_data], max_len
+
+
 def parse_dict_structure(data):
     if isinstance(data, dict):
         parsed = {}
@@ -91,6 +103,10 @@ def create_hdf5_from_dict(hdf5_group, data_dict):
             subgroup = hdf5_group.create_group(key)
             create_hdf5_from_dict(subgroup, value)
         elif isinstance(value, list):
+            if "pairs" in key:  # ragged per-frame lists — JSON-encode, don't np.array
+                encode_data, max_len = pairs_encoding(value)
+                hdf5_group.create_dataset(key, data=encode_data, dtype=f"S{max_len}")
+                continue
             value = np.array(value)
             if "rgb" in key:
                 encode_data, max_len = images_encoding(value)

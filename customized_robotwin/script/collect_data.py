@@ -17,7 +17,10 @@ import json
 import traceback
 import os
 import time
+import h5py
 from argparse import ArgumentParser
+
+from export_scene import export_scene
 
 current_file_path = os.path.abspath(__file__)
 parent_directory = os.path.dirname(current_file_path)
@@ -49,7 +52,11 @@ def get_embodiment_config(robot_file):
     return embodiment_args
 
 
-def main(task_name=None, task_config=None):
+def build_task_and_args(task_name, task_config):
+    """Load the task env + fully-resolved args dict (config yml + embodiment),
+    with args["save_path"] rewritten to the run dir. Shared by the stock
+    multi-episode entry point (main/run) and the single-seed runner
+    (collect_one_episode.py) used for parallel-GPU collection."""
 
     task = class_decorator(task_name)
 
@@ -117,7 +124,45 @@ def main(task_name=None, task_config=None):
     args["embodiment_name"] = embodiment_name
     args['task_config'] = task_config
     args["save_path"] = os.path.join(args["save_path"], str(args["task_name"]), args["task_config"])
+    return task, args
+
+
+def main(task_name=None, task_config=None):
+    task, args = build_task_and_args(task_name, task_config)
     run(task, args)
+
+
+def _stamp_provenance_attrs(hdf5_path, args, seed=None, success=None):
+    """Make each episode self-describing: which planner/metric regime (and seed)
+    produced it.
+
+    planner_exclude_obstacles attr: -1 = key omitted (legacy coupling to
+    enable_collision_metrics), 0 = planner obstacle-AWARE, 1 = planner BLIND.
+    planner_blind_to_obstacles is the resolved blindness actually in effect.
+    """
+    if not os.path.exists(hdf5_path):
+        return
+    ecm = bool(args.get("enable_collision_metrics", False))
+    peo = args.get("planner_exclude_obstacles", None)
+    blind = bool(peo) if peo is not None else ecm
+    with h5py.File(hdf5_path, "a") as f:
+        # human-readable producer label ("what made this data"); policy rollout
+        # datasets use the policy name here instead (e.g. "pi05").
+        f.attrs["generator"] = ("curobo_collision_unaware" if blind
+                                else "curobo_collision_aware")
+        f.attrs["enable_collision_metrics"] = ecm
+        f.attrs["planner_exclude_obstacles"] = -1 if peo is None else int(bool(peo))
+        f.attrs["planner_blind_to_obstacles"] = blind
+        if seed is not None:
+            f.attrs["seed"] = int(seed)
+        if success is not None:
+            # task check_success() at episode end. NOTE the CuRobo collector only
+            # KEEPS successful episodes (failures are deleted / never claim a
+            # slot), so kept files always read True here; policy-rollout datasets
+            # keep failures too and record success per episode the same way.
+            f.attrs["success"] = bool(success)
+        f.attrs["task_name"] = str(args.get("task_name", ""))
+        f.attrs["task_config"] = str(args.get("task_config", ""))
 
 
 def _banner(text, char="─", width=74):
@@ -127,6 +172,16 @@ def _banner(text, char="─", width=74):
 
 def run(TASK_ENV, args):
     epid, suc_num, fail_num, seed_list = 0, 0, 0, []
+
+    # start_seed: base offset for the seed search so parallel shards (e.g. one
+    # collector per GPU, each writing to its own task_config dir) explore
+    # DISJOINT seed ranges instead of re-collecting the same scenes from seed 0.
+    # Config key `start_seed` (default 0), overridable via COLLECT_START_SEED.
+    # Resume (existing seed.txt) still wins over this.
+    start_seed = int(os.getenv("COLLECT_START_SEED", args.get("start_seed", 0) or 0))
+    epid = start_seed
+    if start_seed:
+        print(f"\033[95m[start_seed] seed search begins at {start_seed}\033[0m")
 
     # Debug mode: instead of iterating over seeds (reopening Sapien),
     # hold the viewer open on the first failure so targets/scene can be inspected.
@@ -162,12 +217,17 @@ def run(TASK_ENV, args):
                 TASK_ENV.setup_demo(now_ep_num=suc_num, seed=epid, **args)
                 if hasattr(TASK_ENV, "_maybe_apply_language_perturbation"):
                     TASK_ENV._maybe_apply_language_perturbation()
+                # t=0 scene snapshot (before play_once mutates it) for later replay
+                _init_state = TASK_ENV.capture_init_state() \
+                    if hasattr(TASK_ENV, "capture_init_state") else None
                 TASK_ENV.play_once()
 
                 if TASK_ENV.plan_success and TASK_ENV.check_success():
                     print(f"simulate data episode {suc_num} success! (seed = {epid})")
                     seed_list.append(epid)
                     TASK_ENV.save_traj_data(suc_num)
+                    if _init_state is not None:
+                        TASK_ENV.save_init_state(suc_num, state=_init_state)
                     suc_num += 1
                 else:
                     print(f"simulate data episode {suc_num} fail! (seed = {epid})")
@@ -263,6 +323,12 @@ def run(TASK_ENV, args):
                 if hasattr(TASK_ENV, "_maybe_apply_language_perturbation"):
                     TASK_ENV._maybe_apply_language_perturbation()
 
+                # export static scene geometry for offline link/sphere proximity
+                try:
+                    export_scene(TASK_ENV, os.path.join(args["save_path"], "scene", f"episode{episode_idx}"))
+                except Exception as _e:
+                    print(f"\033[93mexport_scene failed (episode {episode_idx}): {_e}\033[0m")
+
                 traj_data = TASK_ENV.load_tran_data(episode_idx)
                 args["left_joint_path"] = traj_data["left_joint_path"]
                 args["right_joint_path"] = traj_data["right_joint_path"]
@@ -286,6 +352,11 @@ def run(TASK_ENV, args):
                     info["actor_id_map"] = TASK_ENV.get_actor_id_map()
                 if hasattr(TASK_ENV, "get_role_names"):
                     info["role_names"] = TASK_ENV.get_role_names()
+                if hasattr(TASK_ENV, "get_object_poses"):
+                    info["object_pose_ids"] = TASK_ENV.get_object_poses()[0]
+                info["seed"] = seed_list[episode_idx]
+                if getattr(TASK_ENV, "enable_collision_metrics", False) and hasattr(TASK_ENV, "get_collision_metrics"):
+                    info["collision_metrics"] = TASK_ENV.get_collision_metrics()
 
                 # measured while the scene is still alive (used for the keep decision
                 # below — the stock code re-queried after close_env)
@@ -306,6 +377,9 @@ def run(TASK_ENV, args):
                 TASK_ENV.close_env(clear_cache=((episode_idx + 1) % clear_cache_freq == 0))
                 if has_frames:
                     TASK_ENV.merge_pkl_to_hdf5_video()
+                    _stamp_provenance_attrs(
+                        os.path.join(args["save_path"], "data", f"episode{episode_idx}.hdf5"),
+                        args, seed=seed_list[episode_idx], success=success)
                 else:
                     print(f"\033[93mepisode {episode_idx}: no frames saved "
                           f"(planner produced no executable motion) — no hdf5 written\033[0m")

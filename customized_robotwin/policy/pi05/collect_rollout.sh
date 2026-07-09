@@ -9,10 +9,7 @@
 # Env vars (override defaults):
 #   COLLECT_NUM              — total episodes to save (default 100)
 #   COLLECT_START_SEED       — starting seed override
-#   COLLECT_BRANCH_NUM       — branches per collision seed; 0 = simple rollout (default 0)
-#   COLLECT_BRANCH_LOOKBACK  — comma-separated lookback choices in take_action steps (default "5,10,15")
-#   COLLECT_BRANCH_NOISE_STEPS — noised take_action calls per branch (default 1)
-#   ACTION_NOISE_VAR         — noise variance for branch perturbation (default 0.005)
+#   ACTION_NOISE_VAR         — Gaussian action noise variance for rollout diversity (default 0.001)
 #   COLLECT_FIXED_SEED       — if set, skip expert check
 
 set -euo pipefail
