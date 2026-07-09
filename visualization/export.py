@@ -6,20 +6,19 @@ camera matrices + masks + sidecar); nothing needs to be enabled at collection
 time. The one exception is bbox3d_exact, which reads the physics-engine boxes
 that must have been recorded during collection (data_type.actor_bbox: true).
 
-  --what pcd          dense labeled point clouds:
-                        pcd_<cam>_f<k>.ply   (role-colored, open in MeshLab)
-                        pcd_<cam>_f<k>.npz   (xyz float32, rgb uint8, seg_id uint16)
+  --what pcd          dense labeled point cloud pcd_<cam>_f<k>.ply (role-colored,
+                      open in MeshLab; carries exact-box wireframes when available)
   --what bbox2d       per-frame 2D boxes from the masks -> bbox2d.json
   --what bbox3d       per-frame VISIBLE-SURFACE 3D boxes from masked depth (what the
                       cameras can see) -> bbox3d.json
   --what bbox3d_exact per-frame EXACT full-extent 3D boxes from the physics engine
                       (includes occluded parts; needs data_type.actor_bbox at
                       collection) -> bbox3d_exact.json  [+ wireframes into the .ply]
-  --what masks        masks_<cam>_f<k>.png (raw uint16 ids) + *_color.png preview
-  --what overlay      overlay_<cam>_f<k>.png (role-colored rgb)
-  --what panel        panel[_<cam>].png — quick-look grid, rows=frames,
-                      cols = RGB | depth | seg | role overlay | 2D boxes
+  --what panel        panel[_<cam>].png — quick-look grid, always 6 rows (first,
+                      last, 4 evenly spaced between), cols = RGB | depth | seg |
+                      role overlay | 2D boxes
 
+pcd / bbox* honor --frames; the panel is always a fixed 6-frame overview.
 Always writes meta.json (id->name map, role->ids, settings) next to the outputs.
 
 Usage (run_dir = the (task, config) output dir):
@@ -42,7 +41,7 @@ from viz_episode import (ROLE_COLORS, ROBOT_COLOR, OTHER_COLOR, SCENE_NAMES,
                          merge_env_ids, unproject, write_ply, colorize_ids,
                          role_overlay, depth_vis, boxes2d_image, box_edge_points)
 
-WHAT_ALL = ("pcd", "bbox2d", "bbox3d", "bbox3d_exact", "masks", "overlay", "panel")
+WHAT_ALL = ("pcd", "bbox2d", "bbox3d", "bbox3d_exact", "panel")
 WHAT_DEFAULT = "pcd,bbox2d,bbox3d,bbox3d_exact,panel"
 
 
@@ -61,6 +60,14 @@ def parse_frames(spec, T):
             sys.exit(f"!! frame {k} out of range (T={T})")
         out.append(k)
     return sorted(set(out))
+
+
+def panel_frames(T, n=6):
+    """Always n evenly spaced frames (first, last, and n-2 between), regardless
+    of T; fewer only when the episode is shorter than n frames."""
+    if T <= n:
+        return list(range(T))
+    return sorted(set(np.linspace(0, T - 1, n).round().astype(int).tolist()))
 
 
 def role_of_id(i, role_ids, robot_ids):
@@ -232,17 +239,6 @@ def main():
             if "bbox2d" in what:
                 boxes2d_cam[f"f{k}"] = boxes2d(seg, id_map, role_ids, robot_ids)
 
-            if "masks" in what:
-                cv2.imwrite(os.path.join(out_dir, f"masks_{cam}_f{k}.png"),
-                            seg.astype(np.uint16))
-                cv2.imwrite(os.path.join(out_dir, f"masks_{cam}_f{k}_color.png"),
-                            cv2.cvtColor(colorize_ids(seg), cv2.COLOR_RGB2BGR))
-
-            if "overlay" in what and "rgb" in d:
-                ov = role_overlay(d["rgb"][k], seg, role_ids, robot_ids, other_ids)
-                cv2.imwrite(os.path.join(out_dir, f"overlay_{cam}_f{k}.png"),
-                            cv2.cvtColor(ov, cv2.COLOR_RGB2BGR))
-
             if "pcd" in what or "bbox3d" in what:
                 K = d["K"][k] if d["K"].ndim == 3 else d["K"]
                 E = d["E"][k] if d["E"].ndim == 3 else d["E"]
@@ -256,10 +252,6 @@ def main():
                 if "pcd" in what:
                     rgb_s = (d["rgb"][k][vv, uu].astype(np.uint8) if "rgb" in d
                              else np.full((len(pts), 3), 180, np.uint8))
-                    np.savez_compressed(
-                        os.path.join(out_dir, f"pcd_{cam}_f{k}.npz"),
-                        xyz=pts.astype(np.float32), rgb=rgb_s,
-                        seg_id=seg_s.astype(np.uint16))
                     cols = rgb_s.copy()
                     if robot_ids:
                         cols[np.isin(seg_s, list(robot_ids))] = ROBOT_COLOR
@@ -282,15 +274,16 @@ def main():
         if boxes3d_cam:
             results3d[cam] = boxes3d_cam
 
-    # ---- panel (quick-look grid): rows=frames, cols=RGB|depth|seg|overlay|2D --
+    # ---- panel (quick-look grid): 6 rows, cols=RGB|depth|seg|overlay|2D --------
     if "panel" in what:
+        pf = panel_frames(T)
         for cam in cams:
             d = data[cam]
             if "rgb" not in d:
                 print(f"panel: {cam} has no rgb — skipping")
                 continue
             rows = []
-            for k in frames:
+            for k in pf:
                 seg = d["seg"][k]
                 header = d["rgb"][k].copy()
                 cv2.putText(header, f"{cam} f{k}", (4, 16),

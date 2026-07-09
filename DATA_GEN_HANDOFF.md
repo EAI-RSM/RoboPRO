@@ -95,9 +95,9 @@ labeling scheme. Also: per-episode banners + an end-of-run `COLLECTION SUMMARY`
 `inspect_hdf5.py` (HDF5 tree/shapes/attrs) · `viz_episode.py` (panel: RGB | depth |
 seg | role-overlay | 2D-boxes; + labeled .ply clouds + top-down; role colors
 target=red, dest=green, obstacle=orange, robot=blue) · `export.py` (on-demand:
-dense labeled point clouds .ply/.npz, 2D boxes, visible-surface 3D boxes,
-**exact full-extent 3D boxes** from the `actor_bbox` HDF5 group, masks, overlays,
-and a quick-look panel grid). Standalone; no engine imports.
+role-colored .ply point clouds, 2D boxes, visible-surface 3D boxes, **exact
+full-extent 3D boxes** from the `actor_bbox` HDF5 group, and a 6-row quick-look
+panel grid). Standalone; no engine imports.
 Timing helper: `customized_robotwin/time_run.sh`.
 
 ---

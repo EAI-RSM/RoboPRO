@@ -263,13 +263,21 @@ def box_edge_points(mn, mx, per_edge=24):
 
 
 def write_ply(path, pts, cols):
+    # vectorized write (no per-row Python loop): faster on 80k+ points and avoids
+    # a flaky interpreter crash this env throws on manual zip-iteration.
+    pts = np.asarray(pts, np.float32).reshape(-1, 3)
+    cols = np.asarray(cols).reshape(-1, 3)
+    n = len(pts)
+    header = ("ply\nformat ascii 1.0\n"
+              f"element vertex {n}\n"
+              "property float x\nproperty float y\nproperty float z\n"
+              "property uchar red\nproperty uchar green\nproperty uchar blue\n"
+              "end_header\n")
+    body = np.column_stack([pts, cols.astype(np.int64)])
     with open(path, "w") as f:
-        f.write("ply\nformat ascii 1.0\n")
-        f.write(f"element vertex {len(pts)}\n")
-        f.write("property float x\nproperty float y\nproperty float z\n")
-        f.write("property uchar red\nproperty uchar green\nproperty uchar blue\nend_header\n")
-        for p, c in zip(pts, cols):
-            f.write(f"{p[0]:.4f} {p[1]:.4f} {p[2]:.4f} {c[0]} {c[1]} {c[2]}\n")
+        f.write(header)
+        if n:
+            np.savetxt(f, body, fmt="%.4f %.4f %.4f %d %d %d")
 
 
 def topdown(pts, cols, boxes, path, size=800):

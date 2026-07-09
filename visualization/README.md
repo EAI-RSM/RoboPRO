@@ -21,7 +21,7 @@ python visualization/viz_episode.py <run_dir> 0 [--cam head_camera|cam1,cam2|all
 
 Role colors everywhere: target=red, destination=green, obstacles=orange, robot=blue.
 
-## Export derived data (point clouds / boxes / masks / panel)
+## Export derived data (point clouds / boxes / panel)
 
 Everything except `bbox3d_exact` is computed from stored depth + camera matrices +
 masks. `bbox3d_exact` reads the physics boxes recorded at collection time
@@ -38,14 +38,16 @@ Outputs under `<run_dir>/export/episode0/`:
 
 | flag | files | content |
 |---|---|---|
-| `pcd` | `pcd_<cam>_f<k>.ply` + `.npz` | dense labeled cloud; npz = `xyz` (float32, m, world), `rgb`, `seg_id` — training-ready. `.ply` also carries exact-box wireframes when available. |
+| `pcd` | `pcd_<cam>_f<k>.ply` | dense role-colored point cloud (+ exact-box wireframes when available), open in MeshLab. Honors `--frames`. |
 | `bbox2d` | `bbox2d.json` | per frame, per object: pixel box + id + name + role |
 | `bbox3d` | `bbox3d.json` | per frame, per object: world AABB of its **visible surface** (what the camera sees) |
 | `bbox3d_exact` | `bbox3d_exact.json` | per frame, per object: **exact full-extent** world AABB + pose, from physx (incl. occluded parts). Needs `actor_bbox` in the HDF5. |
-| `masks` | `masks_*.png` (+`_color`) | raw uint16 id masks + colorized preview |
-| `overlay` | `overlay_*.png` | role-colored RGB |
-| `panel` | `panel[_<cam>].png` | quick-look grid: rows=frames, cols = RGB \| depth \| seg \| role overlay \| 2D boxes |
+| `panel` | `panel[_<cam>].png` | quick-look grid — **always 6 rows** (first, last, 4 evenly spaced between, independent of `--frames`), cols = RGB \| depth \| seg \| role overlay \| 2D boxes |
 | always | `meta.json` | id→name map, role→ids, units, `actor_bbox_available` flag |
+
+Masks themselves live in the HDF5 (`actor_segmentation`) and the panel renders them —
+so the exporter no longer dumps standalone mask/overlay PNGs. Point clouds are rebuilt
+from depth on demand (and by the training dataloader), so no `.npz` is written either.
 
 **`bbox3d` vs `bbox3d_exact`:** visible-surface boxes hug only the pixels a camera can
 see (a half-occluded mug → box around the visible half); exact boxes are the physics
