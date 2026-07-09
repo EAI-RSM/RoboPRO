@@ -104,12 +104,61 @@ GRASP_CANDIDATE_LIMIT = 4
 # only value with two consistent, positive data points.
 GRASP_LIFT_HEIGHT = 0.15
 SIDE_WAYPOINT_GAPS = (0.20, 0.24, 0.28)
+# Fallback gaps tried ONLY when none of SIDE_WAYPOINT_GAPS's beside_box target verifies
+# reachable (check_ik_batch, no trajopt) -- confirmed empirically (seed 9, right arm,
+# box far from the shoulder in x): a check_ik_batch sweep at fixed y/z showed a clean
+# reachable/unreachable cutoff at gap<=0.16 vs gap>=0.18, i.e. ALL of SIDE_WAYPOINT_GAPS
+# (0.20-0.28) were unreachable for this box position while smaller gaps were fine. The
+# fixed 3-value set silently assumed the arm can always reach OCC_HALF_FOOTPRINT+gap
+# from the box on its own side, which breaks down for boxes positioned far from the
+# shoulder. Only consulted as a fallback (extra search cost) when the preferred, more
+# clearance-safe gaps all fail to verify.
+SIDE_WAYPOINT_GAPS_FALLBACK = (0.16, 0.12, 0.08)
+# Direct-plan retries for the post-attach placement search specifically (seed 8 class):
+# a check_ik_batch/live-replay probe showed the SAME post_grasp_escape/pre_beside_box
+# move -- confirmed independently reachable via pure IK -- failed 180/180 times with
+# INVALID_START_STATE_WORLD_COLLISION in one background run, then succeeded on EVERY
+# attempt in a fresh replay of the identical seed: the live qpos right after lift+
+# enable_table sits close enough to the table that whether it's flagged in collision is
+# sensitive to CuRobo's own internal trajopt seeding (the same marginal-feasibility
+# nondeterminism already documented for place_actor, just showing up one stage earlier
+# now that the search finds this stage instead of silently skipping it). Retrying the
+# direct plan a few times before falling back to bridge waypoints gives that seeding
+# more chances to land on a working solution, at far lower cost than enabling bridges
+# (each retry is 1 extra trajopt call per combo; each bridge is ~local_attempts more).
+PLACEMENT_SEARCH_RETRIES = 3
 # A direct IK-reachability sweep (check_ik_batch diagnostic) showed the waypoint's
 # feasibility roughly DOUBLES at +0.15m above grasp height (64%) vs the +0.0/+0.06m
 # band this used to test alone (29-36%) -- x/gap and going even higher (+0.30, 54%)
 # both matter far less. +0.15 is the empirically-found sweet spot, not a guess.
 SIDE_WAYPOINT_Z_LIFTS = (0.0, 0.06, 0.15)
 PLACE_CLEARANCE_ZS = (1.05, 1.15, 1.25)
+# Fallback clearance heights tried when NONE of PLACE_CLEARANCE_ZS verifies reachable
+# for lift_above_box (mirrors SIDE_WAYPOINT_GAPS_FALLBACK's reasoning for gaps): a
+# check_ik_batch(relax_orientation=True) height sweep at each seed's beside_box x/y
+# showed the REAL reachable window sits around z~0.8-1.05, i.e. PLACE_CLEARANCE_ZS's
+# two higher values (1.15, 1.25) are unreachable outright regardless of orientation,
+# and even 1.05 needs orientation relaxed to be reachable for some gaps. These lower
+# values give the search somewhere to fall back to if 1.05 isn't enough either.
+PLACE_CLEARANCE_ZS_FALLBACK = (0.95, 0.90, 0.85)
+# Stages that must plan with a fixed (non-relaxed) orientation even when the rest
+# of the placement chain uses relax_orientation=True: center_over_pad is the last
+# placement subgoal before place_actor's own strict final descent, so it needs to
+# hand off a KNOWN, expected orientation, not whatever CuRobo happened to converge
+# to under a free-orientation goal. See _plan_pose_trajectory_sequence.
+PLACEMENT_STRICT_ORIENTATION_STAGES = ("placement:center_over_pad",)
+# Number of local bridge waypoints to try whenever a direct Cartesian plan fails.
+# 0 preserves pure direct planning. POST_GRASP_ESCAPE_ATTEMPTS is accepted as a
+# backward-compatible alias for runs launched before this became universal.
+LOCAL_WAYPOINT_ATTEMPTS = int(os.environ.get(
+    "LOCAL_WAYPOINT_ATTEMPTS", os.environ.get("POST_GRASP_ESCAPE_ATTEMPTS", "9")))
+# Size of the RAW bridge-candidate pool _plan_pose_with_local_waypoint_retry generates
+# before IK-prefiltering (see _local_waypoint_candidates' spec list) -- kept separate
+# from LOCAL_WAYPOINT_ATTEMPTS (which now caps how many IK-VERIFIED candidates get a
+# full trajopt attempt) so a larger, more diverse raw pool can be considered cheaply
+# via a single batched check_ik_batch call, instead of blindly trajopt-attempting
+# whichever fixed-order candidates happen to fall within the attempts budget.
+LOCAL_WAYPOINT_POOL_SIZE = 14
 # Both a second ("top_down") waypoint orientation and a +/-0.05m y-offset search were
 # tried here and measured empirically to fail at the SAME rate as the baseline (both
 # orientations: ~equal IK_FAIL proportion; y-offset: no change in failure proportion
@@ -121,9 +170,13 @@ WAYPOINT_ORIENTATIONS = ("grasp_aligned",)
 WAYPOINT_Y_OFFSETS = (0.0,)
 # Ordered chain stages (see _plan_candidate) -- used to rank how far a candidate got
 # before failing, so the fallback (used when NO candidate fully plans) can pick the
-# one that progressed furthest instead of whichever was generated first.
-STAGE_ORDER = ["waypoint", "pre_grasp", "grasp", "lift",
-               "beside_box", "lift_above_box", "over_box_to_pad_y", "center_over_pad"]
+# one that progressed furthest instead of whichever was generated first. Confirmed via
+# a check_ik_batch reach-envelope probe: a fully-reachable contact point (both pre_grasp
+# and grasp) can exist among the ones tried, but the old "first-generated" fallback
+# picked an unreachable one instead because it happened to rank #1 geometrically.
+STAGE_ORDER = ["waypoint", "pre_grasp", "grasp", "lift", "post_grasp_escape",
+               "pre_beside_box", "beside_box", "pre_lift_above_box",
+               "lift_above_box", "over_box_to_pad_y", "center_over_pad"]
 
 # Reject a (seed, offset) build if the occluder would sit within OCC_PAD_CLEARANCE
 # (edge-to-edge) of the destination pad, so the occluder can never block/overlap the
@@ -601,6 +654,18 @@ def make_occluder_task():
             # add / remove / reorder placement subgoals; each subgoal is one curobo move.
             log_move = os.environ.get("ROBOTWIN_LOG_MOVE", "") == "1"
 
+            # Structured failure recorder (replaces having to grep '[play_once] after'
+            # lines out of ROBOTWIN_LOG_MOVE logs by hand): the FIRST stage whose
+            # checkpoint sees plan_success go False, plus whatever specific CuRobo
+            # fail_reason our own plan+replay helpers captured for it (None for
+            # stages still going through the standard self.move() path, which
+            # doesn't expose a reason). Read by run() after run_rollout() and written
+            # into records.jsonl. Reset per-episode since env is reused across seeds.
+            self.rollout_failure_stage = None
+            self.rollout_failure_reason = None
+            self.rollout_candidate_info = None
+            self._last_fail_reason = None
+
             def checkpoint(name):
                 # Diagnostic: the dry-run candidate search only verifies the
                 # waypoint/pre_grasp/grasp/lift/placement POSES are independently
@@ -610,6 +675,9 @@ def make_occluder_task():
                 # pass the dry run and still die at any of these real-execution-only
                 # steps, or at a step the dry run "verified" but which replans from a
                 # genuinely different qpos in real execution. This pinpoints which.
+                if not self.plan_success and self.rollout_failure_stage is None:
+                    self.rollout_failure_stage = name
+                    self.rollout_failure_reason = self._last_fail_reason
                 if log_move:
                     print(f"[play_once] after {name}: plan_success={self.plan_success}")
 
@@ -622,9 +690,9 @@ def make_occluder_task():
             if candidate_plan["grasp_waypoint"] is not None:
                 wp_trajectory = candidate_plan.get("grasp_waypoint_trajectory")
                 if wp_trajectory is not None:
-                    self._replay_planned_move(arm_tag, wp_trajectory)
+                    self._replay_planned_sequence(arm_tag, wp_trajectory)
                 else:
-                    self.move(self.move_to_pose(arm_tag, candidate_plan["grasp_waypoint"]))
+                    self._plan_and_replay_pose(arm_tag, candidate_plan["grasp_waypoint"])
                 checkpoint("waypoint_move")
             self._grasp_via_cached_trajectories(arm_tag, candidate_plan)
             checkpoint("grasp")
@@ -642,63 +710,44 @@ def make_occluder_task():
             self.enable_table(enable=True)
             checkpoint("enable_table")
 
-            # Re-verify the placement subgoals at real-execution time instead of
-            # trusting whatever the dry-run candidate search baked in. Diagnostics
-            # showed beside_box/lift_above_box failures (seeds 9/11/12) are genuinely
-            # UNREACHABLE endpoints (pure-IK False) at every gap/clearance_z in the
-            # dry-run's own search -- a kinematic dead zone with the grasp-inherited
-            # orientation, not a path-smoothness problem like place_actor was.
+            # Re-select the placement geometry under the REAL attached-object world,
+            # but rank candidates by whether the FULL post-attach motion chain plans
+            # successfully, not just by endpoint IK. Cache the winning trajectories so
+            # these stages are replayed exactly instead of being planned again live.
             _beside_box_pose = candidate_plan["placement_subgoals"][0][1]
             _lift_z = _beside_box_pose[2]
             _quat = list(_beside_box_pose[3:])
-            verified_x_side, verified_clearance_z, verified_quat = self._pick_reachable_placement_geometry(
-                arm_tag, self._place_target_y, _lift_z, _quat)
-            candidate_plan["placement_subgoals"] = self._backward_subgoal_poses_reach(
-                arm_tag, x_side=verified_x_side, clearance_z=verified_clearance_z,
-                lift_pose=[0, 0, _lift_z] + verified_quat,
+            placement_plan = self._select_attached_placement_plan(
+                arm_tag,
+                tgt_y=self._place_target_y,
+                lift_z=_lift_z,
+                quat=_quat,
             )
+            candidate_plan["placement_subgoals"] = placement_plan["placement_subgoals"]
             if log_move:
-                print(f"[placement] verified x_side={verified_x_side:.3f} clearance_z={verified_clearance_z:.2f} "
-                      f"quat={verified_quat}")
-
-            # Same path-smoothness pattern as place_actor's pre_place_descent: seed 11
-            # showed beside_box's pose can be pure-IK verified reachable and STILL fail
-            # in real execution -- a large single jump (lift_pose -> beside_box, often
-            # combining a big lateral shift with an orientation change) that trajopt
-            # can't smoothly interpolate, even though both ends are individually valid.
-            # Insert a blended intermediate step for the same reason it helped there.
-            mid_to_beside_box = self._verified_intermediate(arm_tag, list(self.get_arm_pose(arm_tag)), candidate_plan["placement_subgoals"][0][1])
-            self.move(self.move_to_pose(arm_tag, mid_to_beside_box))
-            checkpoint("placement:pre_beside_box")
-
-            prev_pose = None  # overwritten before use -- "beside_box" is always first
-            for name, pose in candidate_plan["placement_subgoals"]:
-                if name == "lift_above_box":
-                    # Same large-jump shape as place_actor's pre_place_descent and the
-                    # arm-pose -> beside_box entry: beside_box (~grasp height, ~0.85m)
-                    # to lift_above_box (clearance_z, 1.05-1.25m) is another single big
-                    # vertical jump with no intermediate waypoint. Seeds 9/12 die here;
-                    # unlike seeds 11/19's beside_box failures (confirmed genuinely
-                    # unreachable at every geometry combo via pure-IK), lift_above_box's
-                    # pose IS pure-IK verified reachable by _pick_reachable_placement_
-                    # geometry -- so a failure here is the same path-smoothness problem,
-                    # not a dead zone. Apply the identical fix.
-                    mid_to_lift_above_box = self._verified_intermediate(arm_tag, prev_pose, pose)
-                    self.move(self.move_to_pose(arm_tag, mid_to_lift_above_box))
-                    checkpoint("placement:pre_lift_above_box")
-                if log_move and self.plan_success:
-                    # Same diagnostic as place_actor below: is THIS subgoal reachable
-                    # via pure collision-aware IK (object attached, live qpos), before
-                    # we attempt the real trajopt move? Confirms whether a failing
-                    # subgoal here is a genuine reachability problem or -- like
-                    # place_actor -- a path-smoothness problem worth an intermediate
-                    # waypoint instead.
-                    check_ik = self.robot.left_check_ik_batch if str(arm_tag) == "left" else self.robot.right_check_ik_batch
-                    ik_ok = check_ik([pose])
-                    print(f"[placement:{name}] pure-IK reachability (attached, live qpos): {list(ik_ok)}")
-                self.move(self.move_to_pose(arm_tag, pose))
-                checkpoint(f"placement:{name}")
-                prev_pose = pose
+                print(f"[placement] verified x_side={placement_plan['x_side']:.3f} "
+                      f"clearance_z={placement_plan['clearance_z']:.2f} "
+                      f"escape={placement_plan.get('escape_idx', 0)} "
+                      f"quat={placement_plan['quat']}")
+            for stage_name, traj in placement_plan["trajectories"]:
+                self._replay_planned_move(arm_tag, traj)
+                checkpoint(stage_name)
+            # _select_attached_placement_plan's search can exhaust every geometry/
+            # escape combo without ever finding one that plans ALL the way through
+            # (verified=False): it then falls back to the DEEPEST partial chain it
+            # found, whose "trajectories" list is truncated at the stage that kept
+            # failing (confirmed empirically: seed 8/9 checkpoint traces jumped
+            # straight from an early placement subgoal to place_actor's
+            # pre_place_descent, skipping lift_above_box/over_box_to_pad_y/
+            # center_over_pad entirely, yet still reported rollout_success=True).
+            # The loop above only iterates what's actually IN that truncated list,
+            # so it silently "completes" without ever calling checkpoint() for the
+            # missing subgoals -- plan_success never goes False. Make the fallback
+            # an explicit, correctly-attributed failure instead of a silent skip.
+            if self.plan_success and not placement_plan.get("verified", False):
+                self.plan_success = False
+                self._last_fail_reason = placement_plan.get("fail_reason", "unverified_placement_fallback")
+                checkpoint(placement_plan.get("failed_stage") or "placement:unverified_fallback")
             # place_actor lowers the object from the last subgoal onto the pad.
             # constrain="free": check_success is position-only, so alignment buys nothing
             # and was a likely IK_FAIL cause for a tall object held near its top.
@@ -739,7 +788,7 @@ def make_occluder_task():
             # fix pattern as the grasp side: break it into a smaller intermediate step
             # (position+orientation blend) instead of one large jump.
             mid_pose = self._verified_intermediate(arm_tag, candidate_plan["placement_subgoals"][-1][1], place_actions[0].target_pose)
-            self.move(self.move_to_pose(arm_tag, mid_pose))
+            self._plan_and_replay_pose(arm_tag, mid_pose)
             checkpoint("placement:pre_place_descent")
             if log_move:
                 # Diagnostic: is the endpoint itself reachable (pure collision-aware IK,
@@ -753,7 +802,15 @@ def make_occluder_task():
                 move_poses = [a.target_pose for a in place_actions if a.action == "move"]
                 ik_ok = check_ik(move_poses)
                 print(f"[place_actor] pure-IK reachability (attached, live qpos): {list(ik_ok)}")
-            self._execute_actions_via_plan_and_replay(place_arm_tag, place_actions, retries=4)
+            # retries=4 -> 10: the broad-sweep validation (seeds 8-31) confirmed
+            # place_actor is now the dominant remaining failure (4/20, 100%
+            # FINETUNE_TRAJOPT_FAIL) after the grasp/waypoint replay fixes collapsed
+            # grasp failures from 56% to 10%. Since this is a marginal-feasibility
+            # trajopt problem (confirmed: same setup succeeds on one run, fails on
+            # another, purely from CuRobo's internal randomized seeding) rather than a
+            # reachability or divergence bug, more independent retries directly
+            # increases the odds one lands on a working solution.
+            self._execute_actions_via_plan_and_replay(place_arm_tag, place_actions, retries=10)
             checkpoint("place_actor")
 
         def _blend_pose(self, pose_a, pose_b, t=0.5):
@@ -773,7 +830,7 @@ def make_occluder_task():
 
         def _verified_intermediate(self, arm_tag, pose_a, pose_b, fractions=(0.5, 0.35, 0.65, 0.25, 0.75)):
             """Same verify-before-committing principle as
-            _pick_reachable_placement_geometry, applied to a transit waypoint: a naive
+            _select_attached_placement_plan, applied to a transit waypoint: a naive
             midpoint blend can itself be unreachable (confirmed empirically -- seed
             11's pre_beside_box waypoint failed at the plain t=0.5 blend). Try a small
             spread of blend fractions and use whichever verifies reachable via
@@ -801,44 +858,206 @@ def make_occluder_task():
             subgoals.append(("center_over_pad", [pad_x, pad_y, clearance_z, *quat]))
             return subgoals
 
-        def _pick_reachable_placement_geometry(self, arm_tag, tgt_y, lift_z, quat,
-                                               gaps=SIDE_WAYPOINT_GAPS, clearance_options=PLACE_CLEARANCE_ZS):
-            """beside_box/lift_above_box can be genuinely unreachable (pure-IK False)
-            at EVERY gap/clearance_z combo while holding the grasp-inherited
-            orientation -- the same kinematic-dead-zone pattern the original side
-            -waypoint search hit, which needed an orientation search (not just
-            position) to escape. quat comes from choose_best_pose's SHORTEST-PATH
-            grasp rotation, which optimizes for reaching the grasp, not for what
-            happens after -- so it isn't guaranteed workable for placement either.
-            Searches orientation (grasp-inherited vs top_down) x gap for beside_box,
-            then clearance_z within the winning orientation for lift_above_box, all
-            verified via check_ik_batch instead of trusting the dry-run candidate's
-            baked-in geometry. Returns (x_side, clearance_z, quat_to_use)."""
-            check_ik = self.robot.left_check_ik_batch if str(arm_tag) == "left" else self.robot.right_check_ik_batch
+        def _post_grasp_escape_poses(self, arm_tag, attempts=LOCAL_WAYPOINT_ATTEMPTS):
+            """Local escape waypoint candidates from the current held-object pose.
+
+            Candidate zero is `None`, preserving the direct route. The remaining
+            candidates are the bounded local waypoint family for this specific
+            attached-object transition out of the grasped state.
+            """
+            current = list(self.get_arm_pose(arm_tag))
+            return [None] + self._local_waypoint_candidates(
+                arm_tag, current, current, attempts=attempts)
+
+        def _placement_execution_steps(self, arm_tag, placement_subgoals, escape_pose=None):
+            """Build the exact post-attach placement chain we want to execute."""
+            current_pose = list(self.get_arm_pose(arm_tag))
+            steps = []
+            if escape_pose is not None:
+                steps.append(("placement:post_grasp_escape", escape_pose))
+                current_pose = escape_pose
+            if placement_subgoals:
+                beside_box_pose = placement_subgoals[0][1]
+                mid_to_beside_box = self._verified_intermediate(arm_tag, current_pose, beside_box_pose)
+                steps.append(("placement:pre_beside_box", mid_to_beside_box))
+
+            prev_pose = None
+            for name, pose in placement_subgoals:
+                if name == "lift_above_box" and prev_pose is not None:
+                    mid_to_lift_above_box = self._verified_intermediate(arm_tag, prev_pose, pose)
+                    steps.append(("placement:pre_lift_above_box", mid_to_lift_above_box))
+                steps.append((f"placement:{name}", pose))
+                prev_pose = pose
+            return steps
+
+        def _plan_pose_trajectory_sequence(self, arm_tag, stage_poses, start_qpos,
+                                           local_attempts=LOCAL_WAYPOINT_ATTEMPTS, retries=1,
+                                           relax_orientation=False):
+            """Plan a labeled pose chain and keep the exact successful trajectories.
+
+            relax_orientation is withheld for PLACEMENT_STRICT_ORIENTATION_STAGES
+            regardless of the caller's request: relaxing orientation on the LAST
+            placement subgoal (center_over_pad, the handoff into place_actor's own
+            strict, orientation-sensitive final descent) let CuRobo converge to an
+            arbitrary held-object orientation there -- confirmed empirically to
+            cause catastrophic placement misses (one seed landed the object ~51m
+            from the pad, almost certainly a real collision/physics ejection from
+            an orientation the attached-object collision approximation never
+            validated) despite every stage reporting plan_success=True. Interior
+            transit stages stay relaxed (that's where the real IK_FAIL bottleneck
+            was, and they're always followed by at least one more stage -- ending
+            at this forced-strict one -- so any orientation drift there gets
+            corrected before the place_actor handoff."""
+            qpos = np.array(start_qpos, dtype=np.float64, copy=True)
+            trajectories = []
+            start_pose = list(self.get_arm_pose(arm_tag))
+            for stage_name, pose in stage_poses:
+                stage_relax_orientation = relax_orientation and stage_name not in PLACEMENT_STRICT_ORIENTATION_STAGES
+                ok, fail_reason, qpos, stage_trajs = self._plan_pose_with_local_waypoint_retry(
+                    arm_tag, pose, qpos, stage_name, start_pose=start_pose,
+                    local_attempts=local_attempts, retries=retries,
+                    relax_orientation=stage_relax_orientation)
+                if not ok:
+                    return False, stage_name, fail_reason, trajectories
+                trajectories.extend(stage_trajs)
+                start_pose = pose
+            return True, None, None, trajectories
+
+        def _select_attached_placement_plan(self, arm_tag, tgt_y, lift_z, quat,
+                                            gaps=SIDE_WAYPOINT_GAPS, clearance_options=PLACE_CLEARANCE_ZS,
+                                            fallback_gaps=SIDE_WAYPOINT_GAPS_FALLBACK,
+                                            clearance_fallback=PLACE_CLEARANCE_ZS_FALLBACK):
+            """Pick placement geometry by FULL attached-world motion-plan success.
+
+            Endpoint IK is a useful prefilter, but the remaining failures here have
+            increasingly been about the chained motion itself. This helper keeps the
+            same geometry search space, then scores candidates by whether the exact
+            post-attach execution chain plans successfully from the current live qpos.
+            The winning trajectories are cached for immediate replay.
+
+            Every stage this searches over (post_grasp_escape, beside_box,
+            lift_above_box, over_box_to_pad_y, center_over_pad, and the blended
+            pre_* transit waypoints between them) is a pure carry-the-held-object
+            move -- check_success() never looks at orientation en route, only the
+            final x/y placement. So both the prefilters and the real trajopt calls
+            below use relax_orientation=True (position-only goals): a
+            check_ik_batch(relax_orientation=True) sweep confirmed this opens up
+            real, currently-dead combos at lift_above_box that strict full-pose IK
+            rejects outright."""
             log_move = os.environ.get("ROBOTWIN_LOG_MOVE", "") == "1"
             quat_options = (quat, GRASP_DIRECTION_DIC["top_down"])
-            fallback = None  # best partial match: beside_box verified, but no clearance_z did
-            for quat_choice in quat_options:
-                x_sides = [self._box_side_x_reach(arm_tag, gap=g) for g in gaps]
-                beside_box_ok = check_ik([[x, tgt_y, lift_z, *quat_choice] for x in x_sides])
+            start_qpos = self.robot.left_entity.get_qpos() if str(arm_tag) == "left" else self.robot.right_entity.get_qpos()
+            check_ik = self.robot.left_check_ik_batch if str(arm_tag) == "left" else self.robot.right_check_ik_batch
+            fallback = None
+            fallback_depth = -1
+            failure_breakdown = {}
+            escape_poses = self._post_grasp_escape_poses(arm_tag, attempts=LOCAL_WAYPOINT_ATTEMPTS)
+
+            # gaps first, fallback_gaps ONLY if NOTHING in gaps ever verified reachable
+            # (the seed-9 case: box far enough from the shoulder that ALL of SIDE_
+            # WAYPOINT_GAPS's beside_box targets are IK-infeasible, so the full trajopt
+            # chain never even had a chance regardless of clearance/escape/quat).
+            for gap_values in (gaps, fallback_gaps):
+                any_reachable_x = False
+                for quat_choice in quat_options:
+                    for gap in gap_values:
+                        x = self._box_side_x_reach(arm_tag, gap=gap)
+                        # Cheap prefilter (no trajopt): beside_box's height (lift_z) and
+                        # y (tgt_y) don't depend on clearance_z/escape_idx, so checking
+                        # reachability once per (gap, quat) here skips the ENTIRE cz x
+                        # escape_idx loop (up to 30 full trajopt chains) for a gap whose
+                        # target could never succeed regardless of how it's reached.
+                        if not bool(check_ik([[x, tgt_y, lift_z, *quat_choice]], relax_orientation=True)[0]):
+                            failure_breakdown[("placement:beside_box", "IK_prefilter_unreachable")] = (
+                                failure_breakdown.get(("placement:beside_box", "IK_prefilter_unreachable"), 0) + 1)
+                            if log_move:
+                                print(f"[placement-plan] gap={gap:.2f} x_side={x:.3f} quat={quat_choice} "
+                                      f"skipped: beside_box IK-unreachable (prefilter)")
+                            continue
+                        any_reachable_x = True
+                        for cz in list(clearance_options) + list(clearance_fallback):
+                            # Same idea as the beside_box prefilter above, one level
+                            # deeper: lift_above_box shares this (x, tgt_y) and only
+                            # varies in z (clearance) -- skip a clearance value here
+                            # (cheaply) rather than discovering it's dead only after
+                            # the full escape_idx loop of trajopt chains.
+                            if not bool(check_ik([[x, tgt_y, cz, *quat_choice]], relax_orientation=True)[0]):
+                                failure_breakdown[("placement:lift_above_box", "IK_prefilter_unreachable")] = (
+                                    failure_breakdown.get(("placement:lift_above_box", "IK_prefilter_unreachable"), 0) + 1)
+                                if log_move:
+                                    print(f"[placement-plan] gap={gap:.2f} x_side={x:.3f} clearance_z={cz:.2f} "
+                                          f"quat={quat_choice} skipped: lift_above_box IK-unreachable (prefilter)")
+                                continue
+                            placement_subgoals = self._backward_subgoal_poses_reach(
+                                arm_tag,
+                                x_side=x,
+                                clearance_z=cz,
+                                lift_pose=[0, 0, lift_z, *quat_choice],
+                            )
+                            for escape_idx, escape_pose in enumerate(escape_poses):
+                                stage_poses = self._placement_execution_steps(
+                                    arm_tag, placement_subgoals, escape_pose=escape_pose)
+                                ok, failed_stage, fail_reason, trajectories = self._plan_pose_trajectory_sequence(
+                                    arm_tag, stage_poses, start_qpos, local_attempts=0,
+                                    retries=PLACEMENT_SEARCH_RETRIES, relax_orientation=True)
+                                if ok:
+                                    return {
+                                        "x_side": x,
+                                        "clearance_z": cz,
+                                        "quat": quat_choice,
+                                        "escape_idx": escape_idx,
+                                        "placement_subgoals": placement_subgoals,
+                                        "trajectories": trajectories,
+                                        "verified": True,
+                                    }
+                                depth = STAGE_ORDER.index(failed_stage.split("placement:")[-1]) if (
+                                    failed_stage and failed_stage.startswith("placement:")
+                                    and failed_stage.split("placement:")[-1] in STAGE_ORDER
+                                ) else -1
+                                if depth > fallback_depth:
+                                    fallback = {
+                                        "x_side": x,
+                                        "clearance_z": cz,
+                                        "quat": quat_choice,
+                                        "escape_idx": escape_idx,
+                                        "placement_subgoals": placement_subgoals,
+                                        "trajectories": trajectories,
+                                        "verified": False,
+                                        "failed_stage": failed_stage,
+                                        "fail_reason": fail_reason,
+                                    }
+                                    fallback_depth = depth
+                                failure_breakdown[(failed_stage, fail_reason)] = failure_breakdown.get((failed_stage, fail_reason), 0) + 1
+                                if log_move:
+                                    print(f"[placement-plan] x_side={x:.3f} clearance_z={cz:.2f} "
+                                          f"escape={escape_idx} quat={quat_choice} failed at "
+                                          f"{failed_stage} ({fail_reason})")
+                if any_reachable_x or gap_values is not gaps:
+                    break
                 if log_move:
-                    print(f"[placement] beside_box quat={quat_choice} gaps={gaps} ok={list(beside_box_ok)}")
-                for x, reachable in zip(x_sides, beside_box_ok):
-                    if not reachable:
-                        continue
-                    cz_ok = check_ik([[x, tgt_y, cz, *quat_choice] for cz in clearance_options])
-                    if log_move:
-                        print(f"[placement] lift_above_box x_side={x:.3f} quat={quat_choice} "
-                              f"clearance_options={clearance_options} ok={list(cz_ok)}")
-                    for cz, cz_reachable in zip(clearance_options, cz_ok):
-                        if cz_reachable:
-                            return x, cz, quat_choice   # both beside_box AND lift_above_box verified
-                    if fallback is None:
-                        fallback = (x, clearance_options[0], quat_choice)  # beside_box ok; keep searching
+                    print(f"[placement-plan] none of gaps={gap_values} verified beside_box-reachable "
+                          f"for any quat; trying fallback gaps={fallback_gaps}")
+            if log_move and fallback is not None:
+                print(f"[placement-plan] no fully planned geometry; using deepest fallback "
+                      f"(depth={fallback_depth}) with breakdown={failure_breakdown}")
             if fallback is not None:
                 return fallback
-            # nothing verified at all; fall back to the original defaults
-            return self._box_side_x_reach(arm_tag, gap=gaps[0]), clearance_options[0], quat
+            placement_subgoals = self._backward_subgoal_poses_reach(
+                arm_tag,
+                x_side=self._box_side_x_reach(arm_tag, gap=gaps[0]),
+                clearance_z=clearance_options[0],
+                lift_pose=[0, 0, lift_z, *quat],
+            )
+            return {
+                "x_side": self._box_side_x_reach(arm_tag, gap=gaps[0]),
+                "clearance_z": clearance_options[0],
+                "quat": quat,
+                "placement_subgoals": placement_subgoals,
+                "trajectories": [],
+                "verified": False,
+                "failed_stage": None,
+                "fail_reason": "no_geometry_attempted",
+            }
 
         def _box_side_x_reach(self, arm_tag, gap=SIDE_WAYPOINT_GAPS[1]):
             """World x beside the occluder on the arm's OWN side (right -> +x, left -> -x),
@@ -942,6 +1161,7 @@ def make_occluder_task():
                 return
             if cached_result is None or cached_result.get("status") != "Success":
                 self.plan_success = False
+                self._last_fail_reason = (cached_result or {}).get("fail_reason", "unknown")
                 return
             if str(arm_tag) == "left":
                 if self.need_plan:
@@ -978,36 +1198,54 @@ def make_occluder_task():
             retry re-attempts ONLY the failed action, not the whole chain."""
             if not self.plan_success:
                 return
-            plan_func = self._arm_plan_func(arm_tag)
             start_qpos = self.robot.left_entity.get_qpos() if str(arm_tag) == "left" else self.robot.right_entity.get_qpos()
             qpos = np.array(start_qpos, dtype=np.float64, copy=True)
             trajectories = []
+            start_pose = list(self.get_arm_pose(arm_tag))
+            move_idx = 0
             for a in actions:
                 if a.action != "move":
                     continue
-                for attempt in range(retries):
-                    result = plan_func(a.target_pose, last_qpos=qpos,
-                                       constraint_pose=a.args.get("constraint_pose"),
-                                       approach_axis=a.args.get("approach_axis"))
-                    if result.get("status") == "Success":
-                        break
-                    if os.environ.get("ROBOTWIN_LOG_MOVE", "") == "1":
-                        print(f"[plan_and_replay] attempt {attempt + 1}/{retries} failed "
-                              f"({result.get('fail_reason')}) for target {np.round(np.asarray(a.target_pose, dtype=float), 4)}")
-                if result.get("status") != "Success":
+                move_idx += 1
+                ok, fail_reason, qpos, stage_trajs = self._plan_pose_with_local_waypoint_retry(
+                    arm_tag, a.target_pose, qpos, f"place_actor:move{move_idx}",
+                    start_pose=start_pose, retries=retries,
+                    constraint_pose=a.args.get("constraint_pose"),
+                    approach_axis=a.args.get("approach_axis"))
+                if not ok:
                     self.plan_success = False
+                    self._last_fail_reason = fail_reason
                     return
-                trajectories.append(result)
-                qpos = self._roll_qpos_forward(arm_tag, qpos, result)
-            for traj in trajectories:
-                self._replay_planned_move(arm_tag, traj)
-                if not self.plan_success:
-                    return
+                trajectories.extend(stage_trajs)
+                start_pose = a.target_pose
+            self._replay_planned_sequence(arm_tag, trajectories)
+            if not self.plan_success:
+                return
             for a in actions:
                 if a.action != "move":
                     self.move((arm_tag, [a]))
                     if not self.plan_success:
                         return
+
+        def _plan_and_replay_pose(self, arm_tag, pose):
+            """Plan a single pose from the CURRENT live qpos and immediately replay
+            it via _replay_planned_move, instead of self.move(self.move_to_pose(...)).
+            For a lone plan-then-immediately-execute call like this there's no
+            separate earlier verification pass to diverge from (unlike waypoint/
+            grasp/place_actor), so this isn't fixing a re-plan-divergence bug here --
+            its value is exposing the specific CuRobo fail_reason via
+            self._last_fail_reason for the structured failure recorder, and using the
+            same execution primitive as the rest of this file for consistency."""
+            if not self.plan_success:
+                return
+            start_qpos = self.robot.left_entity.get_qpos() if str(arm_tag) == "left" else self.robot.right_entity.get_qpos()
+            ok, fail_reason, _, trajectories = self._plan_pose_with_local_waypoint_retry(
+                arm_tag, pose, np.array(start_qpos, dtype=np.float64, copy=True), "pose")
+            if not ok:
+                self.plan_success = False
+                self._last_fail_reason = fail_reason
+                return
+            self._replay_planned_sequence(arm_tag, trajectories)
 
         def _grasp_via_cached_trajectories(self, arm_tag, candidate_plan, gripper_pos=0.0):
             """Replay the dry-run-verified pre_grasp/grasp trajectories (see
@@ -1025,9 +1263,9 @@ def make_occluder_task():
                 return self.grasp_actor_from_table_reach(
                     self.target_obj, arm_tag=arm_tag, pre_grasp_dis=0.1,
                     contact_point_id=candidate_plan["contact_point_id"])
-            self._replay_planned_move(arm_tag, pre_traj)
+            self._replay_planned_sequence(arm_tag, pre_traj)
             self.enable_table(enable=False)
-            self._replay_planned_move(arm_tag, grasp_traj)
+            self._replay_planned_sequence(arm_tag, grasp_traj)
             self.move(self.close_gripper(arm_tag, pos=gripper_pos))
 
         def grasp_actor_from_table_reach(self, actor, arm_tag, pre_grasp_dis=0.1, grasp_dis=0,
@@ -1063,6 +1301,140 @@ def make_occluder_task():
             qpos_next[active_indices] = np.asarray(plan_result["position"][-1], dtype=np.float64)
             return qpos_next
 
+        def _local_waypoint_candidates(self, arm_tag, start_pose, target_pose, attempts=LOCAL_WAYPOINT_ATTEMPTS):
+            """Bridge candidates near the current/start pose for any Cartesian move."""
+            try:
+                attempts = max(0, int(attempts))
+            except (TypeError, ValueError):
+                attempts = LOCAL_WAYPOINT_ATTEMPTS
+            if attempts == 0:
+                return []
+            start = np.asarray(start_pose, dtype=float)
+            target = np.asarray(target_pose, dtype=float)
+            side = 1.0 if str(arm_tag) == "right" else -1.0
+            specs = [
+                ("offset", 0.00, 0.00, 0.04, 0.00),
+                ("offset", 0.04, 0.00, 0.04, 0.00),
+                ("offset", 0.08, 0.00, 0.06, 0.00),
+                ("offset", 0.00, -0.04, 0.06, 0.00),
+                ("offset", 0.04, -0.04, 0.08, 0.00),
+                ("offset", 0.08, -0.04, 0.08, 0.00),
+                ("offset", 0.00, 0.04, 0.06, 0.00),
+                ("blend", 0.00, 0.00, 0.04, 0.35),
+                ("blend", 0.04, 0.00, 0.06, 0.35),
+                ("blend", 0.00, -0.04, 0.08, 0.35),
+                ("offset", 0.10, 0.00, 0.10, 0.00),
+                ("offset", 0.10, -0.06, 0.10, 0.00),
+                # Added when the bridge search gained an IK prefilter (see
+                # _plan_pose_with_local_waypoint_retry): a bigger pure-vertical lift
+                # (no lateral offset -- the direction that resolved the escape/
+                # pre_beside_box INVALID_START_STATE_WORLD_COLLISION failures) and a
+                # later blend fraction, both cheap to add now that infeasible
+                # candidates are filtered before spending a trajopt call on them.
+                ("offset", 0.00, 0.00, 0.10, 0.00),
+                ("blend", 0.00, 0.00, 0.00, 0.50),
+            ]
+            candidates = []
+            for mode, dx_side, dy, dz, blend_t in specs[:attempts]:
+                pose = self._blend_pose(start, target, blend_t) if mode == "blend" else list(start)
+                pose[0] = float(np.clip(pose[0] + side * dx_side, -REACH_X_LIMIT, REACH_X_LIMIT))
+                pose[1] = float(np.clip(pose[1] + dy, -0.33, 0.30))
+                pose[2] = float(np.clip(pose[2] + dz, 0.78, 1.30))
+                candidates.append(pose)
+            return candidates
+
+        def _plan_pose_with_local_waypoint_retry(self, arm_tag, target_pose, qpos, stage_label,
+                                                start_pose=None, retries=1, constraint_pose=None,
+                                                approach_axis=None, local_attempts=LOCAL_WAYPOINT_ATTEMPTS,
+                                                relax_orientation=False):
+            """Plan one target; if direct planning fails, try local bridge waypoints.
+
+            relax_orientation=True: position-only goal (PoseCostMetric.
+            reach_partial_pose, see planner.py's plan_path) -- for transit-only moves
+            where the target's orientation doesn't matter, only its position. A
+            check_ik_batch(relax_orientation=True) sweep confirmed this opens up
+            real, currently-dead combos (e.g. lift_above_box at low clearance_z).
+            Applied to every attempt that targets target_pose itself (direct
+            attempts and each bridge's final leg); the bridge_pose hop itself stays
+            strict since it's just a short, already-IK-verified step, not the real
+            target."""
+            log_move = os.environ.get("ROBOTWIN_LOG_MOVE", "") == "1"
+            plan_func = self._arm_plan_func(arm_tag)
+            qpos0 = np.array(qpos, dtype=np.float64, copy=True)
+            start_pose = list(self.get_arm_pose(arm_tag)) if start_pose is None else list(start_pose)
+            last_reason = "unknown"
+            for _ in range(max(1, int(retries))):
+                result = plan_func(target_pose, last_qpos=qpos0,
+                                   constraint_pose=constraint_pose, approach_axis=approach_axis,
+                                   relax_orientation=relax_orientation)
+                if result.get("status") == "Success":
+                    return True, None, self._roll_qpos_forward(arm_tag, qpos0, result), [(stage_label, result)]
+                last_reason = result.get("fail_reason", "unknown")
+            if local_attempts <= 0:
+                return False, last_reason, qpos0, []
+            # Fail fast if the target itself has NO collision-free IK solution at all
+            # (independent of constraint_pose/approach_axis, which can only make a
+            # pose HARDER to reach, never easier -- so IK-infeasible unconstrained
+            # implies infeasible constrained too): no bridge waypoint can rescue a
+            # destination with zero valid joint configurations, since every bridge's
+            # final leg still has to land on that exact target. Confirmed empirically
+            # (seed 9's "beside_box" target failed IK_FAIL at every one of 171/180
+            # geometry combos while every bridge's final-leg retry burned a full
+            # trajopt call chasing a target that could never succeed). Skipping this
+            # saves local_attempts*retries wasted trajopt calls per failing stage.
+            # Matches relax_orientation: if the direct attempt was position-only,
+            # the prefilter must ask the same question, not the strict one.
+            check_ik = self.robot.left_check_ik_batch if str(arm_tag) == "left" else self.robot.right_check_ik_batch
+            if not bool(check_ik([target_pose], relax_orientation=relax_orientation)[0]):
+                if log_move:
+                    print(f"[local-waypoint] {stage_label} target IK-unreachable; skipping bridges")
+                return False, "target_unreachable", qpos0, []
+            # Generate a larger raw candidate pool than we'll actually spend trajopt
+            # budget on, batch-verify it in one cheap check_ik_batch call, and only
+            # full-trajopt-plan the subset that verifies reachable (in original
+            # preference order) -- instead of blindly trajopt-attempting a fixed list
+            # regardless of whether each candidate is even IK-feasible.
+            raw_pool = self._local_waypoint_candidates(
+                arm_tag, start_pose, target_pose, attempts=LOCAL_WAYPOINT_POOL_SIZE)
+            if raw_pool:
+                pool_ok = check_ik(raw_pool)
+                bridge_candidates = [c for c, ok in zip(raw_pool, pool_ok) if ok][:local_attempts]
+                if log_move:
+                    print(f"[local-waypoint] {stage_label} bridge pool: {len(raw_pool)} generated, "
+                          f"{int(np.sum(pool_ok))} IK-reachable, trying {len(bridge_candidates)}")
+            else:
+                bridge_candidates = []
+            for bridge_idx, bridge_pose in enumerate(bridge_candidates, start=1):
+                bridge_label = f"{stage_label}:local_waypoint{bridge_idx}"
+                bridge_result = plan_func(bridge_pose, last_qpos=qpos0)
+                if bridge_result.get("status") != "Success":
+                    last_reason = bridge_result.get("fail_reason", last_reason)
+                    continue
+                qpos_bridge = self._roll_qpos_forward(arm_tag, qpos0, bridge_result)
+                for _ in range(max(1, int(retries))):
+                    result = plan_func(target_pose, last_qpos=qpos_bridge,
+                                       constraint_pose=constraint_pose, approach_axis=approach_axis,
+                                       relax_orientation=relax_orientation)
+                    if result.get("status") == "Success":
+                        qpos_next = self._roll_qpos_forward(arm_tag, qpos_bridge, result)
+                        return True, None, qpos_next, [(bridge_label, bridge_result), (stage_label, result)]
+                    last_reason = result.get("fail_reason", last_reason)
+                if log_move:
+                    print(f"[local-waypoint] {stage_label} bridge {bridge_idx} failed final target ({last_reason})")
+            return False, last_reason, qpos0, []
+
+        def _replay_planned_sequence(self, arm_tag, trajectories):
+            """Replay one planned trajectory or a list of labeled trajectories."""
+            if trajectories is None:
+                return
+            if isinstance(trajectories, dict):
+                trajectories = [trajectories]
+            for item in trajectories:
+                traj = item[1] if isinstance(item, tuple) else item
+                self._replay_planned_move(arm_tag, traj)
+                if not self.plan_success:
+                    return
+
         def _plan_pose_sequence(self, arm_tag, poses, start_qpos, stage_labels=None):
             """Returns (success, failed_stage_label, fail_reason, final_qpos).
             failed_stage_label/fail_reason are None on success; failed_stage_label is
@@ -1074,13 +1446,14 @@ def make_occluder_task():
             so a caller can resume planning a follow-on sub-chain from where this one
             left off (e.g. after toggling world state between segments)."""
             qpos = np.array(start_qpos, dtype=np.float64, copy=True)
-            plan_func = self._arm_plan_func(arm_tag)
+            start_pose = list(self.get_arm_pose(arm_tag))
             for idx, pose in enumerate(poses):
-                result = plan_func(pose, last_qpos=qpos)
-                if result.get("status") != "Success":
-                    label = stage_labels[idx] if stage_labels else f"pose{idx}"
-                    return False, label, result.get("fail_reason", "unknown"), qpos
-                qpos = self._roll_qpos_forward(arm_tag, qpos, result)
+                label = stage_labels[idx] if stage_labels else f"pose{idx}"
+                ok, fail_reason, qpos, _ = self._plan_pose_with_local_waypoint_retry(
+                    arm_tag, pose, qpos, label, start_pose=start_pose)
+                if not ok:
+                    return False, label, fail_reason, qpos
+                start_pose = pose
             return True, None, None, qpos
 
         def _candidate_specs(self, arm_tag, cp_ids):
@@ -1154,16 +1527,14 @@ def make_occluder_task():
             start_qpos = self.robot.left_entity.get_qpos() if str(arm_tag) == "left" else self.robot.right_entity.get_qpos()
             qpos = np.array(start_qpos, dtype=np.float64, copy=True)
             trajectories = {}
-            plan_func = self._arm_plan_func(arm_tag)
-
             if candidate["grasp_waypoint"] is not None:
-                waypoint_trajectory = plan_func(candidate["grasp_waypoint"], last_qpos=qpos)
-                if waypoint_trajectory.get("status") != "Success":
-                    result = (False, "waypoint", waypoint_trajectory.get("fail_reason", "unknown"), None, None, None)
+                ok, fail_reason, qpos, waypoint_trajectory = self._plan_pose_with_local_waypoint_retry(
+                    arm_tag, candidate["grasp_waypoint"], qpos, "waypoint")
+                if not ok:
+                    result = (False, "waypoint", fail_reason, None, None, None)
                     cache[key] = result
                     return result
                 trajectories["waypoint"] = waypoint_trajectory
-                qpos = self._roll_qpos_forward(arm_tag, qpos, waypoint_trajectory)
             grasp_side_start_qpos = qpos  # pre_grasp/grasp poses are both determined from here (unchained)
 
             # Validate the SAME grasp-pose selection real execution uses
@@ -1190,21 +1561,21 @@ def make_occluder_task():
 
             # Now plan+capture the ACTUAL trajectories to replay, CHAINED (pre_grasp
             # then grasp from wherever pre_grasp lands), matching physical execution.
-            pre_grasp_trajectory = plan_func(pre_grasp_pose, last_qpos=qpos)
-            if pre_grasp_trajectory.get("status") != "Success":
-                result = (False, "pre_grasp", pre_grasp_trajectory.get("fail_reason", "unknown"), None, None, None)
+            ok, fail_reason, qpos, pre_grasp_trajectory = self._plan_pose_with_local_waypoint_retry(
+                arm_tag, pre_grasp_pose, qpos, "pre_grasp", start_pose=candidate.get("grasp_waypoint"))
+            if not ok:
+                result = (False, "pre_grasp", fail_reason, None, None, None)
                 cache[key] = result
                 return result
             trajectories["pre_grasp"] = pre_grasp_trajectory
-            qpos = self._roll_qpos_forward(arm_tag, qpos, pre_grasp_trajectory)
 
-            grasp_trajectory = plan_func(grasp_pose, last_qpos=qpos)
-            if grasp_trajectory.get("status") != "Success":
-                result = (False, "grasp", grasp_trajectory.get("fail_reason", "unknown"), None, None, None)
+            ok, fail_reason, qpos, grasp_trajectory = self._plan_pose_with_local_waypoint_retry(
+                arm_tag, grasp_pose, qpos, "grasp", start_pose=pre_grasp_pose)
+            if not ok:
+                result = (False, "grasp", fail_reason, None, None, None)
                 cache[key] = result
                 return result
             trajectories["grasp"] = grasp_trajectory
-            qpos = self._roll_qpos_forward(arm_tag, qpos, grasp_trajectory)
 
             lift_pose = list(grasp_pose)
             lift_pose[2] += GRASP_LIFT_HEIGHT
@@ -1268,8 +1639,16 @@ def make_occluder_task():
             return ok2, failed_stage2, fail_reason2
 
         def _select_pick_place_candidate(self, arm_tag):
+            # Selected-candidate metadata for the structured failure recorder (see
+            # play_once): whether the executed candidate was fully dry-run-verified
+            # or a fallback, and if a fallback, how far it got in the dry run and
+            # the full failure breakdown across everything tried. Lets records.jsonl
+            # distinguish "the dry run found a working plan and it still failed for
+            # real" from "the dry run never found anything workable to begin with"
+            # without re-deriving it from ROBOTWIN_LOG_MOVE logs.
             cp_ids = self._rank_side_grasp_ids(self.target_obj, arm_tag)
             if not cp_ids:
+                self.rollout_candidate_info = {"verified": False, "reason": "no_ranked_contact_points"}
                 return {
                     "contact_point_id": None,
                     "grasp_waypoint": None,
@@ -1300,6 +1679,9 @@ def make_occluder_task():
                             f"y_offset={candidate['y_offset']:.2f} "
                             f"clearance_z={candidate['clearance_z']:.2f} (tried {tried})"
                         )
+                    self.rollout_candidate_info = {
+                        "verified": True, "contact_point_id": candidate["contact_point_id"], "tried": tried,
+                    }
                     return candidate
                 # Fallback = the candidate that progressed FURTHEST through the chain
                 # before failing, not just the first one generated -- a later cp_id can
@@ -1318,6 +1700,13 @@ def make_occluder_task():
                     f"(died at '{fallback_stage}', depth {fallback_depth}); "
                     f"failure breakdown (stage -> {{reason: count}}): {failure_breakdown}"
                 )
+            self.rollout_candidate_info = {
+                "verified": False,
+                "contact_point_id": fallback["contact_point_id"] if fallback else None,
+                "tried": tried,
+                "dry_run_fallback_stage": fallback_stage,
+                "dry_run_failure_breakdown": failure_breakdown,
+            }
             return fallback
 
 
@@ -1584,6 +1973,16 @@ def run(args):
                                                         f"video/episode{ep_counter}.mp4")
                     if artifact.get("hdf5_relpath"):
                         rec["rollout_hdf5"] = artifact["hdf5_relpath"]
+                    rec["rollout_bucket"] = artifact.get("bucket", "success" if success else "fail")
+                    rec["rollout_data"] = artifact.get(
+                        "hdf5_relpath", f"{rec['rollout_bucket']}/data/episode{ep_counter}.hdf5")
+                    # Structured failure/candidate metadata set by _play_once_reachability
+                    # (see its checkpoint()/_select_pick_place_candidate) -- plain attrs on the
+                    # reused env, so they survive run_rollout's internal close. None on success.
+                    # Read by scripts/validation/analyze_occluder_rollout_failures.py.
+                    rec["rollout_failure_stage"] = getattr(env, "rollout_failure_stage", None)
+                    rec["rollout_failure_reason"] = getattr(env, "rollout_failure_reason", None)
+                    rec["rollout_candidate_info"] = getattr(env, "rollout_candidate_info", None)
                     print(f"    seed {seed} off={off:.2f} cd={cd} {res['bucket']}: "
                           f"rollout {'SUCCESS' if success else 'FAIL'} -> {rec['rollout_video']}")
                     ep_counter += 1
