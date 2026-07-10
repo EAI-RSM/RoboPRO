@@ -1,6 +1,6 @@
-"""Run ONE seed of the mmz grounding-data collector (single-episode subprocess).
+"""Run ONE seed of the grounding-data collector (single-episode subprocess).
 
-The per-seed unit behind mmz_tools/collect_parallel.py's dynamic GPU dispatch
+The per-seed unit behind script/collect_parallel.py's dynamic GPU dispatch
 (targetted-failures style: workers pull seeds from a shared stream, all writing
 into ONE run dir). Mirrors exactly one search-iteration + one collect-iteration
 of collect_data.run(); concurrent-safe via an flock'd slot file:

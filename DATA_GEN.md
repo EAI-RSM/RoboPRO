@@ -14,7 +14,7 @@ episode, ready for large-scale collection.
   one (4-way outcome labels + filtering + planner-blindness for negative samples) and then
   **removed it from the branch** so you start from a clean slate — §3 summarizes what it
   was and where to find the full reference implementation in git history.
-- One commented example config remains: `benchmark/bench_task_config/mmz_template.yml`.
+- One commented example config remains: `benchmark/bench_task_config/datagen_template.yml`.
 
 Quick start for tools/collection commands: `visualization/README.md`.
 
@@ -30,7 +30,7 @@ Quick start for tools/collection commands: `visualization/README.md`.
 | `customized_robotwin/script/collect_data.py` | writes id-map/role sidecar into `scene_info.json`; organized per-episode output + end-of-run summary; per-episode crash guards (one bad episode no longer kills a run) |
 | `visualization/` (viz_episode, export, inspect_hdf5, README) | standalone inspect / viz / **on-demand export** (point clouds, 2D/3D boxes, masks, overlays) tools |
 | `customized_robotwin/time_run.sh` | timing helper (wall time → sec/episode → dataset projection) |
-| `benchmark/bench_task_config/mmz_template.yml` | single commented example config |
+| `benchmark/bench_task_config/datagen_template.yml` | single commented example config |
 
 Nothing outside these files is modified — the `benchmark/bench_envs/` scene classes and
 all stock `bench_*` configs are **untouched stock RoboPRO**.

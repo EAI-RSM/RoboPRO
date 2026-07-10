@@ -13,7 +13,7 @@ and writes, under <run_dir>/viz/episode<idx>/:
 Colors: target=red, destination=green, obstacles=orange, robot=blue, other=gray.
 
 Usage (run_dir = the (task, config) output dir):
-    python viz_episode.py data/mmz_samples/put_mouse_on_pad/mmz_d10 0
+    python viz_episode.py data/dataset/put_mouse_on_pad/datagen_template 0
     python viz_episode.py <run_dir> <episode_idx> [--cam head_camera] [--frames 6]
 """
 import argparse
