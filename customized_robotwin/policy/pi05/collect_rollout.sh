@@ -43,7 +43,7 @@ export ROBOTWIN_BENCH_TASK="${ROBOTWIN_BENCH_TASK:-}"
 
 export CUDA_VISIBLE_DEVICES=${client_gpu}
 
-cd ../..  # → customized_robotwin/
+cd "${SCRIPT_DIR}/../.."  # -> customized_robotwin/ (robust to invocation cwd)
 
 FREE_PORT=$(python3 - << 'EOF'
 import socket

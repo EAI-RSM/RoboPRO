@@ -205,7 +205,7 @@ Everything below is written by `bash collect_data.sh <task> <config> <gpu|gpu,gp
 | `object_poses` | (T, N, 7) f32 | pose of every non-robot actor per frame `[x,y,z,qw,qx,qy,qz]`; column j = object `object_pose_ids[j]` (scene_info) |
 | `contact` | (T,) u8 | robot↔world contact in the frame window (see 5.2) |
 | `contact_impulse` | (T,) f32 | max contact impulse (N·s) behind the contact flag that frame |
-| `contact_pairs` | (T,) JSON bytes | list of `"a\|b"` body pairs touching that frame |
+| `contact_pairs` | (T,) JSON bytes | list of `"a\|b"` body pairs touching that frame; non-robot bodies are `name#per_scene_id` (exact instance — twins of one model are distinct; robot links plain). Datasets before 2026-07-10 use plain names |
 | `collision` / `collision_impulse` / `collision_pairs` | as above | same triple for the collision flag (see 5.2) |
 | `pointcloud` | (T, 0) | EMPTY stock placeholder — ignore (pointcloud stays off; rebuild dense clouds from depth+K/E+masks) |
 
@@ -227,18 +227,36 @@ displacement, 10 N furniture impulse gate** (`_bench_base_task.py` constants).
 - `contact[t]` = the robot touched something it was NOT supposed to touch —
   directly (a robot link), through the HELD TARGET object (a carried book
   knocking a bottle), or through a robot-ACTUATED body (the drawer being closed
-  shoving an item). Excludes robot self-contacts, base wheel↔ground support,
-  the task TARGET itself, ALL DESTINATIONS (`des_obj*`), and INTENDED contacts
-  (anything the task passed to `grasp_actor` — drawer/appliance handles + their
-  articulation links).
-- `collision[t]` = impulse-gated robot↔furniture hit, OR robot/held-target
-  touching a static object whose pose has moved ≥ threshold from its episode-
-  start pose (no baseline snapshot ⇒ NOT a collision — no phantom flags).
+  shoving an item) — **with actual force exchange** (pair impulse > 1e-6 N·s;
+  PhysX zero-impulse margin "contacts" are not touches). Excludes robot
+  self-contacts, base wheel↔ground support, the task TARGET itself, ALL
+  DESTINATIONS (`des_obj*`), and INTENDED contacts (anything the task passed to
+  `grasp_actor` — drawer/appliance handles + their articulation links).
+- `collision[t]` = impulse-gated non-gripper robot↔furniture hit, OR a static
+  object simultaneously (a) touched by the robot / held target / actuated body,
+  (b) displaced ≥ threshold from its episode-start pose, and (c) **actively
+  moving** (per-substep motion ≥ 0.1 mm/0.001 rad, or ≥ 1 mm/0.01 rad across a
+  rolling 30-substep window; flag persists ≤ ~1 window ≈ 0.12 s past the last
+  observed motion). The shove is flagged; the aftermath — the object resting in
+  its displaced pose, even while still in contact — is contact-only. A
+  destination box is never the "toucher": an object knocked against a `des_obj`
+  and resting there stops flagging once it stops moving. Once a moved object
+  has stayed still for 30 substeps (0.12 s — same clock as the episode-counting
+  settle window), its settled pose becomes its NEW displacement baseline — a
+  later graze is not a collision unless it moves the object past the thresholds
+  again. No baseline snapshot ⇒
+  NOT a collision — no phantom flags.
 - Episode-level counts (scene_info `collision_metrics`; categories
   robot/target/intended_to_static_object + robot_to_furniture) use
-  displacement-driven counting: a touched static object is counted once when its cumulative pose
-  change crosses threshold, watched for 30 substeps after last touch (catches
-  slow topples; ignores settling creep and object→object chains).
+  displacement-driven counting: a touched static object is counted once when
+  its cumulative pose change from baseline crosses threshold. The watch starts
+  at a touch and stays live while the object is touched OR still moving (a slow
+  topple is followed all the way down); it expires after 30 substeps with
+  neither, and expired watches are not revived (settling creep and
+  object→object chains stay unattributed). The counting moment also sets that
+  frame's `collision[t]` once (pair = the object's last toucher), so a delayed
+  crossing that happens after contact ended is still localized in the
+  per-frame labels.
 
 **Recompute-later guarantee:** if thresholds/definitions ever change, collision
 can be recomputed offline from `/object_poses` + `contact_pairs`/impulse without

@@ -77,45 +77,88 @@ def _read_pairs(f, key):
 
 
 def _load_episode_meta(run_dir, ep_idx):
-    """(object_pose_ids, id->name map) from scene_info.json, or (None, {})."""
+    """(object_pose_ids, id->name map, task-role names) from scene_info.json.
+    Role names = targets + destinations + intended-contact bodies: objects the
+    TASK deliberately moves/touches, so their pose change is not collision
+    evidence and should not be traced under a collision window."""
     p = os.path.join(run_dir, "scene_info.json")
     if not os.path.exists(p):
-        return None, {}
+        return None, {}, set()
     try:
         db = json.load(open(p, encoding="utf-8"))
         e = db.get(f"episode_{ep_idx}", {})
         ids = e.get("object_pose_ids")
         amap = {int(k): v for k, v in (e.get("actor_id_map") or {}).items()}
-        return ids, amap
+        roles = e.get("role_names") or {}
+        # schema mixes shapes: name lists (target_object_names, ...), scalar
+        # names ("target": "001_bottle"), and int ids ("target_id": 97) — take
+        # strings and lists-of-strings only (set.update(int) raises; update(str)
+        # would splat characters)
+        role_names = set()
+        for v in roles.values():
+            if isinstance(v, str):
+                role_names.add(v)
+            elif isinstance(v, (list, tuple)):
+                role_names.update(x for x in v if isinstance(x, str))
+        return ids, amap, role_names
     except Exception:
-        return None, {}
+        return None, {}, set()
 
 
-def _object_movement(pair, a, b, obj_poses, pose_ids, amap):
-    """For a collision pair "x|y", pick the non-robot object side, find its
-    /object_poses column (duplicate names -> the one that moved most in the
-    window), and return (name, pose_frame0, pose_window_end, dpos_m, dang_deg)."""
+def _object_movement(pair, a, b, obj_poses, pose_ids, amap, role_names=frozenset()):
+    """For a collision pair "x|y", pick the object side whose motion is the
+    collision evidence — non-robot AND non-task-role (a target/destination's
+    motion is intended, e.g. the mouse being organized; showing it under a
+    collision window is misleading). Falls back to a role object, annotated,
+    only when the pair has no clutter side. Duplicate names -> the column that
+    moved most in the window. Returns (name, pose_frame0, pose_window_end,
+    dpos_m, dang_deg, intended: bool)."""
     if obj_poses is None or pose_ids is None:
         return None
-    names = [n for n in pair.split("|")
-             if not any(h in n for h in ROBOT_HINTS)]
-    if not names:
+    # pair sides are "name#per_scene_id" (current datasets) or plain names
+    # (legacy: office_v2/sweep_80). The id, when present, resolves the exact
+    # /object_poses column — no guessing between same-named instances.
+    sides = []
+    for tok in pair.split("|"):
+        name, _, sid = tok.partition("#")
+        if not any(h in name for h in ROBOT_HINTS):
+            sides.append((tok, name, int(sid) if sid.isdigit() else None))
+    if not sides:
         return None
-    obj_name = names[0]
-    cols = [j for j, oid in enumerate(pose_ids) if amap.get(int(oid)) == obj_name]
+    clutter = [s for s in sides if s[1] not in role_names]
+    obj_name, name, obj_sid = (clutter or sides)[0]
+    intended = not clutter
+    if obj_sid is not None:
+        cols = [j for j, oid in enumerate(pose_ids) if int(oid) == obj_sid]
+    else:
+        cols = [j for j, oid in enumerate(pose_ids) if amap.get(int(oid)) == name]
     if not cols:
         return None
     end = min(b, obj_poses.shape[0] - 1)
-    if len(cols) > 1:  # duplicates: the column that moved most within the window
-        move = [float(np.linalg.norm(obj_poses[end, j, :3] - obj_poses[a, j, :3]))
-                for j in cols]
-        cols = [cols[int(np.argmax(move))]]
+
+    def _disp_from_t0(j, t):
+        dp = float(np.linalg.norm(obj_poses[t, j, :3] - obj_poses[0, j, :3]))
+        qd = abs(float(np.dot(obj_poses[t, j, 3:7], obj_poses[0, j, 3:7])))
+        return dp, 2 * np.arccos(min(1.0, qd))
+
+    def _peak(j):  # max displacement-from-t0 anywhere inside the window
+        return max((_disp_from_t0(j, t) for t in range(a, end + 1)),
+                   key=lambda v: v[0] + 0.1 * v[1])
+
+    if len(cols) > 1:
+        # duplicates: pick the instance whose IN-WINDOW PEAK displacement from
+        # t0 is largest, rotation included (0.1 rad weighted ~ 1 cm, matching
+        # the collision thresholds). End-vs-start position alone mistraces
+        # rock-and-recover hits: the whacked twin can end near its start pose
+        # while a resting twin wins on millimeters of drift.
+        cols = [max(cols, key=lambda j: (lambda v: v[0] + 0.1 * v[1])(_peak(j)))]
     j = cols[0]
     p0, pe = obj_poses[0, j], obj_poses[end, j]
     dpos = float(np.linalg.norm(pe[:3] - p0[:3]))
     qdot = abs(float(np.dot(pe[3:7], p0[3:7])))
     dang = float(np.degrees(2 * np.arccos(min(1.0, qdot))))
-    return obj_name, p0, pe, dpos, dang
+    pk_dpos, pk_dang = _peak(j)
+    return obj_name, p0, pe, dpos, dang, intended, pk_dpos, float(np.degrees(pk_dang))
 
 
 def show_episode(run_dir, ep_idx, min_impulse):
@@ -133,7 +176,7 @@ def show_episode(run_dir, ep_idx, min_impulse):
         attrs = dict(f.attrs)
         T = f["joint_action/vector"].shape[0] if "joint_action/vector" in f else None
 
-    pose_ids, amap = _load_episode_meta(run_dir, ep_idx)
+    pose_ids, amap, role_names = _load_episode_meta(run_dir, ep_idx)
     dt = float(attrs.get("physics_timestep", 1.0 / 250.0))  # J (N*s) -> F ~ J/dt
 
     regime = {1: "BLIND planner (collision-unaware)",
@@ -163,8 +206,9 @@ def show_episode(run_dir, ep_idx, min_impulse):
                   f"(no impulse data — showing all)")
         for a, b in _ranges(mask):
             peak = float(c_imp[a:b + 1].max()) if c_imp is not None else float("nan")
+            # .4g keeps tiny-but-real impulses visible (3.2e-04, not "0.000")
             print(f"      frames {a:4d}-{b:<4d}  ->  video {_fmt_t(a / fps)} - "
-                  f"{_fmt_t((b + 1) / fps)}   (peak impulse {peak:.3f} N*s ~ {peak/dt:.0f} N)")
+                  f"{_fmt_t((b + 1) / fps)}   (peak impulse {peak:.4g} N*s ~ {peak/dt:.1f} N)")
             if contact_pairs is not None:
                 for pr in sorted({p for i in range(a, b + 1) for p in contact_pairs[i]}):
                     print(f"          · {pr.replace('|', '  <->  ')}")
@@ -186,12 +230,17 @@ def show_episode(run_dir, ep_idx, min_impulse):
             shown_objs = set()
             for pr in window_pairs:
                 print(f"          · {pr.replace('|', '  <->  ')}")
-                mv = _object_movement(pr, a, b, obj_poses, pose_ids, amap)
+                mv = _object_movement(pr, a, b, obj_poses, pose_ids, amap, role_names)
                 if mv is not None and mv[0] not in shown_objs:
                     shown_objs.add(mv[0])
-                    name, p0, pe, dpos, dang = mv
+                    name, p0, pe, dpos, dang, intended, pk_dpos, pk_dang = mv
+                    note = "   (task target/destination - motion intended)" if intended else ""
+                    # rock-and-recover: end-of-window pose understates the hit;
+                    # show the in-window peak when it meaningfully exceeds it
+                    peak = (f"   (peak in window: {pk_dpos*100:.1f} cm, {pk_dang:.1f} deg)"
+                            if (pk_dpos > dpos + 0.002 or pk_dang > dang + 1.0) else "")
                     print(f"            {name}: pose@t0 {_fmt_pose(p0)} -> pose@t{min(b, (T or 1)-1)} "
-                          f"{_fmt_pose(pe)}   moved {dpos*100:.1f} cm, {dang:.1f} deg")
+                          f"{_fmt_pose(pe)}   moved {dpos*100:.1f} cm, {dang:.1f} deg{peak}{note}")
         if not rngs:
             print("      (none)")
 

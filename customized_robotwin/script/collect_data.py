@@ -132,7 +132,8 @@ def main(task_name=None, task_config=None):
     run(task, args)
 
 
-def _stamp_provenance_attrs(hdf5_path, args, seed=None, success=None, timestep=None):
+def _stamp_provenance_attrs(hdf5_path, args, seed=None, success=None, timestep=None,
+                            generator=None):
     """Make each episode self-describing: which planner/metric regime (and seed)
     produced it.
 
@@ -146,10 +147,11 @@ def _stamp_provenance_attrs(hdf5_path, args, seed=None, success=None, timestep=N
     peo = args.get("planner_exclude_obstacles", None)
     blind = bool(peo) if peo is not None else ecm
     with h5py.File(hdf5_path, "a") as f:
-        # human-readable producer label ("what made this data"); policy rollout
-        # datasets use the policy name here instead (e.g. "pi05").
-        f.attrs["generator"] = ("curobo_collision_unaware" if blind
-                                else "curobo_collision_aware")
+        # human-readable producer label ("what made this data"). CuRobo datasets
+        # derive it from the resolved planner regime; policy-rollout datasets pass
+        # generator=<policy name> (e.g. "pi05") explicitly.
+        f.attrs["generator"] = generator if generator is not None else (
+            "curobo_collision_unaware" if blind else "curobo_collision_aware")
         f.attrs["enable_collision_metrics"] = ecm
         f.attrs["planner_exclude_obstacles"] = -1 if peo is None else int(bool(peo))
         f.attrs["planner_blind_to_obstacles"] = blind

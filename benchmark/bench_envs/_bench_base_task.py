@@ -49,10 +49,38 @@ class Bench_base_task(Base_Task):
     # the static object has moved beyond these from the previous step.
     STATIC_OBJECT_POSITION_THRESHOLD_M = 0.01   # 1 cm
     STATIC_OBJECT_ORIENTATION_THRESHOLD_RAD = 0.1  # ~5.7 deg
-    # Substeps to keep watching a touched static object for a delayed topple after
-    # its last contact. A new touch resets the window, so objects dragged in
-    # continuous contact stay watched; only settled objects stop being checked.
+    # Episode-counting watch + settle clock (substeps). A touched static object
+    # stays watched while it is being touched OR still moving (a slow topple
+    # keeps itself watched all the way down); the watch expires — and the
+    # object's settled pose becomes its new displacement baseline — after this
+    # many consecutive substeps with neither touch nor motion. An expired watch
+    # is NOT revived by later motion: a full stillness gap breaks the causal
+    # link to the last toucher (object->object chain events stay unattributed).
     STATIC_SETTLE_WINDOW_STEPS = 30
+    # "Actively moving" gates for the per-frame collision flag: an object that
+    # was knocked past the displacement threshold but has come to REST (e.g.
+    # leaning against a destination box for the rest of the episode) must stop
+    # flagging. Fast motion is caught instantly (per-substep delta), slow real
+    # motion by a rolling window; sub-threshold creep (<~8 mm/s) and solver
+    # jitter are ignored.
+    STATIC_ACTIVE_MOVE_EPS_NOW_M = 1e-4     # >=0.1 mm per 4 ms substep (~25 mm/s)
+    STATIC_ACTIVE_MOVE_EPS_NOW_RAD = 0.001  # ~0.06 deg per substep (~14 deg/s)
+    STATIC_ACTIVE_MOVE_EPS_WIN_M = 0.001    # >=1 mm per settle window (~8 mm/s)
+    STATIC_ACTIVE_MOVE_EPS_WIN_RAD = 0.01   # ~0.57 deg per window (~5 deg/s)
+    # Contact frames require actual force exchange: PhysX also reports zero-
+    # impulse "contacts" for shapes hovering inside the contact offset or in
+    # stale/separating manifolds — those are not touches. Any real touch, even
+    # a ~1 g object resting, transfers >= ~4e-5 N*s per substep, orders of
+    # magnitude above this gate.
+    CONTACT_MIN_IMPULSE_NS = 1e-6
+    # After an object that moved has stayed still this long, its SETTLED pose
+    # becomes the new displacement baseline: a later graze on a previously-
+    # knocked object is not a collision unless it displaces the object past the
+    # thresholds again from where it settled. Locked to the episode-counting
+    # settle window (30 substeps = 0.12 s) so both "the event is over" clocks
+    # expire together. Trade-off: stop-and-go shoves with pauses >= this long
+    # are segmented, and each sub-threshold segment alone won't flag/count.
+    STATIC_BASELINE_RESET_STEPS = STATIC_SETTLE_WINDOW_STEPS
 
     def __init__(self):
         pass
@@ -702,6 +730,20 @@ class Bench_base_task(Base_Task):
         self._static_last_touch_step: dict[int, int] = {}  # per_scene_id -> _metric_step of last touch
         self._counted_displaced_ids: set[int] = set()    # counted once per episode
         self._displaced_categories: dict[int, str] = {}  # per_scene_id -> counted category
+        # "Actively moving" detector state for the per-frame collision flag:
+        # rolling reference pose (~settle-window old) per object, and the last
+        # substep on which the object was observed moving.
+        self._static_active_ref: dict[int, tuple] = {}     # per_scene_id -> (step, pos, quat)
+        self._static_last_active_step: dict[int, int] = {} # per_scene_id -> _metric_step
+        # Episode-counting watch: last substep the object was touched OR seen
+        # moving while the watch was live. Started by a touch; extended by
+        # motion; expired (> settle window with neither) ends the watch for good
+        # until the next touch.
+        self._static_watch_last_seen: dict[int, int] = {}  # per_scene_id -> _metric_step
+        # Last touch pair label per static object ("name#id|name#id") — used to
+        # attribute the delayed-crossing collision frame when the threshold is
+        # passed after contact already ended (no live pair at that substep).
+        self._static_last_touch_pair: dict[int, str] = {}
         self._counted_furniture_names: set[str] = set()
         self._hit_furniture_names: set[str] = set()
         self.filtered_contacts_for_log = []
@@ -863,6 +905,58 @@ class Bench_base_task(Base_Task):
             if _des_names:
                 self.destination_object_names = _des_names
 
+        # --- "actively moving" detector (feeds the per-frame collision flag) --
+        # A displaced object only produces collision FRAMES while its pose is
+        # still changing; once it rests (even in a displaced pose, even still in
+        # contact) the frames go back to contact-only. Two tiers: per-substep
+        # delta vs the pre-step snapshot catches fast motion with zero latency;
+        # a rolling ~settle-window reference catches slow real motion that is
+        # invisible substep-to-substep. Costs one get_pose per static per substep
+        # (same as _snapshot_static_object_poses already pays).
+        for _sid, _ent in getattr(self, "_static_id_to_entity", {}).items():
+            try:
+                _pose = _ent.get_pose()
+            except Exception:
+                continue  # despawned actor -> stale cached handle
+            _p = np.asarray(_pose.p, dtype=np.float64)
+            _q = np.asarray(_pose.q, dtype=np.float64)
+            _prev = self.static_object_pose_prev.get(_sid)
+            if _prev is not None:
+                _dp = float(np.linalg.norm(_p - _prev[0]))
+                _da = 2 * np.arccos(min(1.0, abs(float(np.dot(_q, _prev[1])))))
+                if (_dp >= self.STATIC_ACTIVE_MOVE_EPS_NOW_M
+                        or _da >= self.STATIC_ACTIVE_MOVE_EPS_NOW_RAD):
+                    self._static_last_active_step[_sid] = self._metric_step
+            _ref = self._static_active_ref.get(_sid)
+            if _ref is None:
+                self._static_active_ref[_sid] = (self._metric_step, _p, _q)
+            elif self._metric_step - _ref[0] >= self.STATIC_SETTLE_WINDOW_STEPS:
+                _dp = float(np.linalg.norm(_p - _ref[1]))
+                _da = 2 * np.arccos(min(1.0, abs(float(np.dot(_q, _ref[2])))))
+                if (_dp >= self.STATIC_ACTIVE_MOVE_EPS_WIN_M
+                        or _da >= self.STATIC_ACTIVE_MOVE_EPS_WIN_RAD):
+                    self._static_last_active_step[_sid] = self._metric_step
+                self._static_active_ref[_sid] = (self._metric_step, _p, _q)
+            _last_act = self._static_last_active_step.get(_sid)
+            # Extend the episode-counting watch while motion continues (a slow
+            # topple keeps itself watched all the way down). Only a LIVE watch
+            # extends — once expired (a full settle window with neither touch
+            # nor motion), later motion does not revive it.
+            if _last_act == self._metric_step:
+                _seen = self._static_watch_last_seen.get(_sid)
+                if (_seen is not None
+                        and self._metric_step - _seen <= self.STATIC_SETTLE_WINDOW_STEPS):
+                    self._static_watch_last_seen[_sid] = self._metric_step
+            # Settled re-baseline: one-shot (== not >=) the substep an object
+            # completes STATIC_BASELINE_RESET_STEPS of stillness after having
+            # moved; re-arms if it becomes active again. Objects that never
+            # moved have no last-active entry and keep their episode-start
+            # baseline.
+            if (_last_act is not None
+                    and self._metric_step - _last_act == self.STATIC_BASELINE_RESET_STEPS
+                    and _sid in self.static_object_pose_start):
+                self.static_object_pose_start[_sid] = (_p, _q)
+
         for contact in contacts:
             entity0 = contact.bodies[0].entity
             entity1 = contact.bodies[1].entity
@@ -888,6 +982,13 @@ class Bench_base_task(Base_Task):
             is_target_1   = name1 in self.target_object_names
             is_static_0   = entity0.per_scene_id in self.static_object_ids
             is_static_1   = entity1.per_scene_id in self.static_object_ids
+            # Destination boxes: some tasks put their des_obj* in
+            # _get_target_object_names (so the box itself is never treated as
+            # displaceable clutter) — but as a TOUCHER a destination is passive
+            # scenery: an object knocked against it and resting there is not
+            # being touched BY the task. Excluded from the "target" toucher role.
+            is_dest_0     = name0 in self.destination_object_names
+            is_dest_1     = name1 in self.destination_object_names
             # robot-ACTUATED bodies (grasped objects / operated articulation links,
             # e.g. a drawer being closed) — contacts they cause are robot-caused
             is_intended_0 = name0 in self._intended_contact_names
@@ -920,12 +1021,15 @@ class Bench_base_task(Base_Task):
                 static_entity = entity1 if is_static_1 else entity0
                 self._static_last_toucher[static_entity.per_scene_id] = "robot"
                 self._static_last_touch_step[static_entity.per_scene_id] = self._metric_step
+                self._static_watch_last_seen[static_entity.per_scene_id] = self._metric_step
                 count_static = True
 
-            if (is_target_0 and is_static_1) or (is_target_1 and is_static_0):
+            if ((is_target_0 and not is_dest_0) and is_static_1) or \
+                    ((is_target_1 and not is_dest_1) and is_static_0):
                 static_entity = entity1 if is_static_1 else entity0
                 self._static_last_toucher[static_entity.per_scene_id] = "target"
                 self._static_last_touch_step[static_entity.per_scene_id] = self._metric_step
+                self._static_watch_last_seen[static_entity.per_scene_id] = self._metric_step
                 count_target_static = True
 
             # Robot-actuated body (e.g. the drawer being closed) hitting a static
@@ -937,6 +1041,7 @@ class Bench_base_task(Base_Task):
                 static_entity = entity1 if is_static_1 else entity0
                 self._static_last_toucher[static_entity.per_scene_id] = "intended"
                 self._static_last_touch_step[static_entity.per_scene_id] = self._metric_step
+                self._static_watch_last_seen[static_entity.per_scene_id] = self._metric_step
                 count_intended_static = True
 
             # Optional dataset stream: every robot/target<->static contact POINT,
@@ -956,10 +1061,19 @@ class Bench_base_task(Base_Task):
             # Independent of the episode counting above: give every SAVED frame a
             # contact/collision boolean + object pairs.  contact: any robot<->world
             # contact minus self/wheel/target/destination.  collision: impulse
-            # furniture hit, or a static object being touched while already past
-            # the displacement threshold (so the frames where the robot is pushing
-            # a knocked object are flagged).  Flushed by _take_picture().
-            _pair = "|".join(sorted((name0, name1)))  # stable "a|b" label
+            # furniture hit, or a static object being touched while past the
+            # displacement threshold AND still actively moving — the shove is
+            # flagged, resting displaced afterwards is not.  Flushed by
+            # _take_picture().
+            # Stable "a|b" pair label. Non-robot bodies carry their exact
+            # instance as "name#per_scene_id" (two clutter twins of the same
+            # model are different objects — a plain name is ambiguous for any
+            # offline consumer). Robot link names are unique already.
+            _id0 = getattr(entity0, "per_scene_id", None)
+            _id1 = getattr(entity1, "per_scene_id", None)
+            _lbl0 = name0 if (is_robot_0 or _id0 is None) else f"{name0}#{_id0}"
+            _lbl1 = name1 if (is_robot_1 or _id1 is None) else f"{name1}#{_id1}"
+            _pair = "|".join(sorted((_lbl0, _lbl1)))
             _cimp = _pair_impulse  # total pair impulse (N*s) this substep
             if is_robot_0 != is_robot_1:  # robot <-> world only (self-contacts excluded)
                 _robot_side = name0 if is_robot_0 else name1
@@ -972,7 +1086,8 @@ class Bench_base_task(Base_Task):
                 # placing on the destination, operating a drawer/appliance handle
                 # passed to grasp_actor — all deliberate manipulation, not contact)
                 if ("wheel" not in _robot_side and not _other_is_target
-                        and not _other_is_dest and not _other_is_intended):
+                        and not _other_is_dest and not _other_is_intended
+                        and _cimp > self.CONTACT_MIN_IMPULSE_NS):
                     self._win_contact = True
                     self._win_contact_pairs.add(_pair)
                     self._win_contact_impulse = max(self._win_contact_impulse, _cimp)
@@ -986,7 +1101,8 @@ class Bench_base_task(Base_Task):
             if count_target_static or count_intended_static:
                 _stat_name = (entity1 if is_static_1 else entity0).get_name()
                 if (_stat_name not in self.destination_object_names
-                        and _stat_name not in self._intended_contact_names):
+                        and _stat_name not in self._intended_contact_names
+                        and _cimp > self.CONTACT_MIN_IMPULSE_NS):
                     self._win_contact = True
                     self._win_contact_pairs.add(_pair)
                     self._win_contact_impulse = max(self._win_contact_impulse, _cimp)
@@ -994,9 +1110,20 @@ class Bench_base_task(Base_Task):
                 self._win_collision = True
                 self._win_collision_pairs.add(_pair)
                 self._win_collision_impulse = max(self._win_collision_impulse, _cimp)
+            # Displacement collision frames require ALL THREE simultaneously:
+            #   touched (robot / non-destination target / actuated body)
+            #   + displaced >=1 cm / 0.1 rad from episode start
+            #   + ACTIVELY MOVING (see detector above): the knock itself is
+            #     flagged; the aftermath (object resting in its displaced pose,
+            #     possibly still in contact) is contact-only. Flag persists at
+            #     most ~1 settle window (~0.12 s) past the last observed motion.
             if count_static or count_target_static or count_intended_static:  # robot/target/actuated-body touching a static
                 _step_static = entity1 if is_static_1 else entity0
-                if self._static_object_has_significant_pose_change(_step_static.per_scene_id, _step_static):
+                _ssid = _step_static.per_scene_id
+                self._static_last_touch_pair[_ssid] = _pair
+                if (self._static_object_has_significant_pose_change(_ssid, _step_static)
+                        and self._metric_step - self._static_last_active_step.get(_ssid, -(10 ** 9))
+                            <= self.STATIC_SETTLE_WINDOW_STEPS):
                     self._win_collision = True
                     self._win_collision_pairs.add(_pair)
                     self._win_collision_impulse = max(self._win_collision_impulse, _cimp)
@@ -1031,18 +1158,19 @@ class Bench_base_task(Base_Task):
             }) + "\n")
 
         # Displacement-driven counting: a static object whose cumulative pose
-        # change from episode start crosses the thresholds is counted as one
+        # change from its baseline crosses the thresholds is counted as one
         # collision — whether or not anything touches it at that instant (slow
-        # topples finish after contact ends) — but ONLY if the robot or held
-        # target touched it, and only for STATIC_SETTLE_WINDOW_STEPS after the
-        # last touch. This checks just the handful of recently-touched objects
-        # (via cached entity handles) instead of re-scanning every actor forever:
-        # object→object chains and settling creep (never-touched) are excluded,
-        # and an object that settled without moving stops being re-checked.
+        # topples finish after contact ends). The WATCH starts at a robot /
+        # target / actuated-body touch and stays live while the object is
+        # touched OR still moving (detector above extends it), so a slow topple
+        # is followed all the way down; it expires after a full settle window
+        # with neither, and expired watches are not revived by later motion
+        # (object→object chains and settling creep stay unattributed). Checks
+        # only the handful of watched objects via cached entity handles.
         for sid, toucher in self._static_last_toucher.items():
             if (sid in self._counted_displaced_ids
                     or self.static_object_pose_start.get(sid) is None
-                    or self._metric_step - self._static_last_touch_step.get(sid, -1)
+                    or self._metric_step - self._static_watch_last_seen.get(sid, -(10 ** 9))
                        > self.STATIC_SETTLE_WINDOW_STEPS):
                 continue
             entity = self._static_id_to_entity.get(sid)
@@ -1055,6 +1183,14 @@ class Bench_base_task(Base_Task):
                 self.collision_metrics[category] = self.collision_metrics.get(category, 0) + 1
                 self._counted_displaced_ids.add(sid)
                 self._displaced_categories[sid] = category
+                # Delayed crossing (e.g. tap -> contact ends -> object topples
+                # past threshold a few substeps later): the simultaneous-touch
+                # path above never fires, so flag THIS frame — the moment the
+                # displacement happened — once, attributed to the last toucher.
+                self._win_collision = True
+                _lp = self._static_last_touch_pair.get(sid)
+                if _lp:
+                    self._win_collision_pairs.add(_lp)
                 self._print_significant_collision(sid, entity, category)
                 if self._collision_stream is not None:
                     start_p, start_q = self.static_object_pose_start[sid]
@@ -1078,7 +1214,9 @@ class Bench_base_task(Base_Task):
         self.stop_metric_streams()
         self._contact_stream = open(contacts_path, "w", encoding="utf-8")
         self._collision_stream = open(collisions_path, "w", encoding="utf-8")
-        self._metric_step = -1
+        # NOTE: no _metric_step reset here — _init_collision_metrics owns it.
+        # Resetting mid-episode would desync the touch/active-step dicts
+        # (negative deltas read as "recently active" -> spurious flags).
 
     def stop_metric_streams(self):
         for attr in ("_contact_stream", "_collision_stream"):
@@ -1730,6 +1868,12 @@ class Bench_base_task(Base_Task):
         right_gripper = np.array(right_gripper)
 
         now_left_id, now_right_id = 0, 0
+        # Frame capture for POLICY-ROLLOUT data collection: when save_data is on
+        # (never in eval), record frames at the same save_freq cadence as the
+        # CuRobo collector's take_dense_action, through the same _take_picture ->
+        # pkl -> hdf5 pipeline, so rollout datasets are format-identical.
+        _rec = bool(getattr(self, "save_data", False)) and getattr(self, "save_freq", None)
+        _ctrl_i = 0
 
         # ========== Control Loop ==========
         while now_left_id < left_n_step or now_right_id < right_n_step:
@@ -1761,12 +1905,21 @@ class Bench_base_task(Base_Task):
             self.scene.step()
             self._update_render()
 
+            # picture BEFORE check_collisions — same substep/frame boundary as
+            # take_dense_action, so policy-rollout labels line up with CuRobo
+            # data at the frame level (a boundary event lands on the same frame)
+            if _rec and _ctrl_i % self.save_freq == 0:
+                self._take_picture()
+            _ctrl_i += 1
+
             if getattr(self, 'enable_collision_metrics', False) and hasattr(self, 'robot_link_names'):
                 self.check_collisions()
 
             if self.check_success():
                 self.eval_success = True
                 self.get_obs() # update obs
+                if _rec:
+                    self._take_picture()  # final frame at task success
                 if (self.eval_video_path is not None):
                     self.eval_video_ffmpeg.stdin.write(self.now_obs["observation"]["head_camera"]["rgb"].tobytes())
                 return

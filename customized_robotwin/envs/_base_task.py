@@ -613,6 +613,18 @@ class Base_Task(gym.Env):
                 roles["target_object_names"] = sorted(self._get_target_object_names())
             except Exception:
                 pass
+        # Full task-role picture for offline tooling (e.g. flag_timeline skips
+        # these when picking which pair member's motion to trace): destination
+        # boxes (des_obj* scan, lazily resolved during check_collisions) and
+        # intended-contact bodies (grasp_actor-marked: grasp targets, drawer /
+        # appliance handles + articulation links). Both are populated by episode
+        # end, when the collectors call this.
+        dests = getattr(self, "destination_object_names", None)
+        if dests:
+            roles["destination_object_names"] = sorted(dests)
+        intended = getattr(self, "_intended_contact_names", None)
+        if intended:
+            roles["intended_contact_names"] = sorted(intended)
         return roles
 
     def save_camera_rgb(self, save_path, camera_name='head_camera'):
