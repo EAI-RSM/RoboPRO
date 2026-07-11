@@ -34,7 +34,9 @@ from copy import deepcopy
 from pathlib import Path
 
 import numpy as np
+import torch
 import transforms3d as t3d
+from curobo.types.state import JointState
 
 from setup_paths import setup_paths
 setup_paths()
@@ -92,6 +94,210 @@ GRASP_CANDIDATE_LIMIT = 4
 # run-to-run nondeterminism) rather than a true causal effect, but 0.15 is the
 # only value with two consistent, positive data points.
 GRASP_LIFT_HEIGHT = 0.15
+# Minimum fraction of GRASP_LIFT_HEIGHT the TARGET OBJECT itself (not just the
+# gripper) must actually rise for the grasp to be considered real. Confirmed
+# empirically (seeds 11/19/26): a fully missed grasp still reports the lift
+# MOVE as plan_success=True (CuRobo found a valid plan for the commanded
+# gripper motion) while the object's z stays flat (0.0-0.6% of the commanded
+# rise) -- a wide margin below any plausible "successful but marginal" grasp,
+# so 0.5 has a lot of room without risking false positives on a real grasp.
+GRASP_VERIFY_MIN_RISE_FRACTION = 0.5
+# Max drift (meters) of the object's position, expressed in the gripper's LOCAL
+# frame, from the baseline captured right after attach_object, before a stage
+# is considered to have lost the grasp. Confirmed empirically (seed 27): every
+# placement stage reported plan_success=True while the object physically fell
+# mid-transit (~10-60cm drift) -- plan_success only reflects the arm's motion
+# plan, never the held object's actual state. 0.03 gives room for simulation
+# jitter while still catching any real slip/drop, which in every observed case
+# was at least an order of magnitude larger.
+OBJECT_RETENTION_TOLERANCE = 0.03
+# Max rotation drift (radians) of the object's orientation, expressed in the
+# gripper's local frame, from the baseline -- translation alone misses a
+# held object rotating loose without translating past OBJECT_RETENTION_
+# TOLERANCE, leaving CuRobo's attached collision model (which assumes a
+# fixed rigid transform) inconsistent with the physical object. ~11 degrees.
+OBJECT_RETENTION_ROTATION_TOLERANCE = 0.2
+# How close (meters) the held object's actual pose must be to the intended
+# final placement pose (self.des_obj_pose) to treat place_actor's descent as
+# genuinely DONE (skip remaining moves, open the gripper) rather than a loss
+# or an ambiguous mid-descent contact (see DESCENT_CONTACT_DRIFT_TOLERANCE).
+# Deliberately mirrors put_mouse_on_pad.check_success()'s own criterion
+# (independent x/y error each < 0.02) with a small safety margin, INSTEAD of
+# a looser combined radius: an earlier 8cm combined-radius version accepted
+# seed 9 (dx=3.24cm) and seed 12 (dx=6.11cm, dy=2.85cm) as "arrived" even
+# though check_success() would still reject both on at least one axis --
+# stopping the descent there only guaranteed a failure the remaining slices
+# might otherwise have corrected.
+OBJECT_PLACEMENT_XY_TOLERANCE = 0.018
+OBJECT_PLACEMENT_Z_TOLERANCE = 0.03
+# Gripper-relative drift (meters) beyond OBJECT_RETENTION_TOLERANCE that's
+# still treated as ambiguous-possible-contact rather than an outright loss,
+# for place_actor's descent specifically: the object settling onto the pad/
+# table a bit early (before reaching the precise final target) changes the
+# gripper-relative transform similarly to a drop, but isn't one. Confirmed
+# empirically: benign early-contact cases (seeds 9/12) showed ~6-7cm drift,
+# while genuine catastrophic drops (seeds 20/25/27) showed 30cm-1.4m -- a
+# wide, unambiguous gap. Below this, the descent continues toward the real
+# target instead of failing early; above it, it's an unambiguous loss.
+DESCENT_CONTACT_DRIFT_TOLERANCE = 0.15
+# How close (meters) the held object's world-frame z must be to the intended
+# resting height (self.des_obj_pose[2]) for a DESCENT_CONTACT_DRIFT_TOLERANCE-
+# sized drift to be plausibly explained by contact with the placement surface,
+# rather than the early stage of a genuine drop -- a real drop passes through
+# the same 4-15cm drift band while still well above the surface (falling
+# under gravity, unconstrained by the descent's planned trajectory), so
+# position drift magnitude ALONE can't distinguish the two. Looser than
+# OBJECT_PLACEMENT_Z_TOLERANCE (which gates a full "already placed" stop)
+# since this only needs to confirm plausible surface contact, not a precise
+# final resting pose.
+DESCENT_CONTACT_HEIGHT_TOLERANCE = 0.06
+# create_grasp_approach_metric's tstep_fraction for place_actor's descent
+# slices specifically -- lower than CuRobo's own default (0.8, appropriate for
+# a single large grasp-approach jump) because these slices are already tiny
+# (DESCENT_SLICE_SIZE). tstep_fraction only holds the straight-line/
+# orientation-locked cost for the trajectory's LAST (1-tstep_fraction)
+# fraction of timesteps -- the rest is a soft-cost-only "free" portion.
+# Confirmed empirically (seed 8, place_actor:move1 slice 4): with a FIXED
+# 0.8, a 3cm slice's trajopt solve ballooned to 980 timesteps and swung the
+# gripper 56cm away (up to z=0.70m) before snapping back onto the line for
+# the final 20% -- the free portion has no incentive to stay short once
+# trajopt escalates to a much longer time horizon (which it does more
+# readily right at the final approach, where collision margins against the
+# placement surface are tightest).
+#
+# A single fixed tight value isn't enough either: re-testing with a FIXED
+# 0.2 fixed the excursion (deviation dropped from 56cm to ~2cm) but made one
+# slice fail FINETUNE_TRAJOPT_FAIL on all 10 retries -- an overconstrained
+# geometry where the exact straight line genuinely conflicts with collision
+# margins needs at least some slack, and retrying the identical
+# overconstrained problem 10 times can't discover that. Progressive
+# relaxation instead: start tight (least detour room) for a few attempts,
+# then relax toward CuRobo's own default across the remaining retry budget
+# -- giving a genuinely-infeasible-under-tight-constraint slice a real
+# chance to solve, while a hard path-safety filter (DESCENT_MAX_PATH_
+# DEVIATION and friends below) still rejects any candidate at ANY fraction
+# that takes an implausibly circuitous path, so relaxing never re-admits
+# the original 56cm-loop failure mode.
+DESCENT_APPROACH_TSTEP_FRACTIONS = [0.2, 0.4, 0.6, 0.8]
+# Max perpendicular distance (meters) a descent slice's planned Cartesian EE
+# path may stray from the FINITE straight-line SEGMENT between its own start
+# and end pose before being rejected -- a backstop against the pathological-
+# detour failure mode above, independent of which tstep_fraction produced
+# it. Well above the sub-2mm wobble seen on well-behaved slices and well
+# below the 56cm pathological case, and larger than a single slice's own
+# straight-line distance (DESCENT_SLICE_SIZE) to leave room for legitimate
+# small detours. Must be measured against the CLAMPED segment, not the
+# infinite line through it -- an unclamped projection would report near-zero
+# deviation for a trajectory that overshoots straight past the target along
+# the same axis, which is exactly the kind of detour this needs to catch.
+DESCENT_MAX_PATH_DEVIATION = 0.08
+# Max ratio of a descent slice's actual Cartesian path length (sum of
+# consecutive EE waypoint distances) to its straight-line distance --
+# catches a trajectory that stays geometrically close to the line (small
+# DESCENT_MAX_PATH_DEVIATION) but travels back and forth along it far more
+# than the direct distance requires. A conservative multiple of 1.0 (a
+# perfectly straight path); not tuned against a large empirical sample yet,
+# so treat as provisional pending broader validation.
+DESCENT_MAX_PATH_LENGTH_RATIO = 3.0
+# Max ratio of a descent slice's total joint-space path length (sum of
+# consecutive joint-position deltas) to the direct start->end joint-space
+# distance -- catches joint-space winding that an EE-only Cartesian check
+# can miss entirely (a redundant/near-singular arm can reach nearly the same
+# EE pose through very different, looping joint configurations). Same
+# provisional-pending-validation caveat as DESCENT_MAX_PATH_LENGTH_RATIO.
+DESCENT_MAX_JOINT_TRAVEL_RATIO = 3.0
+# Max excursion (radians) of any SINGLE joint's range (max-min position)
+# across a descent slice's trajectory -- flags one joint spinning through an
+# implausible range for what should be a tiny slice even when the aggregate
+# DESCENT_MAX_JOINT_TRAVEL_RATIO looks acceptable (that ratio can stay small
+# if only one joint winds while the others move normally, since it's an
+# L2-norm aggregate). Same provisional-pending-validation caveat.
+DESCENT_MAX_JOINT_RANGE = 1.0
+# Max absolute joint-space distance (radians, L2 norm across all active
+# joints) between a descent slice's own trajectory start and end -- catches
+# a monotonic (non-winding) move to a DISTANT IK branch that the ratio-only
+# checks above can miss entirely: a straight-line jump has joint_travel_ratio
+# near 1.0 regardless of magnitude, and several joints each moving under
+# DESCENT_MAX_JOINT_RANGE individually can still sum to a large aggregate
+# displacement (e.g. six joints at ~0.9 rad each is an L2 norm of ~2.2 rad,
+# passing max_joint_range=1.0 easily). A tiny Cartesian slice should need
+# only a small joint-space move; not tuned against a large empirical sample
+# yet, so treat as provisional pending broader validation.
+DESCENT_MAX_JOINT_ENDPOINT_DISPLACEMENT = 0.5
+# Max absolute joint-space path length (radians) traveled during a descent
+# slice -- an absolute companion to DESCENT_MAX_JOINT_TRAVEL_RATIO (which
+# only bounds the path as a MULTIPLE of the endpoint distance, so it can't
+# catch a monotonic jump to a distant branch on its own, same gap as
+# DESCENT_MAX_JOINT_ENDPOINT_DISPLACEMENT above). Slightly above that
+# endpoint-displacement cap since path length is always >= endpoint
+# distance. Same provisional-pending-validation caveat.
+DESCENT_MAX_JOINT_PATH_LENGTH = 0.6
+# Local landing-region search (place_actor's final approach): instead of
+# forcing CuRobo to reach one exact final pose -- which kept failing
+# FINETUNE_TRAJOPT_FAIL right at the surface, where the attached object's
+# collision margin against the table is tightest -- search a small grid of
+# nearby landing poses and accept the first one (at the lowest feasible
+# release height) that plans cleanly and passes the same trajectory-safety
+# filters used elsewhere, then let physics settle the final contact instead
+# of commanding CuRobo all the way down to it.
+#
+# XY offsets (meters) tried per axis around the nominal target, combined
+# into a grid -- matches check_success's own per-axis 2cm tolerance with a
+# safety margin (max offset 1.5cm, comfortably under OBJECT_PLACEMENT_XY_
+# TOLERANCE's 1.8cm).
+LANDING_XY_OFFSETS = [-0.015, -0.010, -0.005, 0.0, 0.005, 0.010, 0.015]
+# Candidate release heights (meters above the target's resting height),
+# tried lowest first -- a lower release means less for physics to settle
+# and stays closest to the nominal target, but a higher one gives CuRobo
+# more collision-margin room to actually plan to when the exact surface
+# height is too tight to solve.
+LANDING_RELEASE_HEIGHTS = [0.01, 0.03, 0.05, 0.08]
+# Max number of IK-feasible candidates (closest-to-nominal-target first) to
+# actually PLAN per release height -- IK checks are cheap, full CuRobo plans
+# aren't, so this bounds cost instead of exhaustively planning every
+# candidate in the grid.
+LANDING_MAX_CANDIDATES_PER_HEIGHT = 12
+# Stop planning further candidates at a given height once this many have
+# been accepted (passed both plan success and the path-safety filter) --
+# picks among a reasonable sample instead of paying for the full budget
+# above every time.
+LANDING_MIN_ACCEPTED_TO_STOP = 3
+# Max XY distance (meters) from the target, and required object retention,
+# for _local_landing_search_and_place to even attempt its search -- its
+# candidate moves are short by design, so if it were ever invoked from
+# farther away its filters would reject a legitimate longer approach
+# instead of a genuinely bad one. The caller currently only reaches this
+# function once already close (via the placement chain + pre_place_descent),
+# but this makes that assumption an explicit, checked precondition rather
+# than an unstated one.
+#
+# Deliberately XY-only, not a combined 3D radius: XY offset directly bounds
+# which of the +-1.5cm candidate offsets could plausibly land within
+# check_success's own tolerance, while the remaining VERTICAL gap is a
+# different concern (how far the arm still has to descend) governed by
+# LANDING_SEARCH_MAX_Z_DISTANCE below instead -- a combined 3D check would
+# treat "5cm lateral, no vertical drop left" the same as "no lateral offset,
+# 5cm still to descend", which aren't comparable for this search.
+LANDING_SEARCH_TRIGGER_DISTANCE = float(os.environ.get("LANDING_SEARCH_TRIGGER_DISTANCE", "0.10"))
+# Max vertical (Z) distance (meters) from the target for the same gate --
+# looser than the XY condition since the whole point of this search is
+# picking a release height (LANDING_RELEASE_HEIGHTS, up to 8cm) rather than
+# requiring the arm to already be at the exact final height.
+LANDING_SEARCH_MAX_Z_DISTANCE = float(os.environ.get("LANDING_SEARCH_MAX_Z_DISTANCE", "0.15"))
+# Max number of DIFFERENT contact-point candidates to actually try grasping in
+# play_once when grasp_verify detects a missed grasp, before giving up on the
+# episode entirely. _select_pick_place_candidate already ranks/generates
+# several candidates for the dry-run search -- this reuses that same ranking
+# to pick a genuinely different contact point on retry (via exclude_cp_ids)
+# instead of ending the episode after the first missed grasp.
+GRASP_VERIFY_MAX_CANDIDATES = 3
+# Slice length (meters) for place_actor's deterministic descent (see
+# _plan_pose_with_descent_slices). place_actor's moves are short, mostly-
+# straight-line final approaches with KNOWN structure (fixed target
+# orientation, held via approach_axis) -- a scalar-error-informed shrink
+# doesn't exploit that the way a fixed-size slice along the straight line to
+# the target does. 0.04 sits in the requested 3-5cm range.
+DESCENT_SLICE_SIZE = 0.04
 SIDE_WAYPOINT_GAPS = (0.20, 0.24, 0.28)
 # Fallback gaps tried ONLY when none of SIDE_WAYPOINT_GAPS's beside_box target verifies
 # reachable (check_ik_batch, no trajopt) -- confirmed empirically (seed 9, right arm,
@@ -136,18 +342,23 @@ PLACE_CLEARANCE_ZS_FALLBACK = (0.95, 0.90, 0.85)
 # hand off a KNOWN, expected orientation, not whatever CuRobo happened to converge
 # to under a free-orientation goal. See _plan_pose_trajectory_sequence.
 PLACEMENT_STRICT_ORIENTATION_STAGES = ("placement:center_over_pad",)
-# Number of local bridge waypoints to try whenever a direct Cartesian plan fails.
-# 0 preserves pure direct planning. POST_GRASP_ESCAPE_ATTEMPTS is accepted as a
-# backward-compatible alias for runs launched before this became universal.
+# Max iterations for the adaptive waypoint-shrink retry (see
+# _plan_pose_with_shrinking_waypoint), used whenever a direct Cartesian plan
+# fails. 0 preserves pure direct planning. Replaces the previous fixed-offset
+# bridge-pool fallback: instead of blindly trying hand-picked offset directions,
+# a failed attempt's target is iteratively pulled halfway toward the arm's
+# current pose and retried, chaining a follow-up attempt at the REAL target
+# once a shrunk intermediate succeeds. Default lowered from the old pool's 9 to
+# 5 since this converges toward an always-eventually-reachable point (the
+# current pose itself), needing fewer attempts than searching fixed offsets
+# blindly. POST_GRASP_ESCAPE_ATTEMPTS is accepted as a backward-compatible
+# alias for runs launched before this became universal.
 LOCAL_WAYPOINT_ATTEMPTS = int(os.environ.get(
-    "LOCAL_WAYPOINT_ATTEMPTS", os.environ.get("POST_GRASP_ESCAPE_ATTEMPTS", "9")))
-# Size of the RAW bridge-candidate pool _plan_pose_with_local_waypoint_retry generates
-# before IK-prefiltering (see _local_waypoint_candidates' spec list) -- kept separate
-# from LOCAL_WAYPOINT_ATTEMPTS (which now caps how many IK-VERIFIED candidates get a
-# full trajopt attempt) so a larger, more diverse raw pool can be considered cheaply
-# via a single batched check_ik_batch call, instead of blindly trajopt-attempting
-# whichever fixed-order candidates happen to fall within the attempts budget.
-LOCAL_WAYPOINT_POOL_SIZE = 14
+    "LOCAL_WAYPOINT_ATTEMPTS", os.environ.get("POST_GRASP_ESCAPE_ATTEMPTS", "5")))
+# Give up shrinking once the remaining distance from the current pose to the
+# (possibly already-shrunk) target drops below this -- not worth chasing an
+# even-tinier hop that makes no real progress toward the actual destination.
+WAYPOINT_SHRINK_MIN_DISTANCE = float(os.environ.get("WAYPOINT_SHRINK_MIN_DISTANCE", "0.05"))
 # Both a second ("top_down") waypoint orientation and a +/-0.05m y-offset search were
 # tried here and measured empirically to fail at the SAME rate as the baseline (both
 # orientations: ~equal IK_FAIL proportion; y-offset: no change in failure proportion
@@ -269,6 +480,16 @@ def make_occluder_task():
             self.rollout_failure_reason = None
             self.rollout_candidate_info = None
             self._last_fail_reason = None
+            self._grasp_baseline_transform = None
+            # Richer diagnostics read by run() into records.jsonl alongside the
+            # single-value failure/candidate fields above: per-attempt grasp
+            # history (which contact points were tried and why each failed, not
+            # just the last one), per-check retention drift (position + rotation,
+            # not just the pass/fail it produced), and per-slice descent detail
+            # (CuRobo's own position/rotation error on each place_actor segment).
+            self.rollout_grasp_attempts = []
+            self.rollout_retention_checks = []
+            self.rollout_descent_slices = []
 
             def checkpoint(name):
                 # Diagnostic: the dry-run candidate search only verifies the
@@ -288,22 +509,117 @@ def make_occluder_task():
             target_p0 = self.target_obj.get_pose().p        # original target location (pre-grasp)
             self._place_target_y = float(target_p0[1])      # available to backward subgoals
             arm_tag = ArmTag("right" if target_p0[0] > 0 else "left")
-            candidate_plan = self._select_pick_place_candidate(arm_tag)
-            cp_id = candidate_plan["contact_point_id"]
+            # Retry with a genuinely different contact-point candidate when
+            # grasp_verify (below) detects a missed grasp, instead of ending the
+            # episode after the first miss. _select_pick_place_candidate already
+            # ranks/generates several candidates for the dry-run search --
+            # exclude_cp_ids reuses that same ranking rather than re-deriving it.
+            # Intermediate failed attempts reset plan_success/rollout_failure_*
+            # so a LATER successful attempt isn't left alongside a stale failure
+            # recording from an earlier, since-recovered-from miss.
+            tried_cp_ids = set()
+            candidate_plan = None
+            cp_id = None
+            grasp_succeeded = False
+            for grasp_attempt in range(1, GRASP_VERIFY_MAX_CANDIDATES + 1):
+                candidate_plan = self._select_pick_place_candidate(arm_tag, exclude_cp_ids=tried_cp_ids)
+                cp_id = candidate_plan["contact_point_id"]
+                if cp_id is None:
+                    # No viable contact-point candidate at all (e.g. the object's
+                    # current geometry/pose gives _rank_side_grasp_ids nothing to
+                    # rank) -- retrying can't help since nothing about the object
+                    # or arm has changed. Executing the grasp anyway would fall
+                    # through to an unconstrained default grasp
+                    # (grasp_actor_from_table with contact_point_id=None) whose
+                    # failure then overwrites the real cause with a generic
+                    # grasp/lift error and reason=None. Fail fast with the real
+                    # reason instead.
+                    self.plan_success = False
+                    self._last_fail_reason = "no_ranked_contact_points"
+                    checkpoint("grasp_candidate_selection")
+                    self.rollout_grasp_attempts.append({
+                        "attempt": grasp_attempt,
+                        "contact_point_id": None,
+                        "success": False,
+                        "failed_stage": self.rollout_failure_stage,
+                        "fail_reason": self.rollout_failure_reason,
+                    })
+                    break
+                tried_cp_ids.add(cp_id)
 
-            if candidate_plan["grasp_waypoint"] is not None:
-                wp_trajectory = candidate_plan.get("grasp_waypoint_trajectory")
-                if wp_trajectory is not None:
-                    self._replay_planned_sequence(arm_tag, wp_trajectory)
+                if candidate_plan["grasp_waypoint"] is not None:
+                    wp_trajectory = candidate_plan.get("grasp_waypoint_trajectory")
+                    if wp_trajectory is not None:
+                        self._replay_planned_sequence(arm_tag, wp_trajectory)
+                    else:
+                        self._plan_and_replay_pose(arm_tag, candidate_plan["grasp_waypoint"])
+                    checkpoint("waypoint_move")
+                self._grasp_via_cached_trajectories(arm_tag, candidate_plan)
+                checkpoint("grasp")
+
+                pre_lift_object_z = float(self.target_obj.get_pose().p[2])
+                self.move(self.move_by_displacement(arm_tag=arm_tag, z=GRASP_LIFT_HEIGHT))
+                checkpoint("lift")
+                if self.PICKUP_ONLY:        # stop at the picked-up state (reachability probe)
+                    return
+                # Verify the grasp actually captured the object before trusting it. plan_success
+                # only reflects whether CuRobo found a valid motion plan for the COMMANDED
+                # gripper move -- it says nothing about whether the object moved with it.
+                # Confirmed empirically (seeds 11/19/26): the gripper lifted the full commanded
+                # GRASP_LIFT_HEIGHT while the object stayed frozen at its original table pose
+                # (z-rise 0.0-0.6% of the commanded height) -- a fully missed grasp, not a
+                # marginal one. Left unchecked, attach_object below bakes the object's real
+                # (still-on-table) pose into CuRobo's collision model as if it were rigidly
+                # held by the now-lifted gripper, producing a nonsensical attached-mesh
+                # position that immediately collides with the table the instant
+                # enable_table(True) runs a few lines down -- misattributed as a placement/
+                # pre_beside_box planning bug rather than what it actually is: a failed grasp.
+                if self.plan_success:
+                    object_rise = float(self.target_obj.get_pose().p[2] - pre_lift_object_z)
+                    if object_rise < GRASP_LIFT_HEIGHT * GRASP_VERIFY_MIN_RISE_FRACTION:
+                        self.plan_success = False
+                        self._last_fail_reason = f"grasp_missed(object_z_rise={object_rise:.3f}m)"
+                checkpoint("grasp_verify")
+                self.rollout_grasp_attempts.append({
+                    "attempt": grasp_attempt,
+                    "contact_point_id": cp_id,
+                    "success": self.plan_success,
+                    "failed_stage": self.rollout_failure_stage,
+                    "fail_reason": self.rollout_failure_reason,
+                })
+                if self.plan_success:
+                    grasp_succeeded = True
+                    break
+                if grasp_attempt < GRASP_VERIFY_MAX_CANDIDATES and cp_id is not None:
+                    if log_move:
+                        print(f"[grasp_verify] attempt {grasp_attempt} missed (cp_id={cp_id}); "
+                              f"retrying with next candidate")
+                    self.plan_success = True
+                    self.rollout_failure_stage = None
+                    self.rollout_failure_reason = None
+                    self._last_fail_reason = None
+                    # _grasp_via_cached_trajectories closed the gripper AND
+                    # disabled the table for the failed attempt (right after
+                    # its own pre_grasp leg, before its final grasp approach)
+                    # and never reverses either. The table must go back to
+                    # ENABLED here, not stay disabled: _grasp_via_cached_
+                    # trajectories' own waypoint_move/pre_grasp leg expects to
+                    # plan WITH table collision active (that's why it only
+                    # disables the table partway through, right before the
+                    # close final approach) -- leaving it disabled would let
+                    # the next candidate's waypoint/pre_grasp plan straight
+                    # through the table.
+                    self.move(self.open_gripper(arm_tag))
+                    self.enable_table(enable=True)
                 else:
-                    self._plan_and_replay_pose(arm_tag, candidate_plan["grasp_waypoint"])
-                checkpoint("waypoint_move")
-            self._grasp_via_cached_trajectories(arm_tag, candidate_plan)
-            checkpoint("grasp")
-
-            self.move(self.move_by_displacement(arm_tag=arm_tag, z=GRASP_LIFT_HEIGHT))
-            checkpoint("lift")
-            if self.PICKUP_ONLY:        # stop at the picked-up state (reachability probe)
+                    break
+            if not grasp_succeeded:
+                # Retry cleanup can temporarily restore plan_success so the next
+                # candidate can run. Exhausting the loop is still a failed grasp.
+                self.plan_success = False
+                if self._last_fail_reason is None:
+                    self._last_fail_reason = "grasp_candidates_exhausted"
+                checkpoint("grasp_verify")
                 return
             self.attach_object(
                 self.target_obj,
@@ -311,6 +627,10 @@ def make_occluder_task():
                 str(arm_tag),
             )
             checkpoint("attach_object")
+            # Baseline for _object_retained: the object's full pose relative to the
+            # gripper right now, while we still trust the grasp (grasp_verify just
+            # passed). Every subsequent replay step compares against this.
+            self._grasp_baseline_transform = self._gripper_relative_object_transform(arm_tag)
             self.enable_table(enable=True)
             checkpoint("enable_table")
 
@@ -335,6 +655,9 @@ def make_occluder_task():
                       f"quat={placement_plan['quat']}")
             for stage_name, traj in placement_plan["trajectories"]:
                 self._replay_planned_move(arm_tag, traj)
+                if self.plan_success and not self._object_retained(arm_tag, context=stage_name):
+                    self.plan_success = False
+                    self._last_fail_reason = f"object_lost:{stage_name}"
                 checkpoint(stage_name)
             # _select_attached_placement_plan's search can exhaust every geometry/
             # escape combo without ever finding one that plans ALL the way through
@@ -393,6 +716,9 @@ def make_occluder_task():
             # (position+orientation blend) instead of one large jump.
             mid_pose = self._verified_intermediate(arm_tag, candidate_plan["placement_subgoals"][-1][1], place_actions[0].target_pose)
             self._plan_and_replay_pose(arm_tag, mid_pose)
+            if self.plan_success and not self._object_retained(arm_tag, context="placement:pre_place_descent"):
+                self.plan_success = False
+                self._last_fail_reason = "object_lost:placement:pre_place_descent"
             checkpoint("placement:pre_place_descent")
             if log_move:
                 # Diagnostic: is the endpoint itself reachable (pure collision-aware IK,
@@ -406,15 +732,18 @@ def make_occluder_task():
                 move_poses = [a.target_pose for a in place_actions if a.action == "move"]
                 ik_ok = check_ik(move_poses)
                 print(f"[place_actor] pure-IK reachability (attached, live qpos): {list(ik_ok)}")
-            # retries=4 -> 10: the broad-sweep validation (seeds 8-31) confirmed
-            # place_actor is now the dominant remaining failure (4/20, 100%
-            # FINETUNE_TRAJOPT_FAIL) after the grasp/waypoint replay fixes collapsed
-            # grasp failures from 56% to 10%. Since this is a marginal-feasibility
-            # trajopt problem (confirmed: same setup succeeds on one run, fails on
-            # another, purely from CuRobo's internal randomized seeding) rather than a
-            # reachability or divergence bug, more independent retries directly
-            # increases the odds one lands on a working solution.
-            self._execute_actions_via_plan_and_replay(place_arm_tag, place_actions, retries=10)
+            # Forcing CuRobo all the way down to place_actor's one exact final
+            # pose (via _execute_actions_via_plan_and_replay, retries 4 -> 10)
+            # was the prior approach here; the broad-sweep validation (seeds
+            # 8-31) confirmed it made place_actor the dominant remaining
+            # failure (100% MotionGenStatus.FINETUNE_TRAJOPT_FAIL), since the
+            # attached object's collision margin against the table is
+            # tightest exactly at that one pose. Searching a small grid of
+            # nearby landing poses instead -- accepting any that plans
+            # cleanly within check_success's own tolerance, then letting
+            # physics settle the final contact -- avoids ever asking CuRobo
+            # to solve that one hardest point.
+            self._local_landing_search_and_place(place_arm_tag)
             checkpoint("place_actor")
 
         def _blend_pose(self, pose_a, pose_b, t=0.5):
@@ -783,15 +1112,605 @@ def make_occluder_task():
                 control_seq = {"left_arm": None, "left_gripper": None, "right_arm": cached_result, "right_gripper": None}
             self.take_dense_action(control_seq)
 
+        def _gripper_relative_object_transform(self, arm_tag):
+            """The held object's FULL pose (position AND orientation) expressed in
+            the gripper's LOCAL frame -- stable under gripper translation/rotation
+            as long as the object is still rigidly held, unlike a raw world-frame
+            offset (which changes with gripper orientation even with zero slip).
+            Returns (relative_position, relative_quaternion)."""
+            gripper_pose = np.asarray(self.get_arm_pose(arm_tag), dtype=float)
+            gripper_rot = t3d.quaternions.quat2mat(gripper_pose[3:])
+            object_pose = self.target_obj.get_pose()
+            object_pos = np.asarray(object_pose.p, dtype=float)
+            object_rot = t3d.quaternions.quat2mat(np.asarray(object_pose.q, dtype=float))
+            relative_pos = gripper_rot.T @ (object_pos - gripper_pose[:3])
+            relative_quat = t3d.quaternions.mat2quat(gripper_rot.T @ object_rot)
+            return relative_pos, relative_quat
+
+        def _object_near_placement_target(self, xy_tolerance=OBJECT_PLACEMENT_XY_TOLERANCE,
+                                          z_tolerance=OBJECT_PLACEMENT_Z_TOLERANCE):
+            """Has the held object already reached a pose that WOULD PASS
+            put_mouse_on_pad.check_success() -- independent x/y error each under
+            xy_tolerance (mirroring check_success's own per-axis 0.02 criterion,
+            not a looser combined radius)? Used by place_actor's descent to stop
+            and open the gripper immediately once this is genuinely true, rather
+            than continuing to descend past a placement that's already good.
+            Deliberately conservative: an earlier combined-radius version
+            accepted seed 9 (dx=3.24cm) and seed 12 (dx=6.11cm) as "arrived" even
+            though check_success() would still reject both on at least one
+            axis -- see DESCENT_CONTACT_DRIFT_TOLERANCE for how a drift that
+            ISN'T yet this precise, but also isn't a genuine loss, is handled."""
+            if not getattr(self, "des_obj_pose", None):
+                return False
+            obj_pos = np.asarray(self.target_obj.get_pose().p, dtype=float)
+            target = np.asarray(self.des_obj_pose, dtype=float)
+            dx = abs(float(obj_pos[0] - target[0]))
+            dy = abs(float(obj_pos[1] - target[1]))
+            z_dist = float(obj_pos[2] - target[2])  # positive: object sits above the target resting height
+            return dx <= xy_tolerance and dy <= xy_tolerance and -z_tolerance <= z_dist <= z_tolerance
+
+        def _object_near_support_height(self, height_tolerance=DESCENT_CONTACT_HEIGHT_TOLERANCE):
+            """Is the held object's world-frame z plausibly at the placement
+            surface right now (independent of x/y)? Used to gate
+            DESCENT_CONTACT_DRIFT_TOLERANCE's ambiguous-contact branch: a
+            gripper-relative drift in that band is only explainable as early
+            contact if the object is actually near the resting height it would
+            be contacting -- a genuine drop shows the same drift magnitude
+            while still high above the surface, since it's falling under
+            gravity rather than following the descent's planned trajectory."""
+            if not getattr(self, "des_obj_pose", None):
+                return False
+            obj_z = float(self.target_obj.get_pose().p[2])
+            target_z = float(self.des_obj_pose[2])
+            return abs(obj_z - target_z) <= height_tolerance
+
+        def _object_retained(self, arm_tag, tolerance=OBJECT_RETENTION_TOLERANCE,
+                             rotation_tolerance=OBJECT_RETENTION_ROTATION_TOLERANCE, context=None,
+                             return_drift=False):
+            """True if the held object is still where it was (position AND
+            orientation) relative to the gripper when _grasp_baseline_transform
+            was captured (right after attach_object in play_once) -- i.e. the
+            grasp hasn't slipped, rotated loose, or been dropped since. Confirmed
+            empirically (seed 27): every placement stage reported
+            plan_success=True while the object physically fell mid-transit, since
+            plan_success only reflects the ARM's motion plan, never the HELD
+            OBJECT's actual state. Returns True (nothing to check) if no baseline
+            has been captured yet.
+
+            Strict everywhere, including place_actor's descent -- callers there
+            should check _object_near_placement_target FIRST and short-circuit
+            before ever calling this, since a legitimate early placement also
+            changes the gripper-relative transform and would otherwise look
+            identical to a drop."""
+            if self._grasp_baseline_transform is None:
+                return (True, 0.0, 0.0) if return_drift else True
+            baseline_pos, baseline_quat = self._grasp_baseline_transform
+            current_pos, current_quat = self._gripper_relative_object_transform(arm_tag)
+            pos_drift = float(np.linalg.norm(current_pos - baseline_pos))
+            rot_dot = float(np.clip(abs(np.dot(baseline_quat, current_quat)), -1.0, 1.0))
+            rot_drift = float(2.0 * np.arccos(rot_dot))
+            retained = pos_drift <= tolerance and rot_drift <= rotation_tolerance
+            self.rollout_retention_checks.append({
+                "context": context, "pos_drift": pos_drift, "rot_drift": rot_drift, "retained": retained,
+            })
+            if os.environ.get("ROBOTWIN_LOG_MOVE", "") == "1":
+                print(f"[object-retained] context={context} pos_drift={pos_drift:.4f}m (tol={tolerance}) "
+                      f"rot_drift={rot_drift:.4f}rad (tol={rotation_tolerance}) retained={retained}")
+            if return_drift:
+                return retained, pos_drift, rot_drift
+            return retained
+
+        def _trajectory_path_metrics(self, arm_tag, result):
+            """Safety-filter metrics for a planned descent-slice trajectory,
+            via the arm's planner's own forward kinematics. Used by
+            _plan_pose_with_descent_slices to catch CuRobo trajopt solves
+            that are technically valid but take an implausibly circuitous
+            path for what should be a tiny straight-line slice -- see
+            DESCENT_MAX_PATH_DEVIATION and friends for the empirical case
+            that motivated this (a 3cm slice's solve swinging the gripper
+            56cm away before snapping back). Returns None if the trajectory
+            has fewer than 2 waypoints (nothing to check).
+
+            - max_perp_deviation: max distance any waypoint's EE position
+              strays from the closest point on the FINITE segment between
+              the trajectory's own start/end EE pose (projection clamped to
+              [0, line_len] -- an unclamped projection would report
+              near-zero deviation for a trajectory that overshoots straight
+              past the target along the same axis).
+            - path_length_ratio: actual Cartesian path length (sum of
+              consecutive EE waypoint distances) over the straight-line
+              distance -- catches back-and-forth paths that stay close to
+              the line but travel much farther than the direct distance.
+            - joint_path_length / joint_direct_dist: absolute joint-space
+              path length and direct start->end joint-space distance
+              (radians, L2 norm) -- exposed directly (not just as a ratio)
+              so a monotonic jump to a distant IK branch can be caught by
+              its own absolute magnitude, since such a jump has
+              joint_travel_ratio near 1.0 regardless of how far it goes.
+            - joint_travel_ratio: joint_path_length / joint_direct_dist --
+              catches joint-space WINDING an EE-only check can miss (a
+              redundant/near-singular arm can reach nearly the same EE pose
+              via very different, looping joint paths). A near-zero
+              joint_direct_dist (or line_len for path_length_ratio) with a
+              non-negligible numerator returns inf rather than silently
+              collapsing to a "perfect" 1.0 -- a real loop with almost
+              identical start/end shouldn't look the same as "nothing
+              moved."
+            - max_joint_range: the largest single joint's (max-min)
+              excursion across the trajectory, in radians -- flags one
+              joint spinning through an implausible range even when the
+              aggregate joint_travel_ratio looks acceptable."""
+            positions = result.get("position")
+            if positions is None or len(positions) < 2:
+                return None
+            planner = self.robot.left_planner if str(arm_tag) == "left" else self.robot.right_planner
+            joint_state = JointState.from_position(
+                torch.tensor(positions, dtype=torch.float32).cuda(),
+                joint_names=planner.active_joints_name,
+            )
+            kin_state = planner.motion_gen.compute_kinematics(joint_state)
+            ee_pos = np.array(kin_state.ee_pos_seq.to("cpu"), dtype=float)
+            start_pos, end_pos = ee_pos[0], ee_pos[-1]
+            line_vec = end_pos - start_pos
+            line_len = float(np.linalg.norm(line_vec))
+            if line_len < 1e-6:
+                max_perp_deviation = float(np.max(np.linalg.norm(ee_pos - start_pos, axis=1)))
+            else:
+                line_unit = line_vec / line_len
+                rel = ee_pos - start_pos
+                t = np.clip(rel @ line_unit, 0.0, line_len)
+                closest = start_pos + np.outer(t, line_unit)
+                max_perp_deviation = float(np.max(np.linalg.norm(ee_pos - closest, axis=1)))
+            path_length = float(np.sum(np.linalg.norm(np.diff(ee_pos, axis=0), axis=1)))
+            if line_len > 1e-6:
+                path_length_ratio = path_length / line_len
+            elif path_length > 1e-6:
+                path_length_ratio = float("inf")
+            else:
+                path_length_ratio = 1.0
+
+            joint_pos = np.asarray(positions, dtype=float)
+            joint_path_length = float(np.sum(np.linalg.norm(np.diff(joint_pos, axis=0), axis=1)))
+            joint_direct_dist = float(np.linalg.norm(joint_pos[-1] - joint_pos[0]))
+            if joint_direct_dist > 1e-6:
+                joint_travel_ratio = joint_path_length / joint_direct_dist
+            elif joint_path_length > 1e-6:
+                joint_travel_ratio = float("inf")
+            else:
+                joint_travel_ratio = 1.0
+            max_joint_range = float(np.max(joint_pos.max(axis=0) - joint_pos.min(axis=0)))
+
+            return {
+                "max_perp_deviation": max_perp_deviation,
+                "path_length": path_length,
+                "path_length_ratio": path_length_ratio,
+                "joint_path_length": joint_path_length,
+                "joint_direct_dist": joint_direct_dist,
+                "joint_travel_ratio": joint_travel_ratio,
+                "max_joint_range": max_joint_range,
+            }
+
+        def _descent_tstep_fraction_for_attempt(self, attempt_idx, total_attempts,
+                                               fractions=DESCENT_APPROACH_TSTEP_FRACTIONS):
+            """Progressive relaxation schedule across a descent slice's retry
+            budget: front-load attempts on the tightest (least detour room)
+            fraction, then relax toward CuRobo's own default across the
+            remaining attempts -- see DESCENT_APPROACH_TSTEP_FRACTIONS for why
+            a single fixed value (either tight or loose) isn't enough on its
+            own."""
+            tier = min(len(fractions) - 1, attempt_idx * len(fractions) // max(1, total_attempts))
+            return fractions[tier]
+
+        def _plan_pose_with_descent_slices(self, arm_tag, target_pose, qpos, stage_label, start_pose,
+                                          retries=1, constraint_pose=None, approach_axis=None,
+                                          slice_size=DESCENT_SLICE_SIZE, near_contact=False):
+            """Deterministic incremental descent, used for place_actor's moves
+            instead of the generic scalar-error-informed shrink retry
+            (_plan_pose_with_shrinking_waypoint). place_actor's moves are short,
+            mostly-straight-line final approaches with KNOWN structure (fixed
+            target orientation, held via approach_axis) -- exploiting that
+            structure with fixed-size slices along the straight line to the
+            target is more appropriate than an adaptive shrink that doesn't know
+            it. Plans AND REPLAYS each slice immediately (not a virtual dry-run
+            chain), checking _object_retained after every segment -- catches a
+            mid-descent drop at the EXACT slice it happens (confirmed
+            empirically: seed 27 dropped the object mid-transit while every
+            stage still reported plan_success=True) instead of only at the end,
+            and naturally preserves whatever slices already succeeded if a
+            later one fails, without needing a separate replay-before-return
+            step (each slice is already committed by the time the next runs).
+
+            Returns (ok, fail_reason, qpos, placed). placed=True means the
+            object has already reached a pose that would pass check_success --
+            the caller (_execute_actions_via_plan_and_replay) must skip any
+            remaining 'move' actions and go straight to opening the gripper,
+            since continuing to descend past an already-good placement could
+            only make it worse."""
+            plan_func = self._arm_plan_func(arm_tag)
+            qpos0 = np.array(qpos, dtype=np.float64, copy=True)
+            start = np.asarray(start_pose, dtype=float)
+            target = np.asarray(target_pose, dtype=float)
+            total_dist = float(np.linalg.norm(target[:3] - start[:3]))
+            num_slices = max(1, int(np.ceil(total_dist / slice_size)))
+            segment_length = total_dist / num_slices
+            # create_grasp_approach_metric's offset_position must stay smaller
+            # than the segment it's applied to -- CuRobo's own default (0.05) is
+            # LARGER than a 4cm slice, asking it to set up a straight-line
+            # pre-approach point farther away than the entire move itself.
+            # Confirmed to matter: 6 episodes still failed FINETUNE_TRAJOPT_FAIL
+            # with the unscaled 5cm offset on every slice.
+            approach_offset = min(0.05, segment_length * 0.8) if approach_axis is not None else 0.05
+            log_move = os.environ.get("ROBOTWIN_LOG_MOVE", "") == "1"
+            last_reason = "unknown"
+            for i in range(1, num_slices + 1):
+                # Interpolate BOTH position and orientation (_blend_pose does
+                # position lerp + quaternion nlerp) -- copying the target's
+                # quaternion onto every slice made the FIRST slice perform the
+                # entire orientation change within just one small position step.
+                waypoint = np.asarray(self._blend_pose(start, target, i / num_slices), dtype=float)
+                total_attempts = max(1, int(retries))
+                # Collect every attempt that plans successfully AND passes the
+                # path-safety filter, across the whole progressive-relaxation
+                # schedule, then replay the SHORTEST accepted one -- not just
+                # the first success. Trying every attempt regardless of an
+                # early pass (rather than stopping at the first accepted
+                # candidate) is what lets a tight-fraction attempt lose to a
+                # looser one that happens to find a genuinely shorter path,
+                # and is bounded by retries (already small, e.g. 10).
+                accepted = []  # list of (path_length, joint_path_length, max_joint_range, result, attempt_idx, attempt_record)
+                for attempt in range(total_attempts):
+                    fraction = self._descent_tstep_fraction_for_attempt(attempt, total_attempts)
+                    candidate = plan_func(list(waypoint), last_qpos=qpos0,
+                                         constraint_pose=constraint_pose, approach_axis=approach_axis,
+                                         approach_offset=approach_offset,
+                                         tstep_fraction=fraction, near_contact=near_contact)
+                    candidate["tstep_fraction"] = fraction
+                    attempt_record = {
+                        "stage": stage_label, "slice": i, "num_slices": num_slices,
+                        "attempt": attempt, "tstep_fraction": fraction,
+                        "near_contact": near_contact,
+                        "status": candidate.get("status"),
+                        "position_error": candidate.get("position_error"),
+                        "rotation_error": candidate.get("rotation_error"),
+                    }
+                    if candidate.get("status") != "Success":
+                        last_reason = candidate.get("fail_reason", "unknown")
+                        attempt_record["fail_reason"] = last_reason
+                        self.rollout_descent_slices.append(attempt_record)
+                        continue
+                    metrics = self._trajectory_path_metrics(arm_tag, candidate)
+                    attempt_record["path_metrics"] = metrics
+                    if metrics is None:
+                        # Nothing to measure (degenerate <2-waypoint plan) --
+                        # trust it, there's no path to have gone wrong.
+                        accepted.append((0.0, 0.0, 0.0, candidate, attempt, attempt_record))
+                        attempt_record["accepted"] = True
+                    elif (metrics["max_perp_deviation"] <= DESCENT_MAX_PATH_DEVIATION
+                            and metrics["path_length_ratio"] <= DESCENT_MAX_PATH_LENGTH_RATIO
+                            and metrics["joint_travel_ratio"] <= DESCENT_MAX_JOINT_TRAVEL_RATIO
+                            and metrics["max_joint_range"] <= DESCENT_MAX_JOINT_RANGE
+                            and metrics["joint_direct_dist"] <= DESCENT_MAX_JOINT_ENDPOINT_DISPLACEMENT
+                            and metrics["joint_path_length"] <= DESCENT_MAX_JOINT_PATH_LENGTH):
+                        accepted.append((metrics["path_length"], metrics["joint_path_length"],
+                                        metrics["max_joint_range"], candidate, attempt, attempt_record))
+                        attempt_record["accepted"] = True
+                    else:
+                        last_reason = (
+                            f"path_filter_rejected(dev={metrics['max_perp_deviation']:.3f},"
+                            f"len_ratio={metrics['path_length_ratio']:.2f},"
+                            f"joint_ratio={metrics['joint_travel_ratio']:.2f},"
+                            f"max_joint_range={metrics['max_joint_range']:.3f},"
+                            f"joint_dist={metrics['joint_direct_dist']:.3f},"
+                            f"joint_path={metrics['joint_path_length']:.3f})")
+                        attempt_record["accepted"] = False
+                        attempt_record["reject_reason"] = last_reason
+                        if log_move:
+                            print(f"[descent-slice] {stage_label} slice {i}/{num_slices} attempt "
+                                  f"{attempt} (tstep_fraction={fraction}): rejected -- {last_reason}")
+                    self.rollout_descent_slices.append(attempt_record)
+                if not accepted:
+                    if log_move:
+                        print(f"[descent-slice] {stage_label} slice {i}/{num_slices} failed "
+                              f"({total_attempts} attempts, none accepted; last={last_reason})")
+                    return False, last_reason, qpos0, False
+                # Lexicographic: shortest Cartesian path first, then shortest
+                # joint-space path, then smallest single-joint excursion --
+                # two candidates can have near-identical Cartesian paths but
+                # very different joint motion, so Cartesian length alone
+                # isn't enough to prefer the more sensible one.
+                accepted.sort(key=lambda entry: (entry[0], entry[1], entry[2]))
+                best_path_length, best_joint_path_length, best_max_joint_range, result, best_attempt, best_record = accepted[0]
+                best_record["selected"] = True
+                if log_move:
+                    print(f"[descent-slice] {stage_label} slice {i}/{num_slices} succeeded "
+                          f"(attempt {best_attempt}, tstep_fraction={result['tstep_fraction']}, "
+                          f"path_length={best_path_length:.3f}m, "
+                          f"joint_path_length={best_joint_path_length:.3f}rad, "
+                          f"{len(accepted)}/{total_attempts} attempts accepted)")
+                qpos0 = self._roll_qpos_forward(arm_tag, qpos0, result)
+                self._replay_planned_move(arm_tag, result)
+                if not self.plan_success:
+                    return False, self._last_fail_reason, qpos0, False
+                # Check arrival BEFORE retention, not as a fallback after a
+                # failed retention check: the object settling onto the target
+                # surface early (before the gripper's own nominal endpoint)
+                # changes the gripper-relative transform exactly like a drop
+                # would, but it's the intended outcome -- stop descending
+                # further (which could otherwise ram the held object into the
+                # surface it already reached) and report this move done, via
+                # placed=True (the caller must skip any remaining moves).
+                if self._object_near_placement_target():
+                    if log_move:
+                        print(f"[descent-slice] {stage_label} slice {i}/{num_slices}: object "
+                              f"already at a placement that would pass check_success -- done")
+                    return True, None, qpos0, True
+                retained, pos_drift, rot_drift = self._object_retained(
+                    arm_tag, context=f"{stage_label}:slice{i}", return_drift=True)
+                if not retained:
+                    # Ambiguous-contact requires ALL of: bounded position
+                    # drift, bounded ROTATION drift (a rotation-only loss --
+                    # object tipped/rotated loose without much translating --
+                    # would otherwise sail through on position alone, quietly
+                    # defeating the retention check's own rotation term), and
+                    # the object plausibly near the support surface it would
+                    # be contacting (a genuine drop shows the same 4-15cm
+                    # position drift while still high above the surface,
+                    # since it's falling under gravity rather than following
+                    # the descent's planned trajectory).
+                    if (pos_drift <= DESCENT_CONTACT_DRIFT_TOLERANCE
+                            and rot_drift <= OBJECT_RETENTION_ROTATION_TOLERANCE
+                            and self._object_near_support_height()):
+                        # Ambiguous: not yet at a passing placement (the check
+                        # above already ruled that out) and not within strict
+                        # retention tolerance either, but the drift magnitude is
+                        # well below anything a genuine drop has shown (30cm-
+                        # 1.4m) and consistent with early, imprecise contact.
+                        # Don't fail -- let the remaining slices keep trying to
+                        # converge on the real target instead of giving up on
+                        # a placement that's already known to be too far off.
+                        if log_move:
+                            print(f"[descent-slice] {stage_label} slice {i}/{num_slices}: drift "
+                                  f"{pos_drift:.3f}m looks like early contact, not a loss -- continuing")
+                    else:
+                        self.plan_success = False
+                        self._last_fail_reason = f"object_lost:{stage_label}:slice{i}"
+                        return False, self._last_fail_reason, qpos0, False
+                elif log_move:
+                    print(f"[descent-slice] {stage_label} slice {i}/{num_slices} succeeded")
+            return True, None, qpos0, False
+
+        def _local_landing_search_and_place(self, arm_tag):
+            """Replaces place_actor's forced descent to one exact final pose
+            (move1/move2 via _execute_actions_via_plan_and_replay), which kept
+            failing MotionGenStatus.FINETUNE_TRAJOPT_FAIL right at the surface
+            -- the attached object's collision margin against the table is
+            tightest exactly there, and CuRobo's trajopt struggles to converge
+            on ANY smooth path into it, let alone the one exact pose asked for.
+
+            Instead searches a small grid of nearby landing poses -- XY
+            offsets within check_success's own tolerance, release heights
+            from low to high -- and requires only ONE of them to actually
+            plan and pass the same trajectory-safety filters used by
+            _plan_pose_with_descent_slices, then replays ONLY that one and
+            opens the gripper, letting physics settle the final contact
+            instead of commanding CuRobo all the way down to it. Explicitly
+            gated on the object being retained and within
+            LANDING_SEARCH_TRIGGER_DISTANCE (XY) / LANDING_SEARCH_MAX_Z_
+            DISTANCE (vertical) of the target -- this function's
+            candidate moves are short by design, so calling it from farther
+            away would apply the same short-path filters to a legitimately
+            longer approach and reject it.
+
+            Heights are grouped into two tiers ([1cm,3cm] then [5cm,8cm]):
+            ALL accepted candidates across an entire tier are compared
+            before picking a winner, not just the first height with any
+            success -- otherwise a marginal 1cm solve could beat a cleanly
+            planned 3cm one that was never even tried, since candidates
+            aren't compared across different heights independently.
+
+            Candidate object poses are converted to gripper poses via
+            get_place_pose, NOT a fixed offset above the pad -- get_place_pose
+            derives the required gripper pose from the ACTUAL current grasp
+            transform (actor pose vs. end-effector pose), so it's correct
+            regardless of which grasp this particular episode happened to
+            use, unlike a fixed "gripper N cm above the pad" assumption which
+            would put the object at the wrong height for a different grasp.
+
+            Sets plan_success=False with a descriptive fail_reason if no
+            candidate at any height passes; the caller's checkpoint() records
+            it as an ordinary failure, same as any other stage."""
+            plan_func = self._arm_plan_func(arm_tag)
+            log_move = os.environ.get("ROBOTWIN_LOG_MOVE", "") == "1"
+            check_ik = self.robot.left_check_ik_batch if str(arm_tag) == "left" else self.robot.right_check_ik_batch
+            target = np.asarray(self.des_obj_pose, dtype=float)
+
+            obj_pos = np.asarray(self.target_obj.get_pose().p, dtype=float)
+            xy_distance = float(np.hypot(obj_pos[0] - target[0], obj_pos[1] - target[1]))
+            z_distance = float(abs(obj_pos[2] - target[2]))
+            retained = self._object_retained(arm_tag, context="landing-search:precondition")
+            if not retained or xy_distance > LANDING_SEARCH_TRIGGER_DISTANCE or z_distance > LANDING_SEARCH_MAX_Z_DISTANCE:
+                self.plan_success = False
+                self._last_fail_reason = (f"landing_search_preconditions_not_met(retained={retained},"
+                                          f"xy_distance={xy_distance:.3f}m,z_distance={z_distance:.3f}m)")
+                if log_move:
+                    print(f"[landing-search] preconditions not met -- retained={retained} "
+                          f"xy_distance={xy_distance:.3f}m (max {LANDING_SEARCH_TRIGGER_DISTANCE}m) "
+                          f"z_distance={z_distance:.3f}m (max {LANDING_SEARCH_MAX_Z_DISTANCE}m)")
+                return
+
+            # Skip direct 1--5 cm grids: the sweep produced 509 solver failures.
+            # Stage at 8 cm, then descend sequentially with the near-contact profile.
+            height_tiers = [[max(LANDING_RELEASE_HEIGHTS)]]
+            for tier in height_tiers:
+                tier_accepted = []  # (path_length, joint_path_length, max_joint_range, result, height, record)
+                for height in tier:
+                    candidates = []  # (dx, dy, obj_pose)
+                    for dx in LANDING_XY_OFFSETS:
+                        for dy in LANDING_XY_OFFSETS:
+                            obj_pose = target.copy()
+                            obj_pose[0] += dx
+                            obj_pose[1] += dy
+                            obj_pose[2] = target[2] + height
+                            candidates.append((dx, dy, obj_pose))
+                    # Sort by radius (closest to nominal target first), then
+                    # by angle -- groups by distance WITHOUT letting ties at
+                    # the same radius systematically favor one sign over
+                    # another (plain grid iteration order puts every
+                    # negative-dx candidate before any positive-dx one at
+                    # the same radius, since LANDING_XY_OFFSETS lists
+                    # negatives first and Python's sort is stable).
+                    candidates.sort(key=lambda c: (np.hypot(c[0], c[1]), np.arctan2(c[1], c[0])))
+
+                    gripper_poses = [
+                        self.get_place_pose(self.target_obj, arm_tag, obj_pose, constrain="free", pre_dis=0.0)
+                        for _, _, obj_pose in candidates
+                    ]
+                    ik_ok = list(check_ik(gripper_poses))
+                    current_ee_pose = np.asarray(self.get_arm_pose(arm_tag), dtype=float)
+                    qpos = self.robot.left_entity.get_qpos() if str(arm_tag) == "left" else self.robot.right_entity.get_qpos()
+                    qpos0 = np.array(qpos, dtype=np.float64, copy=True)
+
+                    planned = 0
+                    height_accepted = 0
+                    for (dx, dy, _), gripper_pose, feasible in zip(candidates, gripper_poses, ik_ok):
+                        record = {"stage": "landing-search", "height": height, "dx": dx, "dy": dy,
+                                  "ik_feasible": bool(feasible)}
+                        if not feasible:
+                            self.rollout_descent_slices.append(record)
+                            continue
+                        if planned >= LANDING_MAX_CANDIDATES_PER_HEIGHT:
+                            continue  # never attempted -- not a rejection, don't record
+                        planned += 1
+                        segment_length = float(np.linalg.norm(np.asarray(gripper_pose[:3]) - current_ee_pose[:3]))
+                        approach_offset = min(0.05, segment_length * 0.8) if segment_length > 1e-6 else 0.02
+                        if height == max(LANDING_RELEASE_HEIGHTS):
+                            # This collision-clear target is a staging transit,
+                            # not a descent. The approach metric caused the
+                            # repeatable 2--2.5x loops seen in landing_v2.
+                            candidate_result = plan_func(list(gripper_pose), last_qpos=qpos0)
+                        else:
+                            candidate_result = plan_func(
+                                list(gripper_pose), last_qpos=qpos0, approach_axis=2,
+                                approach_offset=approach_offset, tstep_fraction=0.4)
+                        record["status"] = candidate_result.get("status")
+                        if candidate_result.get("status") != "Success":
+                            record["fail_reason"] = candidate_result.get("fail_reason", "unknown")
+                            record["accepted"] = False
+                            self.rollout_descent_slices.append(record)
+                            continue
+                        metrics = self._trajectory_path_metrics(arm_tag, candidate_result)
+                        record["path_metrics"] = metrics
+                        # DESCENT_MAX_JOINT_ENDPOINT_DISPLACEMENT/PATH_LENGTH
+                        # were calibrated for descent slices (~DESCENT_SLICE_
+                        # SIZE=4cm each) -- a landing-search candidate can be
+                        # up to ~10cm away, which naturally needs more joint
+                        # travel even for a perfectly clean plan. Reusing the
+                        # unscaled absolute caps rejected almost everything
+                        # (confirmed empirically: 1/288 candidates accepted
+                        # across a 6-seed sanity run). Scale by how much
+                        # longer this candidate's segment is than a nominal
+                        # slice, same way approach_offset already scales.
+                        joint_scale = max(1.0, segment_length / DESCENT_SLICE_SIZE)
+                        max_joint_endpoint_displacement = DESCENT_MAX_JOINT_ENDPOINT_DISPLACEMENT * joint_scale
+                        max_joint_path_length = DESCENT_MAX_JOINT_PATH_LENGTH * joint_scale
+                        record["joint_scale"] = joint_scale
+                        if metrics is None:
+                            tier_accepted.append((0.0, 0.0, 0.0, candidate_result, height, dx, dy, record))
+                            record["accepted"] = True
+                            height_accepted += 1
+                        elif (metrics["max_perp_deviation"] <= DESCENT_MAX_PATH_DEVIATION
+                                and metrics["path_length_ratio"] <= DESCENT_MAX_PATH_LENGTH_RATIO
+                                and metrics["joint_travel_ratio"] <= DESCENT_MAX_JOINT_TRAVEL_RATIO
+                                and metrics["max_joint_range"] <= DESCENT_MAX_JOINT_RANGE
+                                and metrics["joint_direct_dist"] <= max_joint_endpoint_displacement
+                                and metrics["joint_path_length"] <= max_joint_path_length):
+                            tier_accepted.append((metrics["path_length"], metrics["joint_path_length"],
+                                                  metrics["max_joint_range"], candidate_result, height, dx, dy, record))
+                            record["accepted"] = True
+                            height_accepted += 1
+                        else:
+                            record["accepted"] = False
+                            record["reject_reason"] = (
+                                f"path_filter_rejected(dev={metrics['max_perp_deviation']:.3f},"
+                                f"len_ratio={metrics['path_length_ratio']:.2f},"
+                                f"joint_ratio={metrics['joint_travel_ratio']:.2f},"
+                                f"max_joint_range={metrics['max_joint_range']:.3f},"
+                                f"joint_dist={metrics['joint_direct_dist']:.3f}(max={max_joint_endpoint_displacement:.3f}),"
+                                f"joint_path={metrics['joint_path_length']:.3f}(max={max_joint_path_length:.3f}))")
+                        self.rollout_descent_slices.append(record)
+                        if height_accepted >= LANDING_MIN_ACCEPTED_TO_STOP:
+                            break
+                    if log_move:
+                        print(f"[landing-search] height={height:.3f}m: {height_accepted} accepted "
+                              f"({sum(ik_ok)}/{len(candidates)} IK-feasible, {planned} planned)")
+
+                if not tier_accepted:
+                    continue
+
+                tier_accepted.sort(key=lambda entry: (entry[0], entry[1], entry[2]))
+                best_path_length, best_joint_path_length, _, result, best_height, best_dx, best_dy, best_record = tier_accepted[0]
+                best_record["selected"] = True
+                if log_move:
+                    print(f"[landing-search] tier {tier} succeeded: {len(tier_accepted)} candidates "
+                          f"accepted across the tier, chose height={best_height:.3f}m "
+                          f"path_length={best_path_length:.3f}m joint_path_length={best_joint_path_length:.3f}rad")
+                self._replay_planned_move(arm_tag, result)
+                if not self.plan_success:
+                    return
+                if not self._object_retained(arm_tag, context="landing-search"):
+                    self.plan_success = False
+                    self._last_fail_reason = "object_lost:landing-search"
+                    return
+
+                release_height = best_height
+                descent_failure = None
+                if best_height == max(LANDING_RELEASE_HEIGHTS):
+                    # The collision-clear solve is a staging pose. From this
+                    # verified state, make only short constrained downward moves.
+                    for lower_height in sorted(
+                            (h for h in LANDING_RELEASE_HEIGHTS if h < best_height), reverse=True):
+                        lower_obj_pose = target.copy()
+                        lower_obj_pose[:3] += np.array([best_dx, best_dy, lower_height])
+                        lower_gripper_pose = self.get_place_pose(
+                            self.target_obj, arm_tag, lower_obj_pose,
+                            constrain="free", pre_dis=0.0)
+                        live_qpos = (self.robot.left_entity.get_qpos() if str(arm_tag) == "left"
+                                     else self.robot.right_entity.get_qpos())
+                        ok, reason, _, placed = self._plan_pose_with_descent_slices(
+                            arm_tag, lower_gripper_pose,
+                            np.asarray(live_qpos, dtype=np.float64),
+                            f"landing-descent:{lower_height:.3f}",
+                            start_pose=self.get_arm_pose(arm_tag),
+                            retries=PLACEMENT_SEARCH_RETRIES, approach_axis=2,
+                            near_contact=True)
+                        if not ok:
+                            descent_failure = reason
+                            if not self.plan_success:
+                                return
+                            break
+                        release_height = lower_height
+                        if placed:
+                            break
+
+                self.rollout_descent_slices.append({
+                    "stage": "landing-release", "height": release_height,
+                    "dx": best_dx, "dy": best_dy,
+                    "descent_failure": descent_failure,
+                })
+                self.move(self.open_gripper(arm_tag))
+                return
+
+            self.plan_success = False
+            self._last_fail_reason = "no_valid_landing_candidate"
+            if log_move:
+                print(f"[landing-search] failed: no candidate at any height "
+                      f"{LANDING_RELEASE_HEIGHTS} planned and passed the filter")
+
         def _execute_actions_via_plan_and_replay(self, arm_tag, actions, retries=1):
-            """Plan every 'move' Action in the list upfront (chained through a
-            tracked virtual qpos, exactly like _plan_grasp_side), then replay each
-            via _replay_planned_move; non-move actions (gripper open/close) execute
-            normally through self.move. Extends the same plan-once-then-replay
-            pattern already applied to the waypoint and grasp moves to place_actor.
-            Unlike those, there's no separate earlier dry-run pass here (place_actor's
-            target poses are computed live, not pre-verified) -- so this doesn't
-            eliminate a proven duplicate-plan divergence the way it did there.
+            """Execute each 'move' Action via deterministic descent slicing (see
+            _plan_pose_with_descent_slices), which plans AND replays incrementally
+            and checks grasp retention after every slice; non-move actions
+            (gripper open/close) execute normally through self.move.
 
             retries: place_actor's failures are 100% MotionGenStatus.FINETUNE_TRAJOPT_FAIL
             (confirmed empirically) -- a marginal-feasibility trajopt-difficulty problem,
@@ -799,37 +1718,39 @@ def make_occluder_task():
             one run and fail on another (CuRobo's trajopt has internal randomized
             seeding), so retrying a failed plan_func call with fresh internal seeding
             has a real chance of finding a solution the first attempt missed. Each
-            retry re-attempts ONLY the failed action, not the whole chain."""
+            retry re-attempts ONLY the failed slice, not the whole chain."""
             if not self.plan_success:
                 return
-            start_qpos = self.robot.left_entity.get_qpos() if str(arm_tag) == "left" else self.robot.right_entity.get_qpos()
-            qpos = np.array(start_qpos, dtype=np.float64, copy=True)
-            trajectories = []
             start_pose = list(self.get_arm_pose(arm_tag))
             move_idx = 0
+            already_placed = False
             for a in actions:
                 if a.action != "move":
+                    self.move((arm_tag, [a]))
+                    if not self.plan_success:
+                        return
+                    continue
+                if already_placed:
+                    # A previous move already reached a placement that would
+                    # pass check_success (placed=True) -- skip any remaining
+                    # descent moves (continuing could only push an already-good
+                    # placement out of tolerance or into the surface) but still
+                    # fall through to whatever non-move actions (gripper open)
+                    # come after this one.
                     continue
                 move_idx += 1
-                ok, fail_reason, qpos, stage_trajs = self._plan_pose_with_local_waypoint_retry(
-                    arm_tag, a.target_pose, qpos, f"place_actor:move{move_idx}",
-                    start_pose=start_pose, retries=retries,
+                qpos = self.robot.left_entity.get_qpos() if str(arm_tag) == "left" else self.robot.right_entity.get_qpos()
+                ok, fail_reason, _, placed = self._plan_pose_with_descent_slices(
+                    arm_tag, a.target_pose, np.array(qpos, dtype=np.float64, copy=True),
+                    f"place_actor:move{move_idx}", start_pose=start_pose, retries=retries,
                     constraint_pose=a.args.get("constraint_pose"),
                     approach_axis=a.args.get("approach_axis"))
                 if not ok:
                     self.plan_success = False
                     self._last_fail_reason = fail_reason
                     return
-                trajectories.extend(stage_trajs)
-                start_pose = a.target_pose
-            self._replay_planned_sequence(arm_tag, trajectories)
-            if not self.plan_success:
-                return
-            for a in actions:
-                if a.action != "move":
-                    self.move((arm_tag, [a]))
-                    if not self.plan_success:
-                        return
+                start_pose = list(self.get_arm_pose(arm_tag))
+                already_placed = placed
 
         def _plan_and_replay_pose(self, arm_tag, pose):
             """Plan a single pose from the CURRENT live qpos and immediately replay
@@ -947,26 +1868,101 @@ def make_occluder_task():
                 candidates.append(pose)
             return candidates
 
+        def _plan_pose_with_shrinking_waypoint(self, arm_tag, target_pose, qpos, stage_label,
+                                              start_pose, constraint_pose=None, approach_axis=None,
+                                              relax_orientation=False,
+                                              max_iterations=LOCAL_WAYPOINT_ATTEMPTS,
+                                              min_distance=WAYPOINT_SHRINK_MIN_DISTANCE):
+            """Adaptive waypoint-shrink retry, used when a direct plan to target_pose
+            has already failed.
+
+            CuRobo's MotionGenResult sets position_error/rotation_error UNCONDITIONALLY
+            even on FINETUNE_TRAJOPT_FAIL (confirmed via source read of motion_gen.py's
+            _plan_from_solve_state) -- a failed attempt isn't pure noise, it tells us
+            how far off the optimizer's best attempt landed. Instead of only trying
+            hand-picked fixed offset directions (the old _local_waypoint_candidates
+            bridge pool), each iteration here either (a) retries the ORIGINAL target
+            from wherever the previous iteration actually landed, or (b) if that
+            fails, shrinks the target toward the current pose and retries that
+            smaller hop instead. The shrink amount is informed by position_error when
+            CuRobo reports one: back the target off by roughly the residual gap
+            (plus a safety margin) instead of blindly halving every time, so a
+            near-miss shrinks only a little (another attempt might close a small
+            gap) while a wild miss shrinks a lot. Falls back to a plain 50% halving
+            when no usable position_error is available (e.g. IK_FAIL, where
+            trajopt never ran). Shrinking toward the current pose (by definition
+            already reachable) converges toward something plannable even for
+            targets that are hard/far, unlike fixed offsets which can themselves be
+            unreachable. Stops on success at the real target, on max_iterations, or
+            once the remaining hop is already < min_distance from the current pose
+            (not worth shrinking further). Note: this does NOT replay CuRobo's own
+            failed near-miss trajectory (its full path was never verified
+            collision-safe, only its final error magnitude is known) -- it only
+            uses the error MAGNITUDE to size a fresh, independently-planned hop."""
+            log_move = os.environ.get("ROBOTWIN_LOG_MOVE", "") == "1"
+            plan_func = self._arm_plan_func(arm_tag)
+            qpos0 = np.array(qpos, dtype=np.float64, copy=True)
+            current_pose = np.asarray(start_pose, dtype=float)
+            original_target = np.asarray(target_pose, dtype=float)
+            goal = original_target.copy()
+            trajectories = []
+            last_reason = "unknown"
+            for iteration in range(1, max(1, int(max_iterations)) + 1):
+                result = plan_func(list(goal), last_qpos=qpos0, constraint_pose=constraint_pose,
+                                   approach_axis=approach_axis, relax_orientation=relax_orientation)
+                reached_original = bool(np.allclose(goal[:3], original_target[:3], atol=1e-6))
+                if result.get("status") == "Success":
+                    qpos0 = self._roll_qpos_forward(arm_tag, qpos0, result)
+                    label = stage_label if reached_original else f"{stage_label}:shrink{iteration}"
+                    trajectories.append((label, result))
+                    if reached_original:
+                        return True, None, qpos0, trajectories
+                    if log_move:
+                        print(f"[waypoint-shrink] {stage_label} iter {iteration}: reached shrunk "
+                              f"intermediate, retrying real target from there")
+                    current_pose = goal.copy()
+                    goal = original_target.copy()
+                    continue
+                last_reason = result.get("fail_reason", "unknown")
+                remaining_dist = float(np.linalg.norm(goal[:3] - current_pose[:3]))
+                if remaining_dist < min_distance:
+                    if log_move:
+                        print(f"[waypoint-shrink] {stage_label} iter {iteration} failed ({last_reason}); "
+                              f"remaining distance {remaining_dist:.3f}m < {min_distance}m, giving up")
+                    break
+                position_error = result.get("position_error")
+                if position_error is not None and 0 < position_error < remaining_dist:
+                    # Back off by roughly how far short CuRobo's own best attempt
+                    # landed (2x margin so we don't retry right at the same edge
+                    # of infeasibility), instead of blindly halving every time.
+                    target_remaining = max(min_distance, remaining_dist - 2.0 * position_error)
+                    shrink_fraction = target_remaining / remaining_dist
+                else:
+                    shrink_fraction = 0.5
+                goal[:3] = current_pose[:3] + (goal[:3] - current_pose[:3]) * shrink_fraction
+                if log_move:
+                    print(f"[waypoint-shrink] {stage_label} iter {iteration} failed ({last_reason}, "
+                          f"position_error={position_error}); shrinking target toward current pose "
+                          f"(fraction={shrink_fraction:.2f}) -> new distance "
+                          f"{float(np.linalg.norm(goal[:3] - current_pose[:3])):.3f}m")
+            return False, last_reason, qpos0, trajectories
+
         def _plan_pose_with_local_waypoint_retry(self, arm_tag, target_pose, qpos, stage_label,
                                                 start_pose=None, retries=1, constraint_pose=None,
                                                 approach_axis=None, local_attempts=LOCAL_WAYPOINT_ATTEMPTS,
                                                 relax_orientation=False):
-            """Plan one target; if direct planning fails, try local bridge waypoints.
+            """Plan one target; if direct planning fails, try the adaptive
+            waypoint-shrink retry (see _plan_pose_with_shrinking_waypoint).
 
             relax_orientation=True: position-only goal (PoseCostMetric.
             reach_partial_pose, see planner.py's plan_path) -- for transit-only moves
             where the target's orientation doesn't matter, only its position. A
             check_ik_batch(relax_orientation=True) sweep confirmed this opens up
-            real, currently-dead combos (e.g. lift_above_box at low clearance_z).
-            Applied to every attempt that targets target_pose itself (direct
-            attempts and each bridge's final leg); the bridge_pose hop itself stays
-            strict since it's just a short, already-IK-verified step, not the real
-            target."""
-            log_move = os.environ.get("ROBOTWIN_LOG_MOVE", "") == "1"
-            plan_func = self._arm_plan_func(arm_tag)
+            real, currently-dead combos (e.g. lift_above_box at low clearance_z)."""
             qpos0 = np.array(qpos, dtype=np.float64, copy=True)
             start_pose = list(self.get_arm_pose(arm_tag)) if start_pose is None else list(start_pose)
             last_reason = "unknown"
+            plan_func = self._arm_plan_func(arm_tag)
             for _ in range(max(1, int(retries))):
                 result = plan_func(target_pose, last_qpos=qpos0,
                                    constraint_pose=constraint_pose, approach_axis=approach_axis,
@@ -976,56 +1972,10 @@ def make_occluder_task():
                 last_reason = result.get("fail_reason", "unknown")
             if local_attempts <= 0:
                 return False, last_reason, qpos0, []
-            # Fail fast if the target itself has NO collision-free IK solution at all
-            # (independent of constraint_pose/approach_axis, which can only make a
-            # pose HARDER to reach, never easier -- so IK-infeasible unconstrained
-            # implies infeasible constrained too): no bridge waypoint can rescue a
-            # destination with zero valid joint configurations, since every bridge's
-            # final leg still has to land on that exact target. Confirmed empirically
-            # (seed 9's "beside_box" target failed IK_FAIL at every one of 171/180
-            # geometry combos while every bridge's final-leg retry burned a full
-            # trajopt call chasing a target that could never succeed). Skipping this
-            # saves local_attempts*retries wasted trajopt calls per failing stage.
-            # Matches relax_orientation: if the direct attempt was position-only,
-            # the prefilter must ask the same question, not the strict one.
-            check_ik = self.robot.left_check_ik_batch if str(arm_tag) == "left" else self.robot.right_check_ik_batch
-            if not bool(check_ik([target_pose], relax_orientation=relax_orientation)[0]):
-                if log_move:
-                    print(f"[local-waypoint] {stage_label} target IK-unreachable; skipping bridges")
-                return False, "target_unreachable", qpos0, []
-            # Generate a larger raw candidate pool than we'll actually spend trajopt
-            # budget on, batch-verify it in one cheap check_ik_batch call, and only
-            # full-trajopt-plan the subset that verifies reachable (in original
-            # preference order) -- instead of blindly trajopt-attempting a fixed list
-            # regardless of whether each candidate is even IK-feasible.
-            raw_pool = self._local_waypoint_candidates(
-                arm_tag, start_pose, target_pose, attempts=LOCAL_WAYPOINT_POOL_SIZE)
-            if raw_pool:
-                pool_ok = check_ik(raw_pool)
-                bridge_candidates = [c for c, ok in zip(raw_pool, pool_ok) if ok][:local_attempts]
-                if log_move:
-                    print(f"[local-waypoint] {stage_label} bridge pool: {len(raw_pool)} generated, "
-                          f"{int(np.sum(pool_ok))} IK-reachable, trying {len(bridge_candidates)}")
-            else:
-                bridge_candidates = []
-            for bridge_idx, bridge_pose in enumerate(bridge_candidates, start=1):
-                bridge_label = f"{stage_label}:local_waypoint{bridge_idx}"
-                bridge_result = plan_func(bridge_pose, last_qpos=qpos0)
-                if bridge_result.get("status") != "Success":
-                    last_reason = bridge_result.get("fail_reason", last_reason)
-                    continue
-                qpos_bridge = self._roll_qpos_forward(arm_tag, qpos0, bridge_result)
-                for _ in range(max(1, int(retries))):
-                    result = plan_func(target_pose, last_qpos=qpos_bridge,
-                                       constraint_pose=constraint_pose, approach_axis=approach_axis,
-                                       relax_orientation=relax_orientation)
-                    if result.get("status") == "Success":
-                        qpos_next = self._roll_qpos_forward(arm_tag, qpos_bridge, result)
-                        return True, None, qpos_next, [(bridge_label, bridge_result), (stage_label, result)]
-                    last_reason = result.get("fail_reason", last_reason)
-                if log_move:
-                    print(f"[local-waypoint] {stage_label} bridge {bridge_idx} failed final target ({last_reason})")
-            return False, last_reason, qpos0, []
+            return self._plan_pose_with_shrinking_waypoint(
+                arm_tag, target_pose, qpos0, stage_label, start_pose,
+                constraint_pose=constraint_pose, approach_axis=approach_axis,
+                relax_orientation=relax_orientation, max_iterations=local_attempts)
 
         def _replay_planned_sequence(self, arm_tag, trajectories):
             """Replay one planned trajectory or a list of labeled trajectories."""
@@ -1242,7 +2192,7 @@ def make_occluder_task():
                 planner.detach_object()
             return ok2, failed_stage2, fail_reason2
 
-        def _select_pick_place_candidate(self, arm_tag):
+        def _select_pick_place_candidate(self, arm_tag, exclude_cp_ids=None):
             # Selected-candidate metadata for the structured failure recorder (see
             # play_once): whether the executed candidate was fully dry-run-verified
             # or a fallback, and if a fallback, how far it got in the dry run and
@@ -1250,7 +2200,14 @@ def make_occluder_task():
             # distinguish "the dry run found a working plan and it still failed for
             # real" from "the dry run never found anything workable to begin with"
             # without re-deriving it from ROBOTWIN_LOG_MOVE logs.
+            #
+            # exclude_cp_ids: contact points already tried and found to fail a REAL
+            # grasp_verify check (see play_once) -- skipped so a retry after a
+            # missed grasp picks a genuinely different contact point instead of
+            # re-selecting the same one that just failed.
             cp_ids = self._rank_side_grasp_ids(self.target_obj, arm_tag)
+            if exclude_cp_ids:
+                cp_ids = [cp for cp in cp_ids if cp not in exclude_cp_ids]
             if not cp_ids:
                 self.rollout_candidate_info = {"verified": False, "reason": "no_ranked_contact_points"}
                 return {
@@ -1430,6 +2387,9 @@ def run(args):
                         rec["rollout_failure_stage"] = getattr(env, "rollout_failure_stage", None)
                         rec["rollout_failure_reason"] = getattr(env, "rollout_failure_reason", None)
                         rec["rollout_candidate_info"] = getattr(env, "rollout_candidate_info", None)
+                        rec["rollout_grasp_attempts"] = getattr(env, "rollout_grasp_attempts", None)
+                        rec["rollout_retention_checks"] = getattr(env, "rollout_retention_checks", None)
+                        rec["rollout_descent_slices"] = getattr(env, "rollout_descent_slices", None)
                         print(f"    seed {seed} off={off:.2f} cd={cd} {res['bucket']}: "
                               f"rollout {'SUCCESS' if success else 'FAIL'} -> "
                               f"{rec['rollout_bucket']}/episode{ep_counter}")
