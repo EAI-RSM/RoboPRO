@@ -201,8 +201,6 @@ def run_rollout(env, task_name, base_config, seed, dr_overrides, save_path, ep_n
     which is exactly what we want to measure.
     """
     success = False
-    plan_ok = False
-    check_ok = False
     artifact_info = None
     try:
         env.setup_demo(**build_cfg(task_name, base_config, seed, dr_overrides,
@@ -216,15 +214,7 @@ def run_rollout(env, task_name, base_config, seed, dr_overrides, save_path, ep_n
         check_ok = bool(env.check_success())
         if os.environ.get("ROBOTWIN_LOG_MOVE", "") == "1":
             print(f"    [rollout seed {seed} ep{ep_num}] plan_success={plan_ok} check_success={check_ok}")
-        # Label by the task's own check_success() -- object placed within tolerance of the
-        # pad AND grippers open -- which is the physical ground truth the video shows.
-        # plan_success is an internal "every planned segment executed" flag; the
-        # reachability planner makes many speculative moves and move() aborts on the FIRST
-        # failed plan, so plan_success can read False on a scene it actually solved.
-        # Requiring plan_success mislabels those genuine placements as fails. check_success
-        # cannot be a false positive here: the target spawns far from the pad, and grippers
-        # only end open-over-pad if place_actor fully executed.
-        success = check_ok
+        success = plan_ok and check_ok
     except Exception as e:
         print(f"    [rollout seed {seed} ep{ep_num}] failed ({type(e).__name__}: {e})")
         success = False
@@ -242,8 +232,6 @@ def run_rollout(env, task_name, base_config, seed, dr_overrides, save_path, ep_n
         print(f"    [rollout seed {seed} ep{ep_num}] video merge failed ({type(e).__name__}: {e})")
     return {
         "success": bool(success),
-        "plan_success": bool(plan_ok),
-        "check_success": bool(check_ok),
         "artifact_info": artifact_info,
     }
 
