@@ -46,6 +46,9 @@ setup_paths()
 # repo-root results dir, anchored to THIS file so it resolves the same from any cwd
 # (bench_script -> script -> customized_robotwin -> RoboPRO)
 RESULTS_DIR = Path(__file__).resolve().parents[3] / "scripts" / "validation" / "results" / "reachability"
+# --mouse writes here instead, so the box-free MOUSE grip-pose maps never clobber the
+# normal (occluder bottle) reachability results.
+MOUSE_RESULTS_DIR = RESULTS_DIR.parent / "reachability_mouse"
 
 import torch  # noqa: E402  (after setup_paths so curobo's torch is on the path)
 from analyze_occluder_visibility import make_occluder_task, PAD_XY, OCC_HALF_FOOTPRINT  # noqa: E402
@@ -116,6 +119,17 @@ def _solve_grid(robot, planner, ik, arm_tag, gp_world, chunk=256):
 
 # ----------------------------------------------------------------------------- run
 def run(args):
+    # --mouse: map the box-free MOUSE grip pose. The mouse is only the target in the
+    # occluder-free scene (spawn_occluder=True swaps the target to the bottle), so force the
+    # milk box off and default the output to the mouse subfolder.
+    if args.mouse:
+        args.occluder = False
+        if args.out_dir is None:
+            args.out_dir = str(MOUSE_RESULTS_DIR)
+        print("[--mouse] milk box OFF, mapping box-free mouse grip pose")
+    if args.out_dir is None:
+        args.out_dir = str(RESULTS_DIR)
+
     env = make_occluder_task()()
     env.spawn_occluder = args.occluder     # --no-occluder -> empty (table-only) collision world
     env.occluder_offset = args.offset
@@ -390,6 +404,10 @@ def main():
                     help="do NOT add the milk-box occluder -> reachability on the bare (table-only) "
                          "collision world. By default the occluder IS spawned.")
     ap.set_defaults(occluder=True)
+    ap.add_argument("--mouse", action="store_true",
+                    help="map the box-free MOUSE grip pose (dev spawn geometry) instead of the "
+                         "occluder bottle: forces the milk box OFF and writes to "
+                         "results/reachability_mouse so it never clobbers the normal maps")
     ap.add_argument("--arms", choices=["both", "left", "right"], default="both")
     ap.add_argument("--z", type=float, default=0.90, help="EE height for the (single-slice) grid (m)")
     ap.add_argument("--volume", action="store_true",
@@ -406,9 +424,10 @@ def main():
     ap.add_argument("--res", type=float, default=0.02, help="grid resolution (m)")
     ap.add_argument("--chunk", type=int, default=256,
                     help="IK poses per batch; lower if you hit CUDA OOM (planners already use ~9GB)")
-    ap.add_argument("--out-dir", default=str(RESULTS_DIR),
+    ap.add_argument("--out-dir", default=None,
                     help="results location (default: repo-root scripts/validation/results/reachability, "
-                         "resolved from the script path so it's the same from any cwd)")
+                         "or .../reachability_mouse under --mouse; resolved from the script path so "
+                         "it's the same from any cwd)")
     run(ap.parse_args())
 
 

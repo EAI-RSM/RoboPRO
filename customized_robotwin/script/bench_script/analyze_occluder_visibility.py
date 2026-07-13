@@ -29,6 +29,7 @@ USAGE (from the benchmark folder):
 """
 import os
 import json
+import time
 import argparse
 from copy import deepcopy
 from pathlib import Path
@@ -55,10 +56,27 @@ from visualize_task_scene import get_env_class
 from analyze_natural_visibility import (build_cfg, DR_CLEAN, save_overlay, analyze, _resolve_target,
                                         CAMERA, run_rollout, analyze_rollout, effective_out_dir)
 
-# target object: 001_bottle id 9 (8-way grasp ring -> side-reaches around the occluder).
-# Swap TARGET_MODEL/TARGET_ID back to 047_mouse id 0 for the stock top-down mouse.
+# target object is SCENE-DEPENDENT (resolved per-build in load_actors from spawn_occluder):
+#   occluder scene  -> 001_bottle id 9 (8-way grasp ring -> side-reaches around the occluder).
+#   box-free scene  -> 047_mouse id 0 (the stock top-down mouse, native put_mouse_on_pad object).
+# The bottle only makes sense WITH the box (its value is the side-reach); the box-free clutter
+# scene wants the natural benchmark object. Spawn area (TARGET_XLIM/YLIM) is shared across both
+# so target POSITION stays a controlled variable -- only the object + occluder/clutter differ.
 TARGET_MODEL = "001_bottle"
 TARGET_ID = 9
+MOUSE_MODEL = "047_mouse"      # box-free (clutter) scene: stock top-down mouse
+MOUSE_ID = 0
+# ---- Box-free (mouse) scene spawn geometry -----------------------------------------------
+# EASY REVERT: set MOUSE_DEV_GEOMETRY = False to fall back to the bottle-tuned TARGET_XLIM/YLIM
+# + PAD_XY (which is IK-marginal for the mouse -- it grasps but can't lift). When True, the
+# mouse and pad use dev's put_mouse_on_pad layout (mouse to the side, front band; centre pad)
+# so grasp/lift/place all have reachable headroom. Only affects the box-free scene.
+MOUSE_DEV_GEOMETRY = True
+MOUSE_XLIM = (-0.45, 0.45)     # mouse spawn x (with |x| >= MOUSE_MIN_ABS_X enforced -> to the side)
+MOUSE_YLIM = (-0.23, 0.05)     # mouse spawn y (front band)
+MOUSE_MIN_ABS_X = 0.3          # keep the mouse off-centre (centre-front is a hard reach)
+MOUSE_PAD_X = 0.0              # pad x (centre)
+MOUSE_PAD_YLIM = (-0.23, 0.05) # pad y band (same region as the mouse -> short carry)
 # target spawn: back half of the table (back furniture removed). Capped at y=0.20 so it
 # stays 0.15 m off the back edge (table y in [-0.35, 0.35]); x kept to [-0.15, 0.15] so it
 # stays 0.45 m off each side edge (table x in [-0.6, 0.6]) -> leaves room for the around-
@@ -186,11 +204,15 @@ def make_occluder_task():
         #                     curobo check_ik_batch/approach_axis plumbing merged from that
         #                     branch. Set via --plan-algo.
         #   "baseline"     -> _play_once_subgoal with routing suppressed (no forced side grasp,
-        #                     no forward/backward subgoals): a plain grasp -> lift -> place that
-        #                     reproduces dev's vanilla expert. The box still spawns and is in
-        #                     curobo's world, so curobo plans around it directly -- this is the
-        #                     "old planner" A/B baseline. Uses byte-identical grasp/lift/place
-        #                     calls to "subgoal", so the ONLY difference is the routing.
+        #                     no forward/backward subgoals). Byte-identical grasp/lift/place to
+        #                     "subgoal", so it is the correct CONTROL FOR SUBGOAL. NOTE: it is
+        #                     NOT dev-faithful -- it carries harness tuning (absolute
+        #                     FORWARD_SUBGOAL_Z lift, DROP_GRASP_ORIENTATION_CONSTRAINT grasp,
+        #                     constrain="free" place). Use "dev" for the true old planner.
+        #   "dev"          -> _play_once_dev: verbatim dev put_mouse_on_pad expert (stock
+        #                     constrained grasp, relative +0.1 lift, constrain="align" place).
+        #                     The TRUE "old planner" control. Pair with CUROBO_MAX_ATTEMPTS=10
+        #                     for dev's solver too.
         PLAN_ALGO = "subgoal"
 
         def load_actors(self):
@@ -199,9 +221,27 @@ def make_occluder_task():
             # leaks into the next build -- e.g. check_stable's _occluder_tilt_deg would read a
             # toppled box from the prior scene and wrongly reject a clean/no-occluder build.
             self.occluder = None
-            # target: random within the upper-third band (varies per seed -> distribution)
-            target_pose = rand_pose(xlim=list(self.target_xlim), ylim=list(self.target_ylim),
+            # Scene-dependent target object: bottle WITH the occluder (side-reach around the
+            # box), stock mouse WITHOUT it (box-free clutter scene). Set BOTH model+id on self so
+            # every downstream reference (create_actor, attach_object, tilt gate) stays consistent.
+            if self.spawn_occluder:
+                self.target_model, self.target_id = TARGET_MODEL, TARGET_ID
+            else:
+                self.target_model, self.target_id = MOUSE_MODEL, MOUSE_ID
+            # Box-free mouse scene can use dev's reachable spawn geometry instead of the
+            # bottle-tuned back band (IK-marginal for the mouse). Flip MOUSE_DEV_GEOMETRY to revert.
+            _mouse_dev = (not self.spawn_occluder) and MOUSE_DEV_GEOMETRY
+            tgt_xlim = list(MOUSE_XLIM) if _mouse_dev else list(self.target_xlim)
+            tgt_ylim = list(MOUSE_YLIM) if _mouse_dev else list(self.target_ylim)
+            # target: random within the band (varies per seed -> distribution)
+            target_pose = rand_pose(xlim=tgt_xlim, ylim=tgt_ylim,
                                     qpos=[0.5, 0.5, 0.5, 0.5], rotate_rand=True, rotate_lim=[0, 3.14, 0])
+            if _mouse_dev:   # dev keeps the mouse to the side (|x| >= MOUSE_MIN_ABS_X)
+                _tries = 0
+                while abs(float(target_pose.p[0])) < MOUSE_MIN_ABS_X and _tries < 50:
+                    target_pose = rand_pose(xlim=tgt_xlim, ylim=tgt_ylim,
+                                            qpos=[0.5, 0.5, 0.5, 0.5], rotate_rand=True, rotate_lim=[0, 3.14, 0])
+                    _tries += 1
             # scale from the task yaml if present, else None -> model's own scale
             self.target_obj = create_actor(
                 scene=self, pose=target_pose, modelname=self.target_model, convex=True,
@@ -210,9 +250,14 @@ def make_occluder_task():
             )
             self.target_obj.set_mass(0.05)
 
-            # destination pad (flat; parked at the front so it never conflicts with the occluder)
-            px, py = self.fixed_pad_xy
-            pad_pose = rand_pose(xlim=[px], ylim=[py], qpos=[1, 0, 0, 0], rotate_rand=False)
+            # destination pad (flat). Occluder scene: fixed front pad (out of the occluder zone).
+            # Mouse dev-geometry: dev's centre pad in the mouse's own band (short, reachable carry).
+            if _mouse_dev:
+                pad_pose = rand_pose(xlim=[MOUSE_PAD_X], ylim=list(MOUSE_PAD_YLIM),
+                                     qpos=[1, 0, 0, 0], rotate_rand=False)
+            else:
+                px, py = self.fixed_pad_xy
+                pad_pose = rand_pose(xlim=[px], ylim=[py], qpos=[1, 0, 0, 0], rotate_rand=False)
             self.color_name, self.color_value = "Gray", (0.5, 0.5, 0.5)
             self.des_obj = create_box(scene=self, pose=pad_pose, half_size=[0.06, 0.06, 0.0005],
                                       color=self.color_value, name="box", is_static=True)
@@ -241,14 +286,22 @@ def make_occluder_task():
                     "actor": self.occluder,
                     "collision_path": f"{os.environ['BENCH_ROOT']}/assets/objects/038_milk-box/collision/base2.glb",
                 })
+                # Keep procedural table clutter off the occluder: load_actors runs before
+                # get_cluttered_table, so this prohibited area (like the target's and pad's
+                # above) makes rand_create_cluttered_actor avoid the milk box. Without it,
+                # clutter can land against/on the box -> topple it during settle
+                # (OCCLUDER_MAX_TILT_DEG reject -> extra redraws) or clog the box<->bottle gap.
+                self.add_prohibit_area(self.occluder, padding=0.02, area="table")
 
         def _target_tilt_deg(self):
             """Tilt (deg) of the target bottle's long axis (model-local +y) from world +z.
             ~0 = upright, ~90 = lying on its side. None if the target isn't built yet.
             The spawn pose is always perfectly upright, so any large tilt means it toppled
-            during the physics settle."""
+            during the physics settle. Bottle-specific: the box-free scene's mouse is a flat,
+            top-down object whose local +y is NOT its up axis, so this gate is meaningless for it
+            (and would reject every mouse scene as '90deg toppled'). Skip it when no occluder."""
             tgt = getattr(self, "target_obj", None)
-            if tgt is None:
+            if tgt is None or not self.spawn_occluder:
                 return None
             R = t3d.quaternions.quat2mat(np.array(tgt.get_pose().q))
             up = float(np.clip(R[2, 1], -1.0, 1.0))       # world-z component of the local +y axis
@@ -294,11 +347,59 @@ def make_occluder_task():
             # physics-based and independent of the curobo world, so this doesn't affect it,
             # and the analysis only reads check_success. Affects BOTH planners below.
             self.update_world()
-            # Dispatch to the selected expert planner (see PLAN_ALGO / --plan-algo). Both
+            # Dispatch to the selected expert planner (see PLAN_ALGO / --plan-algo). All
             # share load_actors (identical scene), so only the plan differs.
             if self.PLAN_ALGO == "reachability":
                 return self._play_once_reachability()
+            if self.PLAN_ALGO == "dev":
+                return self._play_once_dev()
             return self._play_once_subgoal()
+
+        def _play_once_dev(self):
+            # FAITHFUL reproduction of dev's expert -- benchmark/bench_envs/office/
+            # put_mouse_on_pad.py::play_once, verbatim -- the TRUE "old planner" control
+            # (--plan-algo dev). This is what `baseline` should have been but is NOT:
+            # `baseline` is `subgoal` with routing off and carries harness tuning (absolute
+            # FORWARD_SUBGOAL_Z lift, DROP_GRASP_ORIENTATION_CONSTRAINT grasp, constrain="free"
+            # place). dev uses the STOCK constrained grasp, a RELATIVE +0.1 m lift, and
+            # constrain="align" place -- none of that tuning. It has no box routing, so on the
+            # curated scene it is honestly "what the old planner does when faced with the
+            # occluder" (the correct old baseline there too). For a full dev floor also run with
+            # CUROBO_MAX_ATTEMPTS=10 (dev's value; this branch defaults to 24).
+            arm_tag = ArmTag("right" if self.target_obj.get_pose().p[0] > 0 else "left")
+            _dbg_on = os.environ.get("ROBOTWIN_LOG_MOVE", "") == "1"
+            def _dbg(step):
+                if _dbg_on:
+                    z = float(self.get_arm_pose(arm_tag)[2])
+                    print(f"[dev] {step}: plan_success={getattr(self, 'plan_success', None)} EE_z={z:.3f}")
+            if _dbg_on:
+                tp = self.target_obj.get_pose().p
+                print(f"[dev] target@=({tp[0]:.2f},{tp[1]:.2f},{tp[2]:.3f}) "
+                      f"pad@=({self.des_obj_pose[0]:.2f},{self.des_obj_pose[1]:.2f}) arm={arm_tag}")
+            # dev has no DROP_GRASP_ORIENTATION_CONSTRAINT; our grasp_actor_from_table override
+            # falls back to the stock (constrained) grasp when that flag is False.
+            _prev = self.DROP_GRASP_ORIENTATION_CONSTRAINT
+            self.DROP_GRASP_ORIENTATION_CONSTRAINT = False
+            try:
+                self.grasp_actor_from_table(self.target_obj, arm_tag=arm_tag, pre_grasp_dis=0.1)
+            finally:
+                self.DROP_GRASP_ORIENTATION_CONSTRAINT = _prev
+            _dbg("after grasp")
+            # dev: relative +0.1 m lift (NOT the absolute FORWARD_SUBGOAL_Z baseline uses)
+            self.move(self.move_by_displacement(arm_tag=arm_tag, z=0.1))
+            _dbg("after lift")
+            self.attach_object(
+                self.target_obj,
+                f"{os.environ['BENCH_ROOT']}/assets/objects/{self.target_model}/collision/base{self.target_id}.glb",
+                str(arm_tag),
+            )
+            self.enable_table(enable=True)
+            _dbg("pre place")
+            self.move(self.place_actor(
+                self.target_obj, arm_tag=arm_tag, target_pose=self.des_obj_pose,
+                constrain="align", pre_dis=0.05, dis=0.005,
+            ))
+            _dbg("after place")
 
         def _play_once_subgoal(self):
             # Expert plan. FORWARD (approach) and BACKWARD (placement) are each a list of
@@ -314,6 +415,17 @@ def make_occluder_task():
             # a plain grasp -> lift -> place. Everything else (grasp/lift/place calls) is identical
             # to "subgoal", so the A/B isolates the routing contribution.
             plain = (self.PLAN_ALGO == "baseline")
+
+            # Lightweight per-step trace (ROBOTWIN_LOG_MOVE=1 only): names which move a
+            # plan_path failure lands on + the EE height there, so INVALID_START_STATE_WORLD_
+            # COLLISION can be tied to the grasp/lift/place step (baseline has none otherwise).
+            _dbg_on = os.environ.get("ROBOTWIN_LOG_MOVE", "") == "1"
+            def _dbg(step):
+                if _dbg_on:
+                    z = float(self.get_arm_pose(arm_tag)[2])
+                    print(f"[baseline] {step}: plan_success={getattr(self, 'plan_success', None)} EE_z={z:.3f}")
+            if _dbg_on:
+                print(f"[baseline] target@z={float(target_p0[2]):.3f} arm={arm_tag} plain={plain}")
 
             # No occluder in the scene -> nothing to route around. Skip the forced side grasp
             # AND the around-box subgoals, and run a plain grasp -> lift -> place (a normal
@@ -352,13 +464,24 @@ def make_occluder_task():
                 frm_g = list(self.get_arm_pose(arm_tag))
             self.grasp_actor_from_table(self.target_obj, arm_tag=arm_tag, pre_grasp_dis=0.1,
                                         contact_point_id=cp_id)
+            _dbg("after grasp")
             if grasp_tp is not None:
                 self._emit_subgoal("grasp", grasp_tp, arm_tag, frm_g)
 
-            # lift: straight up to the fixed forward height (more IK-reachable than +0.10)
+            # lift: straight up to the fixed forward height (more IK-reachable than +0.10).
+            # Mouse (box-free) scene: a flat object is grasped AT table height, so the ABSOLUTE
+            # FORWARD_SUBGOAL_Z target doesn't lift it off the table (the wrist is already ~there)
+            # -> the held mouse stays on the surface and the place START collides once the table
+            # is re-enabled. Lift RELATIVE there (like reachability). The bottle (occluder) scene
+            # is grasped high, so keep the absolute height (curated path byte-identical).
             cur = list(self.get_arm_pose(arm_tag))
-            lift_pose = [cur[0], cur[1], FORWARD_SUBGOAL_Z, *cur[3:]]
+            lift_z = FORWARD_SUBGOAL_Z if self.spawn_occluder else cur[2] + GRASP_LIFT_HEIGHT
+            if _dbg_on:
+                print(f"[baseline] lift target: spawn_occluder={self.spawn_occluder} "
+                      f"lift_z={lift_z:.3f} (grasp EE_z={cur[2]:.3f}, +{GRASP_LIFT_HEIGHT} rel)")
+            lift_pose = [cur[0], cur[1], lift_z, *cur[3:]]
             self.move(self.move_to_pose(arm_tag, lift_pose))
+            _dbg("after lift")
             self._emit_subgoal("lift", lift_pose, arm_tag, cur)
             if self.PICKUP_ONLY:        # stop at the picked-up state (reachability probe)
                 return
@@ -386,10 +509,12 @@ def make_occluder_task():
                 place_cur = list(self.get_arm_pose(arm_tag))
                 place_pose = [self.des_obj_pose[0], self.des_obj_pose[1],
                               self.des_obj_pose[2], *place_cur[3:]]
+            _dbg("pre place")
             self.move(self.place_actor(
                 self.target_obj, arm_tag=arm_tag, target_pose=self.des_obj_pose,
                 constrain="free", pre_dis=0.05, dis=0.005,
             ))
+            _dbg("after place")
             if place_pose is not None:
                 self._emit_subgoal("place", place_pose, arm_tag, place_cur)
 
@@ -1586,8 +1711,12 @@ def run(args):
                     # video/hdf5 into a success/ or fail/ bucket subdir). Unpack the bool
                     # -- binding the whole dict here made every rollout read as truthy
                     # (always SUCCESS). Use artifact_info for the true, bucketed paths.
+                    # Wall-clock for ONE rollout attempt (setup_demo + play_once + close +
+                    # video merge) -> throughput analysis (avg time/rollout, samples/hour).
+                    _t0 = time.perf_counter()
                     rollout_result = run_rollout(env, "put_mouse_on_pad", args.base_config,
                                                  seed, dr_measure(cd), out_dir, ep_counter)
+                    rec["rollout_seconds"] = float(time.perf_counter() - _t0)
                     success = bool(rollout_result["success"])
                     artifact = rollout_result.get("artifact_info") or {}
                     rec["rollout_success"] = success
@@ -1648,11 +1777,13 @@ def main():
                          "saves videos, and adds success-only distribution + P(success) per bucket)")
     ap.add_argument("--plot-only", action="store_true")
     ap.add_argument("--plan-algo", default="subgoal",
-                    choices=["subgoal", "reachability", "baseline"],
+                    choices=["subgoal", "reachability", "baseline", "dev"],
                     help="expert planner: 'subgoal' (this file's default), 'reachability' "
-                         "(check_ik_batch candidate search from 35-occluder-spawn-hamid-A), or "
-                         "'baseline' (dev's vanilla grasp->lift->place, box present but no "
-                         "routing -- the 'old planner' A/B baseline)")
+                         "(check_ik_batch candidate search from 35-occluder-spawn-hamid-A), "
+                         "'baseline' (subgoal with routing OFF -- carries harness tuning, NOT "
+                         "dev-faithful), or 'dev' (verbatim reproduction of dev's "
+                         "put_mouse_on_pad expert -- the TRUE old-planner control; pair with "
+                         "CUROBO_MAX_ATTEMPTS=10 for a full dev floor)")
     args = ap.parse_args()
 
     if not args.plot_only:
