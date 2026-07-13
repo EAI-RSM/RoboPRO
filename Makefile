@@ -24,6 +24,7 @@ CUROBO_FINETUNE_ATTEMPTS ?=
 CUROBO_FINETUNE_DT_SCALE ?=
 CUROBO_ATTACH_SPHERE_RADIUS ?= 0.001
 LOCAL_WAYPOINT_ATTEMPTS ?= 5
+ATTACHED_TRAJECTORY_SLOWDOWN ?= 2
 WAYPOINT_SHRINK_MIN_DISTANCE ?= 0.05
 # Empty by default -> analyze_occluder_visibility.py's own default (.../phase2_occluder,
 # with a _rollout suffix appended when ROLLOUT=1). Set to timestamp each validation run,
@@ -117,7 +118,7 @@ help:
 	'  make occluder-visibility      Occluder visibility sweep (+rollout with ROLLOUT=1).' \
 	'    Vars: OCC_OFFSETS=0.2 OCC_SEED_START=0 OCC_NUM_SEEDS=50 SAVE_IMAGES=0|1 ROLLOUT=0|1 CUROBO_TRAJOPT_SEEDS=16 CUROBO_MAX_ATTEMPTS=24' \
 	'      CUROBO_FINETUNE_ATTEMPTS= CUROBO_FINETUNE_DT_SCALE= (empty = CuRobo default 5 / 0.85)' \
-	'      CUROBO_ATTACH_SPHERE_RADIUS=0.001 LOCAL_WAYPOINT_ATTEMPTS=5 WAYPOINT_SHRINK_MIN_DISTANCE=0.05 OUT_DIR= (timestamp a validation run, e.g. results/2026-07-07-10-10-12)' \
+	'      CUROBO_ATTACH_SPHERE_RADIUS=0.001 LOCAL_WAYPOINT_ATTEMPTS=5 ATTACHED_TRAJECTORY_SLOWDOWN=2 WAYPOINT_SHRINK_MIN_DISTANCE=0.05 OUT_DIR= (timestamp a validation run, e.g. results/2026-07-07-10-10-12)' \
 	'  make analyze-occluder-rollout Summarize saved rollout success/failure modes.' \
 	'  make reachability-map         Collision-free gripper IK reachability map (one scene).' \
 	'    Vars: REACH_SEED=1 OFFSET=0.2 REACH_ARMS=both|left|right REACH_Z=0.90' \
@@ -320,6 +321,7 @@ occluder-visibility:
 		export CUROBO_FINETUNE_DT_SCALE="$(CUROBO_FINETUNE_DT_SCALE)"; \
 		export CUROBO_ATTACH_SPHERE_RADIUS="$(CUROBO_ATTACH_SPHERE_RADIUS)"; \
 		export LOCAL_WAYPOINT_ATTEMPTS="$(LOCAL_WAYPOINT_ATTEMPTS)"; \
+		export ATTACHED_TRAJECTORY_SLOWDOWN="$(ATTACHED_TRAJECTORY_SLOWDOWN)"; \
 		export WAYPOINT_SHRINK_MIN_DISTANCE="$(WAYPOINT_SHRINK_MIN_DISTANCE)"; \
 		export PYTORCH_CUDA_ALLOC_CONF="expandable_segments:True"; \
 		cmd='$(PYTHON) script/bench_script/analyze_occluder_visibility.py --base-config "$(TASK_CONFIG)" --seed-start "$(OCC_SEED_START)" --num-seeds "$(OCC_NUM_SEEDS)" --offsets "$(OCC_OFFSETS)"'; \
