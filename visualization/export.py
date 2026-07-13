@@ -1,25 +1,25 @@
 #!/usr/bin/env python3
 """Export derived data from a collected episode — on demand, after collection.
 
-Most outputs are COMPUTED from what the HDF5 already stores (rgb + depth +
-camera matrices + masks + sidecar); nothing needs to be enabled at collection
-time. The one exception is bbox3d_exact, which reads the physics-engine boxes
-that must have been recorded during collection (data_type.actor_bbox: true).
+Roles (target / bin / obstacle) come from the offline MASKING RESOLVER
+(masking_resolve.py): the manipulated object per stage is the target, where it
+settles is the bin (object / fixture link / region), everything else visible is
+an obstacle. Roles are PER-STAGE, so a chain flips them correctly. Most outputs
+are COMPUTED from what the HDF5 already stores (rgb + depth + camera matrices +
+masks + actor_bbox/link_bbox); nothing extra is needed at export time.
 
-  --what pcd          dense labeled point cloud pcd_<cam>_f<k>.ply (role-colored,
-                      open in MeshLab; carries exact-box wireframes when available)
-  --what bbox2d       per-frame 2D boxes from the masks -> bbox2d.json
-  --what bbox3d       per-frame VISIBLE-SURFACE 3D boxes from masked depth (what the
-                      cameras can see) -> bbox3d.json
-  --what bbox3d_exact per-frame EXACT full-extent 3D boxes from the physics engine
-                      (includes occluded parts; needs data_type.actor_bbox at
-                      collection) -> bbox3d_exact.json  [+ wireframes into the .ply]
-  --what panel        panel[_<cam>].png — quick-look grid, always 6 rows (first,
-                      last, 4 evenly spaced between), cols = RGB | depth | seg |
-                      role overlay | 2D boxes
+Always writes:
+  masking.json        the stage timeline: per stage target id + bin (object id /
+                      link id / region params) + per-frame stage index (training label)
+  masking_panel.png   stage-aware review panel: one row per stage (grasp+settle),
+                      target=red, bin=green (object mask or projected region)
 
-pcd / bbox* honor --frames; the panel is always a fixed 6-frame overview.
-Always writes meta.json (id->name map, role->ids, settings) next to the outputs.
+Optional --what outputs (roles are the per-frame masking roles):
+  pcd                 dense labeled point cloud pcd_<cam>_f<k>.ply (role-colored)
+  bbox2d              per-frame 2D boxes from the masks -> bbox2d.json
+  bbox3d              per-frame VISIBLE-SURFACE 3D boxes from masked depth -> bbox3d.json
+  bbox3d_exact        per-frame EXACT full-extent boxes from physx (actor_bbox) -> json
+  panel               overview grid: 6 rows, cols = RGB | depth | seg | roles | 2D boxes
 
 Usage (run_dir = the (task, config) output dir):
     python export.py <run_dir> <episode>                          # default set below
@@ -36,10 +36,13 @@ import h5py
 import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from viz_episode import (ROLE_COLORS, ROBOT_COLOR, OTHER_COLOR, SCENE_NAMES,
-                         decode_frames, load_seg, load_sidecar, compute_role_ids,
-                         merge_env_ids, unproject, write_ply, colorize_ids,
-                         role_overlay, depth_vis, boxes2d_image, box_edge_points)
+from viz_episode import (ROLE_COLORS, ROBOT_COLOR, SCENE_NAMES,
+                         decode_frames, load_seg, load_sidecar, unproject,
+                         write_ply, colorize_ids, role_overlay, depth_vis,
+                         boxes2d_image, box_edge_points)
+from masking_resolve import (resolve_episode, compute_visible_ids, frame_role_sets,
+                             table_ids_of, region_bin_mask, backproject_full,
+                             render_masking_panel, BIN_COL)
 
 WHAT_ALL = ("pcd", "bbox2d", "bbox3d", "bbox3d_exact", "panel")
 WHAT_DEFAULT = "pcd,bbox2d,bbox3d,bbox3d_exact,panel"
@@ -63,8 +66,6 @@ def parse_frames(spec, T):
 
 
 def panel_frames(T, n=6):
-    """Always n evenly spaced frames (first, last, and n-2 between), regardless
-    of T; fewer only when the episode is shorter than n frames."""
     if T <= n:
         return list(range(T))
     return sorted(set(np.linspace(0, T - 1, n).round().astype(int).tolist()))
@@ -80,7 +81,6 @@ def role_of_id(i, role_ids, robot_ids):
 
 
 def boxes2d(seg, id_map, role_ids, robot_ids, min_px=15):
-    """All named objects visible in this mask -> [{id,name,role,box}] (pixel xyxy)."""
     out = []
     for i in np.unique(seg):
         i = int(i)
@@ -98,7 +98,6 @@ def boxes2d(seg, id_map, role_ids, robot_ids, min_px=15):
 
 
 def boxes3d_visible(pts, seg_vals, id_map, role_ids, robot_ids, min_pts=30):
-    """Axis-aligned world-frame box of each object's VISIBLE 3D points (meters)."""
     out = []
     for i in np.unique(seg_vals):
         i = int(i)
@@ -119,8 +118,6 @@ def boxes3d_visible(pts, seg_vals, id_map, role_ids, robot_ids, min_pts=30):
 
 
 def boxes3d_exact(actor_bbox, k, id_map, role_ids, robot_ids):
-    """EXACT full-extent world-AABBs recorded by physx for frame k (meters).
-    Includes fully/partly occluded objects; robot links are not recorded."""
     ids = actor_bbox["id"][k]
     mns, mxs, poses = actor_bbox["aabb_min"][k], actor_bbox["aabb_max"][k], actor_bbox["pose"][k]
     out = []
@@ -145,17 +142,14 @@ def main():
     ap.add_argument("episode", type=int)
     ap.add_argument("--what", default=WHAT_DEFAULT,
                     help=f"comma list of {','.join(WHAT_ALL)} or 'all' (default: {WHAT_DEFAULT})")
-    ap.add_argument("--cam", default="head_camera",
+    ap.add_argument("--cam", default="countertop_camera",
                     help="camera name, comma-separated list, or 'all'")
     ap.add_argument("--frames", default="first,mid,last",
                     help="'all', 'every:N', or comma list of indices / first / mid / last")
     ap.add_argument("--stride", type=int, default=1,
                     help="pixel stride for point clouds (1 = every depth pixel)")
-    ap.add_argument("--split-env", action="store_true",
-                    help="keep environment objects a separate class instead of "
-                         "merging them into obstacle")
-    ap.add_argument("--out", default=None, help="output dir "
-                    "(default <run_dir>/export/episode<idx>)")
+    ap.add_argument("--out", default=None,
+                    help="output dir (default <run_dir>/export/episode<idx>)")
     args = ap.parse_args()
 
     what = list(WHAT_ALL) if args.what == "all" else [w.strip() for w in args.what.split(",")]
@@ -168,11 +162,18 @@ def main():
     out_dir = args.out or os.path.join(args.run_dir, "export", f"episode{ep}")
     os.makedirs(out_dir, exist_ok=True)
 
-    # ---- sidecar: names + roles ----------------------------------------------
+    # ---- masking: resolve roles (target/bin per stage) + save the label ----------
     ep_info, id_map, roles, robot_ids = load_sidecar(args.run_dir, ep)
-    role_ids, clutter_names = compute_role_ids(ep_info, id_map, roles, robot_ids)
+    masking = resolve_episode(args.run_dir, ep, verbose=False)
+    with open(os.path.join(out_dir, "masking.json"), "w") as f:
+        json.dump({f"episode_{ep}": masking}, f, indent=2)
+    visible = compute_visible_ids(h5_path)
+    table_ids = table_ids_of(id_map)
 
-    # ---- episode data ---------------------------------------------------------
+    def rk(k):
+        return frame_role_sets(masking, k, id_map, visible, robot_ids)
+
+    # ---- episode data ------------------------------------------------------------
     with h5py.File(h5_path, "r") as f:
         available = list(f["observation"].keys())
         cams = available if args.cam == "all" else [c.strip() for c in args.cam.split(",")]
@@ -190,7 +191,6 @@ def main():
                 d["depth"] = decode_frames(g["depth"], cv2.IMREAD_UNCHANGED)
                 d["K"], d["E"] = np.asarray(g["intrinsic_cv"]), np.asarray(g["extrinsic_cv"])
             data[cam] = d
-        # physics ground-truth boxes (present only if collected with actor_bbox)
         actor_bbox = None
         if "actor_bbox" in f:
             gb = f["actor_bbox"]
@@ -199,68 +199,55 @@ def main():
     T = len(data[cams[0]]["seg"])
     frames = parse_frames(args.frames, T)
 
-    # env objects folded into obstacle (default) using ids seen in chosen frames
-    seen_ids = set()
-    for cam in cams:
-        for k in frames:
-            seen_ids |= set(np.unique(data[cam]["seg"][k]).tolist())
-    seen_ids.discard(0)
-    env_ids, other_ids = merge_env_ids(role_ids, id_map, robot_ids, seen_ids,
-                                       split_env=args.split_env)
+    print(f"export · {args.run_dir} ep{ep} · {masking['task_type']} "
+          f"{len(masking['stages'])} stage(s) · what={what} cams={cams} frames={frames} (T={T})")
 
-    print(f"export · {args.run_dir} ep{ep} · what={what} cams={cams} "
-          f"frames={frames} (T={T})")
+    # ---- masking review panel (stage-aware; always) ------------------------------
+    render_masking_panel(args.run_dir, ep, cam=cams[0], masking=masking,
+                         out_path=os.path.join(out_dir, "masking_panel.png"))
 
     need_depth = any(w in what for w in ("pcd", "bbox3d"))
     for cam in cams:
         if need_depth and "depth" not in data[cam]:
             sys.exit(f"!! {cam} has no depth in this file — pcd/bbox3d need depth")
 
-    # ---- exact (physics) boxes: world-frame, camera-independent --------------
+    # ---- exact (physics) boxes ---------------------------------------------------
     exact = None
     if "bbox3d_exact" in what:
         if actor_bbox is None:
-            print("!! bbox3d_exact requested but this HDF5 has no actor_bbox group "
-                  "(collect with data_type.actor_bbox: true) — skipping exact boxes")
+            print("!! bbox3d_exact requested but no actor_bbox group — skipping")
         else:
-            exact = {f"f{k}": boxes3d_exact(actor_bbox, k, id_map, role_ids, robot_ids)
+            exact = {f"f{k}": boxes3d_exact(actor_bbox, k, id_map, rk(k), robot_ids)
                      for k in frames}
             with open(os.path.join(out_dir, "bbox3d_exact.json"), "w") as f:
                 json.dump(exact, f, indent=2)
 
-    # ---- per-camera outputs ---------------------------------------------------
+    # ---- per-camera pcd / boxes --------------------------------------------------
     results2d, results3d = {}, {}
     for cam in cams:
         d = data[cam]
         boxes2d_cam, boxes3d_cam = {}, {}
         for k in frames:
             seg = d["seg"][k]
-
+            rkk = rk(k)
             if "bbox2d" in what:
-                boxes2d_cam[f"f{k}"] = boxes2d(seg, id_map, role_ids, robot_ids)
-
+                boxes2d_cam[f"f{k}"] = boxes2d(seg, id_map, rkk, robot_ids)
             if "pcd" in what or "bbox3d" in what:
                 K = d["K"][k] if d["K"].ndim == 3 else d["K"]
                 E = d["E"][k] if d["E"].ndim == 3 else d["E"]
                 pts, (vv, uu) = unproject(d["depth"][k], K, E, stride=args.stride)
                 seg_s = seg[vv, uu]
-
                 if "bbox3d" in what:
-                    boxes3d_cam[f"f{k}"] = boxes3d_visible(pts, seg_s, id_map,
-                                                           role_ids, robot_ids)
-
+                    boxes3d_cam[f"f{k}"] = boxes3d_visible(pts, seg_s, id_map, rkk, robot_ids)
                 if "pcd" in what:
                     rgb_s = (d["rgb"][k][vv, uu].astype(np.uint8) if "rgb" in d
                              else np.full((len(pts), 3), 180, np.uint8))
                     cols = rgb_s.copy()
                     if robot_ids:
                         cols[np.isin(seg_s, list(robot_ids))] = ROBOT_COLOR
-                    if other_ids:
-                        cols[np.isin(seg_s, list(other_ids))] = OTHER_COLOR
-                    for role, ids in role_ids.items():
-                        if ids:
+                    for role, ids in rkk.items():
+                        if ids and role in ROLE_COLORS:
                             cols[np.isin(seg_s, list(ids))] = ROLE_COLORS[role]
-                    # overlay EXACT box wireframes so occluded full-extent is visible
                     if exact is not None:
                         for b in exact[f"f{k}"]:
                             if b["role"] in ROLE_COLORS:
@@ -274,7 +261,7 @@ def main():
         if boxes3d_cam:
             results3d[cam] = boxes3d_cam
 
-    # ---- panel (quick-look grid): 6 rows, cols=RGB|depth|seg|overlay|2D --------
+    # ---- overview panel: 6 rows, cols=RGB|depth|seg|roles|2D boxes ----------------
     if "panel" in what:
         pf = panel_frames(T)
         for cam in cams:
@@ -284,16 +271,25 @@ def main():
                 continue
             rows = []
             for k in pf:
-                seg = d["seg"][k]
+                seg, rkk = d["seg"][k], rk(k)
                 header = d["rgb"][k].copy()
                 cv2.putText(header, f"{cam} f{k}", (4, 16),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 255, 0), 1)
+                over = role_overlay(d["rgb"][k], seg, rkk, robot_ids, set())
+                # paint region bins (no seg id) green using this frame's stage
+                st = masking["stages"][masking["frame_stage"][k]] if (
+                    0 <= masking["frame_stage"][k] < len(masking["stages"])) else None
+                if st and st["bin"]["bin_type"].startswith("region") and "depth" in d:
+                    K = d["K"][k] if d["K"].ndim == 3 else d["K"]
+                    E = d["E"][k] if d["E"].ndim == 3 else d["E"]
+                    world, valid = backproject_full(d["depth"][k], K, E)
+                    bm = region_bin_mask(st["bin"], seg, table_ids, world, valid)
+                    over[bm] = (0.4 * over[bm] + 0.6 * BIN_COL).astype(np.uint8)
                 cells = [header]
                 if "depth" in d:
                     cells.append(depth_vis(d["depth"][k]))
-                cells += [colorize_ids(seg),
-                          role_overlay(d["rgb"][k], seg, role_ids, robot_ids, other_ids),
-                          boxes2d_image(d["rgb"][k], seg, role_ids, id_map, other_ids)]
+                cells += [colorize_ids(seg), over,
+                          boxes2d_image(d["rgb"][k], seg, rkk, id_map)]
                 rows.append(np.hstack(cells))
             name = "panel.png" if len(cams) == 1 else f"panel_{cam}.png"
             cv2.imwrite(os.path.join(out_dir, name),
@@ -311,19 +307,18 @@ def main():
             "episode": ep, "cameras": cams, "frames": [int(k) for k in frames],
             "what": what, "pcd_stride": args.stride,
             "actor_bbox_available": actor_bbox is not None,
-            "roles_from_task_code": roles,
-            "clutter_object_types": clutter_names,
-            "role_ids": {r: sorted(int(i) for i in ids) for r, ids in role_ids.items()},
-            "robot_ids": sorted(int(i) for i in robot_ids),
-            "environment_ids": sorted(int(i) for i in env_ids),
-            "environment_merged_into_obstacle": not args.split_env,
+            "task": masking["task"], "task_type": masking["task_type"],
+            "roles_source": "masking_resolve (per-stage target/bin)",
+            "stages": [{"stage": s["stage"], "target_id": s["target_id"],
+                        "target_name": s["target_name"], "bin": s["bin"]}
+                       for s in masking["stages"]],
             "actor_id_map": {str(k): v for k, v in sorted(id_map.items())},
             "units": {"xyz": "meters, world frame", "bbox2d": "pixels xyxy",
                       "bbox3d": "meters, world frame, VISIBLE-surface AABB",
                       "bbox3d_exact": "meters, world frame, EXACT full-extent AABB (physx)"},
         }, f, indent=2)
 
-    print(f"wrote {out_dir}/")
+    print(f"wrote {out_dir}/  (masking.json + masking_panel.png + {what})")
 
 
 if __name__ == "__main__":

@@ -561,6 +561,57 @@ class Base_Task(gym.Env):
                     "aabb_min": np.stack(mins),
                     "aabb_max": np.stack(maxs),
                 }
+        # link_bbox: same per-frame pose + world AABB, but for ARTICULATION LINKS
+        # (drawer / cabinet / fridge / microwave doors + interiors) which
+        # get_all_actors() misses. Recorded as a SEPARATE group so actor_bbox stays
+        # rigid-only for existing readers. Lets offline masking resolve articulated-
+        # fixture bins + open/close door targets with the SAME motion/containment
+        # rules used for rigid actors. Columns sorted by per_scene_id for stability.
+        if self.data_type.get("link_bbox", False):
+            rows = []
+            for art in self.scene.get_all_articulations():
+                if not art.get_name():
+                    continue  # unnamed articulation = the robot embodiment; skip
+                for link in art.get_links():
+                    name = link.get_name() or ""
+                    if "__jointframe__" in name:
+                        continue  # pseudo joint-frame link, no real geometry
+                    ent = getattr(link, "entity", None)
+                    pid = getattr(ent, "per_scene_id", None) if ent is not None else None
+                    if pid is None:
+                        continue
+                    aabb = None
+                    for obj in (link, ent):
+                        fn = getattr(obj, "get_global_aabb_fast", None)
+                        if fn is not None:
+                            try:
+                                aabb = fn(); break
+                            except Exception:
+                                pass
+                        for comp in getattr(obj, "components", []):
+                            cfn = getattr(comp, "get_global_aabb_fast", None)
+                            if cfn is not None:
+                                try:
+                                    aabb = cfn(); break
+                                except Exception:
+                                    pass
+                        if aabb is not None:
+                            break
+                    if aabb is None:
+                        continue
+                    p = link.get_pose()
+                    rows.append((int(pid),
+                                 np.concatenate([p.p, p.q]).astype(np.float32),
+                                 np.asarray(aabb[0], np.float32),
+                                 np.asarray(aabb[1], np.float32)))
+            if rows:
+                rows.sort(key=lambda r: r[0])
+                pkl_dic["link_bbox"] = {
+                    "id": np.asarray([r[0] for r in rows], np.int32),
+                    "pose": np.stack([r[1] for r in rows]),
+                    "aabb_min": np.stack([r[2] for r in rows]),
+                    "aabb_max": np.stack([r[3] for r in rows]),
+                }
 
         self.now_obs = deepcopy(pkl_dic)
         return pkl_dic

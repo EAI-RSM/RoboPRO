@@ -328,19 +328,21 @@ def main():
     print(f"VIZ · {args.run_dir} · episode {ep}")
     print("═" * 74)
 
-    # ---- sidecar: id map + roles -------------------------------------------
+    # ---- sidecar + masking roles (target/bin per stage) --------------------
     ep_info, id_map, roles, robot_ids = load_sidecar(args.run_dir, ep)
-    role_ids, clutter_names = compute_role_ids(ep_info, id_map, roles, robot_ids)
+    from masking_resolve import (resolve_episode, compute_visible_ids,  # lazy: avoid cycle
+                                 frame_role_sets, render_masking_panel, table_ids_of)
+    masking = resolve_episode(args.run_dir, ep, verbose=False)
+    visible = compute_visible_ids(h5_path)
+
+    def rk(k):
+        return frame_role_sets(masking, k, id_map, visible, robot_ids)
 
     print(f"actor_id_map: {len(id_map)} entries ({len(robot_ids)} robot links)")
-    print(f"role_names from task code: {roles}")
-    outcome = ep_info.get("outcome")
-    if outcome:
-        print(f"OUTCOME: {outcome.get('label')} (code={outcome.get('label_code')}, "
-              f"success={outcome.get('success')}, collision={outcome.get('collision')}, "
-              f"planner_blind={outcome.get('planner_blind_to_obstacles')})")
-    print(f"clutter object types: {clutter_names}")
-    print("role ids: " + ", ".join(f"{r}={sorted(ids)}" for r, ids in role_ids.items()))
+    print(f"role_names from task code (raw): {roles}")
+    print(f"masking: {masking['task_type']}, {len(masking['stages'])} stage(s)")
+    for st in masking["stages"]:
+        print(f"  stage {st['stage']}: target={st['target_name']} -> bin={st['bin']['bin_type']}")
     if not id_map:
         print("!! actor_id_map is EMPTY — per_scene_id lookup failed; paste this output back.")
 
@@ -382,9 +384,7 @@ def main():
     if unmatched:
         print(f"!! seg ids with NO name in actor_id_map: {unmatched}")
 
-    spawned_obstacle_ids = set(role_ids["obstacle"])
-    env_ids, other_ids = merge_env_ids(role_ids, id_map, robot_ids, seen_ids,
-                                       split_env=args.split_env)
+    other_ids = set()  # obstacle derived per-frame from masking; no separate env class
 
     # ---- panels (one per camera) ---------------------------------------------
     for cam in cams:
@@ -393,14 +393,19 @@ def main():
         for k in frames:
             r = d["rgb"][k].copy()
             cv2.putText(r, f"{cam} f{k}", (4, 16), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 255, 0), 1)
+            rkk = rk(k)
             rows.append(np.hstack([
                 r, depth_vis(d["depth"][k]), colorize_ids(d["seg"][k]),
-                role_overlay(d["rgb"][k], d["seg"][k], role_ids, robot_ids, other_ids),
-                boxes2d_image(d["rgb"][k], d["seg"][k], role_ids, id_map, other_ids),
+                role_overlay(d["rgb"][k], d["seg"][k], rkk, robot_ids, other_ids),
+                boxes2d_image(d["rgb"][k], d["seg"][k], rkk, id_map),
             ]))
         name = "panel.png" if len(cams) == 1 else f"panel_{cam}.png"
         cv2.imwrite(os.path.join(out_dir, name),
                     cv2.cvtColor(np.vstack(rows), cv2.COLOR_RGB2BGR))
+
+    # dedicated stage-aware masking panel (regions shown here)
+    render_masking_panel(args.run_dir, ep, cam=primary, masking=masking,
+                         out_path=os.path.join(out_dir, "masking_panel.png"))
 
     # ---- point clouds + 3D boxes (first + middle sampled frame) -------------
     all_boxes = {}
@@ -417,10 +422,11 @@ def main():
         cols = rgb[k][vv, uu].astype(np.uint8)
         if robot_ids:
             cols[np.isin(seg_s, list(robot_ids))] = ROBOT_COLOR
-        for role, ids in role_ids.items():
-            if ids:
+        rkk = rk(k)
+        for role, ids in rkk.items():
+            if ids and role in ROLE_COLORS:
                 cols[np.isin(seg_s, list(ids))] = ROLE_COLORS[role]
-        boxes = boxes3d(pts, seg_s, role_ids, id_map)
+        boxes = boxes3d(pts, seg_s, rkk, id_map)
         all_boxes[f"f{k}"] = boxes
         for b in boxes:  # wireframes into the ply
             edge = box_edge_points(b["min"], b["max"])
@@ -437,17 +443,12 @@ def main():
     with open(os.path.join(out_dir, "legend.json"), "w") as f:
         json.dump({
             "cameras": cams, "frames": [int(x) for x in frames],
-            "roles_from_task_code": roles,
-            "clutter_object_types": clutter_names,
-            "role_ids": {r: sorted(int(i) for i in ids) for r, ids in role_ids.items()},
+            "roles_from_task_code_raw": roles,
+            "masking": masking,
             "robot_ids": sorted(int(i) for i in robot_ids),
-            "obstacle_ids_spawned_clutter": sorted(int(i) for i in spawned_obstacle_ids),
-            "obstacle_ids_environment": sorted(int(i) for i in env_ids),
-            "environment_object_names": sorted({id_map[i] for i in env_ids}),
             "actor_id_map": {str(k): v for k, v in sorted(id_map.items())},
             "seg_ids_unmatched": [int(i) for i in unmatched],
             "boxes_3d": all_boxes,
-            "cluttered_table_info_raw": ep_info.get("cluttered_table_info"),
         }, f, indent=2)
 
     instr_path = os.path.join(args.run_dir, "instructions", f"episode{ep}.json")

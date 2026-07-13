@@ -1,0 +1,605 @@
+#!/usr/bin/env python3
+"""Offline masking resolver: derive per-stage target + bin roles from recorded data.
+
+The training masks need exactly two role classes per stage: TARGET (the object being
+manipulated) and BIN (where it goes). This module derives them *offline* from what the
+simulator already recorded per frame -- no primitive instrumentation, no re-collection:
+
+  actor_bbox/{id,pose,aabb_min,aabb_max}   (T, N, ..)   per-frame pose + world AABB
+  scene_info.json  actor_id_map / role_names / cluttered_table_info
+
+Pipeline (per episode):
+  1. MOTION SEGMENTATION -> stages. The manipulated object of each stage is simply the
+     rigid actor that MOVES; a chain yields several disjoint motion windows in time, one
+     ordered stage each. (verified: chain_apple_bin_bowl_rack_spoon_sink -> 3 stages.)
+  2. BIN per stage, geometry-first with a light task-name intent gate:
+       pick_*                          -> no bin (pick-only)
+       name has next/beside/in_front   -> REGION centred on the nearest object (anchor)
+       name has an explicit table dest -> REGION = table free-space
+       name has drawer/cabinet/fridge/microwave, no rigid container found
+                                       -> DEFERRED to Phase 2 (articulation link box)
+       else                            -> smallest rigid AABB containing the settle point
+                                          (object / rigid-fixture bin); else table region
+  3. Roles are per-stage, so chains flip correctly (book = target then bin). Only target
+     and bin are ever emitted; a region's anchor is internal metadata, never a mask class.
+
+Writes <run_dir>/masking.json and prints a summary. Articulation-only tasks (open/close,
+no rigid mover) and 'deferred' bins are completed in Phase 2 (replay-backfilled link boxes).
+"""
+import argparse
+import json
+import os
+import sys
+
+import cv2
+import h5py
+import numpy as np
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from viz_episode import (load_sidecar, load_seg, decode_frames, SCENE_NAMES,  # noqa: E402
+                         ROBOT_COLOR)
+
+# training role colors (target=red, bin=green); matches viz_episode ROLE_COLORS
+TARGET_COL = np.array([230, 40, 40], np.uint8)
+BIN_COL = np.array([40, 200, 60], np.uint8)
+ART_COL = np.array([200, 70, 210], np.uint8)   # articulation links (unresolved fixtures)
+
+# ---- tunables (Phase 3 knobs) -------------------------------------------------
+MOVE_MIN = 0.05      # a "mover" must displace >= 5 cm over the episode
+ANG_MOVE_MIN = 0.35  # ...OR rotate >= ~20 deg (revolute doors barely translate)
+SPEED_THR = 0.0015   # >= 1.5 mm/frame counts as "moving" for window extraction
+ANG_THR = 0.02       # >= ~1.1 deg/frame of rotation counts as "moving"
+GAP_MERGE = 25       # merge motion windows separated by < this many frames (regrasp)
+MIN_WIN = 4          # drop motion windows shorter than this many frames
+PAD = 0.02           # AABB containment padding (m)
+ON_TOP_GAP = 0.12    # a target may sit up to this far ABOVE a support's top (on-top bins)
+ELEVATED = 0.04      # settle this far above the table + no rigid bin + fixtures present
+                     # => resting in an articulated fixture we can't box yet (Phase 2)
+ANCHOR_MAX = 0.30    # anchor for a "next to" region must be within this of the settle (m)
+REGION_MARGIN = 0.06 # disk radius floor = anchor xy half-extent + this (m)
+VIS_FRAMES = 6       # frames sampled per camera for the visibility filter
+MIN_PIXELS = 30      # an id must cover >= this many pixels somewhere to be maskable
+GRIP_NEAR = 0.28     # a real target stays within this of a gripper while carried
+                     # (endpose ref sits ~19 cm above the grasped object -> measured)
+MIN_HELD_FRAC = 0.25 # >= this fraction of its motion window spent near a gripper
+
+FIXTURE_TOKENS = ("drawer", "cabinet", "fridge", "microwave")
+NEXT_TOKENS = ("next_to", "infront", "beside")              # relational -> anchor region
+TABLE_TOKENS = ("onto_table", "on_table", "to_table")       # explicit table dest
+
+
+def _norm(name):
+    """actor name -> comparable token: lowercase letters only (drops NNN_ prefixes,
+    separators, digits). '101_milk-tea'->'milktea', '042_wooden_box'->'woodenbox'."""
+    return "".join(c for c in name.lower() if c.isalpha())
+
+
+# ---- helpers ------------------------------------------------------------------
+
+def task_from_run_dir(run_dir):
+    # .../<scene>/<task>/<config>  -> <task>
+    return os.path.basename(os.path.dirname(os.path.abspath(run_dir)))
+
+
+def load_actor_bbox(h5path):
+    """Per-frame id/pose/AABB for rigid actors, with articulation links (link_bbox)
+    appended as extra columns when present -- so drawer/fridge/cabinet/microwave links
+    resolve by the SAME motion + containment rules as rigid actors. Absent link_bbox
+    (older data) => rigid-only, identical to before."""
+    with h5py.File(h5path, "r") as f:
+        if "actor_bbox" not in f:
+            raise SystemExit(f"!! {h5path} has no actor_bbox group (need data_type.actor_bbox on)")
+        bid = f["actor_bbox/id"][:]              # (T, N)
+        pose = f["actor_bbox/pose"][:, :, :3]    # (T, N, 3) positions
+        amin = f["actor_bbox/aabb_min"][:]       # (T, N, 3)
+        amax = f["actor_bbox/aabb_max"][:]       # (T, N, 3)
+        quat = f["actor_bbox/pose"][:, :, 3:7]   # (T, N, 4) wxyz — for revolute doors
+        if "link_bbox" in f:
+            T = min(bid.shape[0], f["link_bbox/id"].shape[0])
+            bid = np.concatenate([bid[:T], f["link_bbox/id"][:T]], axis=1)
+            pose = np.concatenate([pose[:T], f["link_bbox/pose"][:T, :, :3]], axis=1)
+            quat = np.concatenate([quat[:T], f["link_bbox/pose"][:T, :, 3:7]], axis=1)
+            amin = np.concatenate([amin[:T], f["link_bbox/aabb_min"][:T]], axis=1)
+            amax = np.concatenate([amax[:T], f["link_bbox/aabb_max"][:T]], axis=1)
+    return (bid, pose.astype(np.float64), quat.astype(np.float64),
+            amin.astype(np.float64), amax.astype(np.float64))
+
+
+def _decode_seg_frame(ds, t):
+    import cv2
+    b = ds[t]
+    if ds.dtype.kind == "S":
+        return cv2.imdecode(np.frombuffer(bytes(b), np.uint8), cv2.IMREAD_UNCHANGED).astype(np.uint16)
+    return np.asarray(b).astype(np.uint16)
+
+
+def compute_visible_ids(h5path):
+    """Set of seg ids that cover >= MIN_PIXELS somewhere, unioned over all cameras at
+    VIS_FRAMES sampled frames. Excludes invisible synthetic markers (des_obj / anchor
+    'box' with 0 pixels) which must never become a mask -- a bin you can't see is not a
+    bin. A real object occluded in one view is caught in another / another frame."""
+    counts = {}
+    with h5py.File(h5path, "r") as f:
+        obs = f["observation"]
+        cams = list(obs.keys())
+        T = f["actor_bbox/id"].shape[0]
+        frames = np.unique(np.linspace(0, T - 1, VIS_FRAMES).astype(int))
+        for cam in cams:
+            ds = obs[cam].get("actor_segmentation")
+            if ds is None:
+                continue
+            for t in frames:
+                seg = _decode_seg_frame(ds, int(t))
+                ids, c = np.unique(seg, return_counts=True)
+                for i, n in zip(ids.tolist(), c.tolist()):
+                    counts[int(i)] = counts.get(int(i), 0) + int(n)
+    return {i for i, n in counts.items() if n >= MIN_PIXELS}
+
+
+def is_scene(name):
+    base = name.split("/")[-1]
+    return base in SCENE_NAMES or name.startswith("robot/") or name.startswith("robot")
+
+
+def contiguous_windows(mask):
+    """bool array -> list of [start, end) windows where mask is True."""
+    wins, s = [], None
+    for t, m in enumerate(mask):
+        if m and s is None:
+            s = t
+        elif not m and s is not None:
+            wins.append([s, t]); s = None
+    if s is not None:
+        wins.append([s, len(mask)])
+    return wins
+
+
+def merge_windows(wins, gap):
+    out = []
+    for w in wins:
+        if out and w[0] - out[-1][1] < gap:
+            out[-1][1] = w[1]
+        else:
+            out.append(list(w))
+    return out
+
+
+# ---- stage 1: motion segmentation --------------------------------------------
+
+def _held_fraction(pose_win, ee_l, ee_r, s, e):
+    """Fraction of a motion window in which the object is within GRIP_NEAR of a gripper.
+    A manipulated target is carried (near an ee); an incidentally-knocked object is not."""
+    if ee_l is None or ee_r is None:
+        return 1.0
+    dl = np.linalg.norm(pose_win - ee_l[s:e], axis=1)
+    dr = np.linalg.norm(pose_win - ee_r[s:e], axis=1)
+    near = np.minimum(dl, dr) < GRIP_NEAR
+    return float(near.mean()) if len(near) else 0.0
+
+
+def _qang(q1, q2):
+    """angle (rad) between quaternions along the last axis; sign-invariant."""
+    d = np.clip(np.abs(np.sum(q1 * q2, axis=-1)), 0.0, 1.0)
+    return 2.0 * np.arccos(d)
+
+
+def segment_stages(bid, pose, quat, id_map, ee_l=None, ee_r=None):
+    """Return ordered stages: [{target_id, target_name, col, start, end, settle}].
+    Motion = translation OR rotation (revolute doors barely translate). A stage is a
+    mover's motion window; incidental (never-held) rigid movers are dropped."""
+    T, N = bid.shape
+    col_id = [int(bid[0, k]) for k in range(N)]           # columns are stable per episode
+    speed = np.linalg.norm(np.diff(pose, axis=0), axis=2)  # (T-1, N) translation/frame
+    aspeed = _qang(quat[:-1], quat[1:])                    # (T-1, N) rotation/frame
+    total = np.linalg.norm(pose - pose[0:1], axis=2).max(axis=0)   # (N,)
+    atotal = _qang(quat[0:1], quat).max(axis=0)                    # (N,)
+    stages = []
+    for k in range(N):
+        i = col_id[k]
+        name = id_map.get(i, f"id{i}")
+        if is_scene(name) or (total[k] < MOVE_MIN and atotal[k] < ANG_MOVE_MIN):
+            continue
+        moving = (speed[:, k] > SPEED_THR) | (aspeed[:, k] > ANG_THR)
+        wins = merge_windows(contiguous_windows(moving), GAP_MERGE)
+        for s, e in wins:
+            if e - s < MIN_WIN:
+                continue
+            ef = min(e, T - 1)
+            disp = np.linalg.norm(pose[ef, k] - pose[s, k])
+            rot = float(_qang(quat[s, k], quat[ef, k]))
+            if disp < MOVE_MIN and rot < ANG_MOVE_MIN:
+                continue
+            # gripper-proximity filter drops incidentally-knocked rigid clutter. Skip it
+            # for articulation links: a link's frame origin sits far from the handle the
+            # gripper holds (~30 cm), and a link that moves >MOVE_MIN was opened/closed
+            # on purpose (you don't knock a drawer 18 cm by accident).
+            is_link = "/" in name and not name.startswith("robot")
+            if not is_link and _held_fraction(pose[s:e, k], ee_l, ee_r, s, e) < MIN_HELD_FRAC:
+                continue                                     # incidental knock, not a target
+            settle = min(e, T - 1)                          # end of motion = at rest
+            stages.append({"target_id": i, "target_name": name, "col": k,
+                           "start": int(s), "end": int(e), "settle": int(settle)})
+    stages.sort(key=lambda st: st["start"])
+    for idx, st in enumerate(stages):
+        st["stage"] = idx
+    return stages, col_id
+
+
+# ---- stage 2: bin resolution --------------------------------------------------
+
+def containers_at(pt, frame, bid, amin, amax, id_map, exclude_col, visible):
+    """Rigid actors that the target's settle point sits IN or ON, best first.
+    xy must be inside the padded xy-AABB. Two tiers, tier-0 preferred, smallest volume
+    within a tier: tier 0 = settle z truly inside the box's z-span (deep containers:
+    box/sink/file-holder the object is down inside); tier 1 = settle z just ABOVE the
+    top, within ON_TOP_GAP (flat supports: pad/coaster/book rested on top). Tiering
+    stops a short box from stealing an object that is really down inside a tall holder.
+    Invisible markers are excluded via `visible`."""
+    N = bid.shape[1]
+    hits = []
+    for k in range(N):
+        if k == exclude_col:
+            continue
+        i = int(bid[frame, k])
+        name = id_map.get(i, f"id{i}")
+        if is_scene(name) or i not in visible:
+            continue
+        lo, hi = amin[frame, k], amax[frame, k]
+        if not (np.all(pt[:2] >= lo[:2] - PAD) and np.all(pt[:2] <= hi[:2] + PAD)):
+            continue
+        if (lo[2] - PAD) <= pt[2] <= (hi[2] + PAD):
+            tier = 0                                   # truly inside the vertical span
+        elif hi[2] + PAD < pt[2] <= hi[2] + ON_TOP_GAP:
+            tier = 1                                   # resting on top
+        else:
+            continue
+        vol = float(np.prod(np.clip(hi - lo, 1e-4, None)))
+        hits.append((tier, vol, i, name))
+    hits.sort()
+    return [(v, i, n) for (_t, v, i, n) in hits]
+
+
+def nearest_object(pt, frame, bid, pose, id_map, exclude_col, visible):
+    """closest visible, non-scene, non-target actor to pt (fallback 'next to' anchor)."""
+    N = bid.shape[1]
+    best = None
+    for k in range(N):
+        if k == exclude_col:
+            continue
+        i = int(bid[frame, k])
+        name = id_map.get(i, f"id{i}")
+        if is_scene(name) or i not in visible:
+            continue
+        d = float(np.linalg.norm(pose[frame, k] - pt))
+        if best is None or d < best[0]:
+            best = (d, i, name, k)
+    return best
+
+
+def anchor_from_name(task, bid, id_map, visible, frame):
+    """The object the task name says to place next to ('..._next_to_mouse' -> mouse),
+    matched to a VISIBLE actor that has an actor_bbox column. Returns (col, id, name)
+    or None. This beats nearest-object, which can latch onto an invisible goal marker."""
+    t = task.lower().replace("in_front_of", "infront").replace("_of_", "_")
+    noun = None
+    for kw in ("next_to", "infront", "beside"):
+        if kw in t:
+            noun = _norm(t.split(kw, 1)[1])
+            break
+    if not noun:
+        return None
+    cols = {int(bid[frame, k]): k for k in range(bid.shape[1])}
+    cands = []
+    for i, k in cols.items():
+        if i not in visible or is_scene(id_map.get(i, "")):
+            continue
+        nm = _norm(id_map.get(i, ""))
+        if nm and (noun in nm or nm in noun):
+            cands.append((k, i, id_map.get(i, "")))
+    return cands[0] if cands else None
+
+
+def table_surface(bid, amax, id_map, frame):
+    """(table_id, top_z) from the actor named 'table'."""
+    N = bid.shape[1]
+    for k in range(N):
+        i = int(bid[frame, k])
+        if id_map.get(i, "").split("/")[-1] == "table":
+            return i, float(amax[frame, k, 2])
+    return None, None
+
+
+def resolve_bin(st, task, bid, pose, amin, amax, id_map, visible, has_articulation):
+    """Return a bin dict for one stage."""
+    name_l = task.lower()
+    settle = st["settle"]
+    pt = pose[settle, st["col"]]
+
+    # open/close: the mover is an ARTICULATION LINK (door/drawer) -> the link itself
+    # is the target, no bin (the goal is a joint-state change, not a placement).
+    tname = st.get("target_name", "")
+    if "/" in tname and not tname.startswith("robot"):
+        return {"bin_type": "none", "reason": "open/close: target is the articulation link (door/drawer)"}
+
+    if name_l.startswith("pick"):
+        return {"bin_type": "none", "reason": "pick-only"}
+
+    # relational placement -> region centred on the named anchor
+    if any(tok in name_l.replace("in_front_of", "infront") for tok in NEXT_TOKENS):
+        anch = anchor_from_name(task, bid, id_map, visible, settle)
+        if anch is None:
+            # anchor named but not a rigid actor (e.g. 'in front of microwave') -> Phase 2
+            if any(tok in name_l for tok in FIXTURE_TOKENS):
+                return {"bin_type": "deferred_articulation",
+                        "reason": "relational anchor is an articulated fixture (Phase 2)"}
+            near = nearest_object(pt, settle, bid, pose, id_map, st["col"], visible)
+            if near and near[0] <= ANCHOR_MAX:
+                anch = (near[3], near[1], near[2])
+        if anch is not None:
+            ak, aid, aname = anch
+            ac = pose[settle, ak, :2]
+            half = float(np.max((amax[settle, ak, :2] - amin[settle, ak, :2]) / 2))
+            reach = float(np.linalg.norm(ac - pt[:2]))          # region must reach the landing
+            radius = round(max(half + REGION_MARGIN, reach + 0.03), 4)
+            tz = table_surface(bid, amax, id_map, settle)[1]
+            return {"bin_type": "region_anchor", "anchor_id": aid, "anchor_name": aname,
+                    "center": [float(ac[0]), float(ac[1])], "radius": radius, "surface_z": tz,
+                    "reason": f"next-to {aname} (landing {reach*100:.1f}cm off centre)"}
+        tid, tz = table_surface(bid, amax, id_map, settle)
+        return {"bin_type": "region_table", "table_id": tid, "surface_z": tz,
+                "reason": "relational, no anchor -> table"}
+
+    if any(tok in name_l for tok in TABLE_TOKENS):
+        tid, tz = table_surface(bid, amax, id_map, settle)
+        return {"bin_type": "region_table", "table_id": tid, "surface_z": tz,
+                "reason": "explicit table destination"}
+
+    # geometry-first: smallest rigid container the target sits in/on
+    hits = containers_at(pt, settle, bid, amin, amax, id_map, st["col"], visible)
+    if hits:
+        vol, i, nm = hits[0]
+        return {"bin_type": "object", "bin_id": i, "bin_name": nm,
+                "reason": f"smallest container ({vol*1e3:.2f}L)"}
+
+    # no rigid container. articulated fixture? -> Phase 2
+    tid, tz = table_surface(bid, amax, id_map, settle)
+    if any(tok in name_l for tok in FIXTURE_TOKENS):
+        return {"bin_type": "deferred_articulation",
+                "reason": f"fixture {[t for t in FIXTURE_TOKENS if t in name_l]} has no AABB (Phase 2)"}
+    if has_articulation and tz is not None and pt[2] > tz + ELEVATED:
+        return {"bin_type": "deferred_articulation",
+                "reason": f"settle {(pt[2]-tz)*100:.0f}cm above table + fixtures present "
+                          "-> likely in an articulated fixture (Phase 2)"}
+
+    # placed in open space on the table
+    return {"bin_type": "region_table", "table_id": tid, "surface_z": tz,
+            "reason": "open-space placement -> table free-space"}
+
+
+# ---- top level ----------------------------------------------------------------
+
+def resolve_episode(run_dir, ep, task=None, verbose=True):
+    task = task or task_from_run_dir(run_dir)
+    h5 = os.path.join(run_dir, "data", f"episode{ep}.hdf5")
+    ep_info, id_map, roles, robot_ids = load_sidecar(run_dir, ep)
+    bid, pose, quat, amin, amax = load_actor_bbox(h5)
+    T = bid.shape[0]
+
+    visible = compute_visible_ids(h5)
+    with h5py.File(h5, "r") as f:
+        ee_l = f["endpose/left_endpose"][:, :3] if "endpose/left_endpose" in f else None
+        ee_r = f["endpose/right_endpose"][:, :3] if "endpose/right_endpose" in f else None
+    stages, col_id = segment_stages(bid, pose, quat, id_map, ee_l, ee_r)
+    art_links = sorted({n for i, n in id_map.items()
+                        if "/" in n and not n.startswith("robot") and "__jointframe__" not in n})
+    has_articulation = len(art_links) > 0
+
+    for st in stages:
+        st["bin"] = resolve_bin(st, task, bid, pose, amin, amax, id_map, visible, has_articulation)
+
+    # per-frame -> stage index (stage i owns [start_i, start_{i+1}))
+    frame_stage = [-1] * T
+    for idx, st in enumerate(stages):
+        end = stages[idx + 1]["start"] if idx + 1 < len(stages) else T
+        for t in range(st["start"], end):
+            frame_stage[t] = idx
+        for t in range(0, st["start"]):            # pre-roll shows the upcoming stage
+            if frame_stage[t] == -1:
+                frame_stage[t] = idx
+
+    task_type = ("articulation_only" if not stages
+                 else "chain" if len(stages) > 1 else "single")
+    out = {
+        "task": task, "task_type": task_type, "num_frames": int(T),
+        "role_names_raw": roles, "articulation_links": art_links,
+        "stages": [{k: v for k, v in st.items() if k != "col"} for st in stages],
+        "frame_stage": frame_stage,
+    }
+    if verbose:
+        _print_summary(out)
+    return out
+
+
+def _print_summary(out):
+    print(f"\n=== {out['task']}  [{out['task_type']}, {out['num_frames']} frames] ===")
+    if out["task_type"] == "articulation_only":
+        print(f"  (no rigid mover; articulation-only) links: {out['articulation_links']}")
+    for st in out["stages"]:
+        b = st["bin"]
+        bt = b["bin_type"]
+        if bt == "object":
+            binstr = f"bin=OBJECT {b['bin_id']}:{b['bin_name']}"
+        elif bt == "region_anchor":
+            binstr = f"bin=REGION~{b['anchor_name']} r={b['radius']}m"
+        elif bt == "region_table":
+            binstr = "bin=REGION table-free-space"
+        elif bt == "deferred_articulation":
+            binstr = "bin=DEFERRED(articulation, Phase 2)"
+        else:
+            binstr = "bin=none"
+        print(f"  stage {st['stage']}: target {st['target_id']}:{st['target_name']:22s} "
+              f"f[{st['start']}..{st['end']}] -> {binstr}  ({b['reason']})")
+
+
+# ------------------------------------------------ per-frame roles (for export) --
+
+def table_ids_of(id_map):
+    return {i for i, n in id_map.items() if n.split("/")[-1] == "table"}
+
+
+def stage_at(masking, k):
+    """The stage that owns frame k (or None)."""
+    fs = masking.get("frame_stage", [])
+    if not (0 <= k < len(fs)):
+        return None
+    si = fs[k]
+    if si is None or not (0 <= si < len(masking["stages"])):
+        return None
+    return masking["stages"][si]
+
+
+def frame_role_sets(masking, k, id_map, visible, robot_ids):
+    """Per-frame {target, destination(bin object), obstacle} id sets. The bin is an
+    id only when it's an object/link; region bins (anchor/table) carry no id (rendered
+    separately). Obstacle = every other visible non-scene object."""
+    st = stage_at(masking, k)
+    target, dest = set(), set()
+    if st is not None:
+        target = {int(st["target_id"])}
+        b = st["bin"]
+        if b["bin_type"] == "object":
+            dest = {int(b["bin_id"])}
+    obst = {i for i in visible
+            if i in id_map and not is_scene(id_map[i])} - target - dest - set(robot_ids)
+    return {"target": target, "destination": dest, "obstacle": obst}
+
+
+# ------------------------------------------------------------- panel rendering --
+
+def backproject_full(depth_mm, K, E):
+    """(H,W) mm depth -> (H,W,3) world xyz + (H,W) valid mask (CV world->cam E)."""
+    H, W = depth_mm.shape
+    v, u = np.mgrid[0:H, 0:W]
+    z = depth_mm.astype(np.float32) / 1000.0
+    x = (u - K[0, 2]) * z / K[0, 0]
+    y = (v - K[1, 2]) * z / K[1, 1]
+    pcam = np.stack([x, y, z], -1).reshape(-1, 3)
+    R, t = E[:, :3], E[:, 3]
+    return ((pcam - t) @ R).reshape(H, W, 3), (z > 0)
+
+
+def region_bin_mask(binspec, seg, table_ids, world, valid):
+    """Boolean (H,W) mask for a REGION bin (anchor disk or whole-table free-space)."""
+    bt = binspec["bin_type"]
+    if bt == "region_table":
+        return np.isin(seg, list(table_ids))
+    if bt == "region_anchor" and world is not None:
+        on_table = np.isin(seg, list(table_ids)) & valid
+        cx, cy = binspec["center"]
+        d = np.linalg.norm(world[:, :, :2] - np.array([cx, cy]), axis=2)
+        return on_table & (d <= binspec["radius"])
+    return np.zeros(seg.shape, bool)
+
+
+def masking_overlay(rgb, seg, target_id, binmask, robot_ids):
+    out = (rgb.astype(np.float32) * 0.5).astype(np.uint8)
+    if robot_ids:
+        m = np.isin(seg, list(robot_ids))
+        out[m] = (0.6 * out[m] + 0.4 * ROBOT_COLOR).astype(np.uint8)
+    if binmask is not None and binmask.any():
+        out[binmask] = (0.35 * out[binmask] + 0.65 * BIN_COL).astype(np.uint8)
+    if target_id is not None:
+        m = seg == target_id
+        out[m] = (0.25 * out[m] + 0.75 * TARGET_COL).astype(np.uint8)
+    return out
+
+
+def _label_bar(w, text, h=22):
+    bar = np.full((h, w, 3), 30, np.uint8)
+    cv2.putText(bar, text[:118], (6, 15), cv2.FONT_HERSHEY_SIMPLEX, 0.42, (235, 235, 235), 1)
+    return bar
+
+
+def bin_caption(b):
+    bt = b["bin_type"]
+    return {"object": f"bin={b.get('bin_name')}",
+            "region_anchor": f"bin=REGION around {b.get('anchor_name')} (r={b.get('radius')}m)",
+            "region_table": "bin=REGION table free-space",
+            "deferred_articulation": "bin=DEFERRED (articulation)",
+            "none": ("bin=none (open/close)" if "open/close" in b.get("reason", "")
+                     else "bin=none (pick-only)")}.get(bt, bt)
+
+
+def render_masking_panel(run_dir, ep, cam="countertop_camera", out_path=None, masking=None):
+    """Stage-aware panel: one row per stage (grasp + settle frame) with target=red,
+    bin=green (object mask / region). Written to <run_dir>/masking_viz/ by default."""
+    if masking is None:
+        masking = resolve_episode(run_dir, ep, verbose=False)
+    ep_info, id_map, roles, robot_ids = load_sidecar(run_dir, ep)
+    table_ids = table_ids_of(id_map)
+    h5 = os.path.join(run_dir, "data", f"episode{ep}.hdf5")
+    with h5py.File(h5, "r") as f:
+        g = f[f"observation/{cam}"]
+        rgb = np.stack(decode_frames(g["rgb"], cv2.IMREAD_COLOR))[..., ::-1]
+        seg = load_seg(g["actor_segmentation"])
+        depth = np.stack(decode_frames(g["depth"], cv2.IMREAD_UNCHANGED)).astype(np.float32)
+        K = np.asarray(g["intrinsic_cv"]); E = np.asarray(g["extrinsic_cv"])
+    stages, rows, W = masking["stages"], [], rgb.shape[2]
+    if not stages:
+        art = {i for i, n in id_map.items()
+               if "/" in n and not n.startswith("robot") and "__jointframe__" not in n}
+        fr = len(rgb) // 2
+        ov = (rgb[fr].astype(np.float32) * 0.5).astype(np.uint8)
+        m = np.isin(seg[fr], list(art))
+        ov[m] = (0.4 * ov[m] + 0.6 * ART_COL).astype(np.uint8)
+        rows.append(_label_bar(W * 2, f"{masking['task']}: ARTICULATION-ONLY (magenta=fixture)"))
+        rows.append(np.concatenate([rgb[fr], ov], 1))
+    for st in stages:
+        b = st["bin"]
+        for tag, fr in [("grasp", st["start"]), ("settle", st["settle"])]:
+            fr = int(np.clip(fr, 0, len(rgb) - 1))
+            if b["bin_type"] == "region_anchor":
+                Kf = K[fr] if K.ndim == 3 else K
+                Ef = E[fr] if E.ndim == 3 else E
+                world, valid = backproject_full(depth[fr], Kf, Ef)
+                bm = region_bin_mask(b, seg[fr], table_ids, world, valid)
+            elif b["bin_type"] == "region_table":
+                bm = region_bin_mask(b, seg[fr], table_ids, None, None)
+            elif b["bin_type"] == "object":
+                bm = seg[fr] == b["bin_id"]
+            else:
+                bm = None
+            ov = masking_overlay(rgb[fr], seg[fr], st["target_id"], bm, robot_ids)
+            rows.append(_label_bar(W * 2,
+                f"stage {st['stage']} [{tag} f{fr}]: target={st['target_name']}  {bin_caption(b)}"))
+            rows.append(np.concatenate([rgb[fr], ov], 1))
+    panel = np.concatenate(rows, 0)
+    if out_path is None:
+        d = os.path.join(run_dir, "masking_viz")
+        os.makedirs(d, exist_ok=True)
+        out_path = os.path.join(d, f"episode{ep}_{cam}.png")
+    cv2.imwrite(out_path, cv2.cvtColor(panel, cv2.COLOR_RGB2BGR))
+    return out_path
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("run_dir")
+    ap.add_argument("episode", type=int, nargs="?", default=0)
+    ap.add_argument("--task", default=None)
+    ap.add_argument("--write", action="store_true", help="write masking.json")
+    ap.add_argument("--panel", action="store_true", help="also render the masking panel")
+    ap.add_argument("--cam", default="countertop_camera")
+    args = ap.parse_args()
+    out = resolve_episode(args.run_dir, args.episode, task=args.task)
+    if args.write:
+        p = os.path.join(args.run_dir, "masking.json")
+        with open(p, "w") as f:
+            json.dump({f"episode_{args.episode}": out}, f, indent=2)
+        print(f"\nwrote {p}")
+    if args.panel:
+        print("wrote", render_masking_panel(args.run_dir, args.episode, args.cam, masking=out))
+
+
+if __name__ == "__main__":
+    main()

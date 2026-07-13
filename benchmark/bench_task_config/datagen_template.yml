@@ -14,7 +14,8 @@
 # ============================================================================
 
 render_freq: 0
-episode_num: 10            # episodes to KEEP (seed search runs until it banks this many)
+episode_num: 1             # episodes to KEEP per task (default 1 = quick review/smoke;
+                           # scale up e.g. 200 for training). seed-search banks this many.
 use_seed: false            # true = replay seeds from <save_dir>/seed.txt instead of searching
                            #        (matched pairs: copy seed.txt from a finished twin run first)
 save_freq: 15
@@ -28,7 +29,7 @@ domain_randomization:
   random_table_height: 0
   random_light: false
   crazy_random_light_rate: 0
-  obstacle_density: 10     # 6..15 in the benchmark's cluttered range (0 = clean)
+  obstacle_density: 6      # default d6 (light clutter, 6..15 is the benchmark range; 0 = clean)
 
   language_perturbation:
     enabled: true          # base-language diversity ONLY (instruction_bank.json).
@@ -57,6 +58,11 @@ data_type:
                            #   collection — recommended ON. Read back via
                            #   `export.py --what bbox3d_exact`; camera-only (visible-
                            #   surface) boxes are always derivable without it.
+  link_bbox: true          # per-frame pose + world AABB for ARTICULATION LINKS
+                           #   (drawer/cabinet/fridge/microwave doors + interiors) —
+                           #   a SEPARATE group from actor_bbox (which stays rigid-only).
+                           #   Lets offline masking resolve articulated-fixture bins +
+                           #   open/close door targets. Tiny (~KBs/ep); recommended ON.
   proximity: true          # build the obstacle mesh cache + export per-episode
                            # scene geometry (scene/episodeN/{scene.npz,objects.json})
                            # so link/sphere proximity is computed OFFLINE from
