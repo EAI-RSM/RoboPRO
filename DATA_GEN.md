@@ -234,15 +234,17 @@ displacement, 10 N furniture impulse gate** (`_bench_base_task.py` constants).
   `grasp_actor` — drawer/appliance handles + their articulation links).
 - `collision[t]` = impulse-gated non-gripper robot↔furniture hit, OR a static
   object simultaneously (a) touched by the robot / held target / actuated body,
-  (b) displaced ≥ threshold from its episode-start pose, and (c) **actively
-  moving** (per-substep motion ≥ 0.1 mm/0.001 rad, or ≥ 1 mm/0.01 rad across a
+  (b) displaced ≥ threshold from its episode-start pose, and (c) **in
+  motion** — where the touch must be FORCE-BEARING (impulse > 1e-6 N·s): a
+  forceless graze on a moving object, or an object sliding back along the arm
+  after an already-counted knock, earns no collision frames (per-substep motion ≥ 0.1 mm/0.001 rad, or ≥ 1 mm/0.01 rad across a
   rolling 30-substep window; flag persists ≤ ~1 window ≈ 0.12 s past the last
   observed motion). The shove is flagged; the aftermath — the object resting in
   its displaced pose, even while still in contact — is contact-only. A
   destination box is never the "toucher": an object knocked against a `des_obj`
   and resting there stops flagging once it stops moving. Once a moved object
-  has stayed still for 30 substeps (0.12 s — same clock as the episode-counting
-  settle window), its settled pose becomes its NEW displacement baseline — a
+  has stayed still for 90 uninterrupted substeps (0.36 s — same clock as the
+  watch), its settled pose becomes its NEW displacement baseline — a
   later graze is not a collision unless it moves the object past the thresholds
   again. No baseline snapshot ⇒
   NOT a collision — no phantom flags.
@@ -250,10 +252,14 @@ displacement, 10 N furniture impulse gate** (`_bench_base_task.py` constants).
   robot/target/intended_to_static_object + robot_to_furniture) use
   displacement-driven counting: a touched static object is counted once when
   its cumulative pose change from baseline crosses threshold. The watch starts
-  at a touch and stays live while the object is touched OR still moving (a slow
-  topple is followed all the way down); it expires after 30 substeps with
-  neither, and expired watches are not revived (settling creep and
-  object→object chains stay unattributed). The counting moment also sets that
+  at a FORCE-BEARING touch (impulse > 1e-6 N·s — same principle as the contact
+  flag; forceless margin contacts earn no causal credit) and stays live while
+  the object is touched-with-force OR still moving (a slow topple is followed
+  all the way down); it expires after 90 substeps (0.36 s) with neither, and
+  expired watches are not revived (settling creep and object→object chains
+  stay unattributed). The reference (baseline) pose likewise updates only
+  after 90 UNINTERRUPTED still substeps — motion inside the window restarts
+  the stillness count. The counting moment also sets that
   frame's `collision[t]` once (pair = the object's last toucher), so a delayed
   crossing that happens after contact ended is still localized in the
   per-frame labels.

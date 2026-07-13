@@ -49,13 +49,10 @@ class Bench_base_task(Base_Task):
     # the static object has moved beyond these from the previous step.
     STATIC_OBJECT_POSITION_THRESHOLD_M = 0.01   # 1 cm
     STATIC_OBJECT_ORIENTATION_THRESHOLD_RAD = 0.1  # ~5.7 deg
-    # Episode-counting watch + settle clock (substeps). A touched static object
-    # stays watched while it is being touched OR still moving (a slow topple
-    # keeps itself watched all the way down); the watch expires — and the
-    # object's settled pose becomes its new displacement baseline — after this
-    # many consecutive substeps with neither touch nor motion. An expired watch
-    # is NOT revived by later motion: a full stillness gap breaks the causal
-    # link to the last toucher (object->object chain events stay unattributed).
+    # Motion-measurement window (substeps): the sampling period of the slow-
+    # motion detector tier, and how long the per-frame "in motion" state
+    # persists past the last observed movement (~0.12 s). The WATCH length and
+    # re-baseline stillness use the longer STATIC_WATCH_WINDOW_STEPS below.
     STATIC_SETTLE_WINDOW_STEPS = 30
     # "Actively moving" gates for the per-frame collision flag: an object that
     # was knocked past the displacement threshold but has come to REST (e.g.
@@ -73,14 +70,15 @@ class Bench_base_task(Base_Task):
     # a ~1 g object resting, transfers >= ~4e-5 N*s per substep, orders of
     # magnitude above this gate.
     CONTACT_MIN_IMPULSE_NS = 1e-6
-    # After an object that moved has stayed still this long, its SETTLED pose
-    # becomes the new displacement baseline: a later graze on a previously-
-    # knocked object is not a collision unless it displaces the object past the
-    # thresholds again from where it settled. Locked to the episode-counting
-    # settle window (30 substeps = 0.12 s) so both "the event is over" clocks
-    # expire together. Trade-off: stop-and-go shoves with pauses >= this long
-    # are segmented, and each sub-threshold segment alone won't flag/count.
-    STATIC_BASELINE_RESET_STEPS = STATIC_SETTLE_WINDOW_STEPS
+    # Episode-counting watch length AND the stillness required before an
+    # object's reference (baseline) pose updates — one clock, 90 substeps
+    # (0.36 s). The watch arms on a forceful touch, extends on forceful touch
+    # or motion, and dies after 90 substeps with neither (no revival). The
+    # re-baseline fires only after 90 UNINTERRUPTED still substeps: motion
+    # inside the window restarts the stillness count, so a paused-then-
+    # resuming consequence keeps the original reference until it truly rests.
+    STATIC_WATCH_WINDOW_STEPS = 90
+    STATIC_BASELINE_RESET_STEPS = STATIC_WATCH_WINDOW_STEPS
 
     def __init__(self):
         pass
@@ -940,12 +938,12 @@ class Bench_base_task(Base_Task):
             _last_act = self._static_last_active_step.get(_sid)
             # Extend the episode-counting watch while motion continues (a slow
             # topple keeps itself watched all the way down). Only a LIVE watch
-            # extends — once expired (a full settle window with neither touch
-            # nor motion), later motion does not revive it.
+            # extends — after a full watch window with neither forceful touch
+            # nor motion it dies, and only a new forceful touch restarts it.
             if _last_act == self._metric_step:
                 _seen = self._static_watch_last_seen.get(_sid)
                 if (_seen is not None
-                        and self._metric_step - _seen <= self.STATIC_SETTLE_WINDOW_STEPS):
+                        and self._metric_step - _seen <= self.STATIC_WATCH_WINDOW_STEPS):
                     self._static_watch_last_seen[_sid] = self._metric_step
             # Settled re-baseline: one-shot (== not >=) the substep an object
             # completes STATIC_BASELINE_RESET_STEPS of stillness after having
@@ -1017,19 +1015,26 @@ class Bench_base_task(Base_Task):
             # counting is displacement-driven (sweep after the loop). Gripper
             # links COUNT here: targets are excluded from static_object_ids, so a
             # gripper<->static contact is a bump, never an expected grasp.
+            # WATCH ARMING requires actual force exchange (same principle as the
+            # contact flag): a zero-impulse margin "contact" cannot displace
+            # anything, so it earns no causal credit for later motion. The
+            # count_* booleans stay ungated — they mark the touch itself.
+            _forceful = _pair_impulse > self.CONTACT_MIN_IMPULSE_NS
             if (is_robot_0 and is_static_1) or (is_robot_1 and is_static_0):
                 static_entity = entity1 if is_static_1 else entity0
-                self._static_last_toucher[static_entity.per_scene_id] = "robot"
-                self._static_last_touch_step[static_entity.per_scene_id] = self._metric_step
-                self._static_watch_last_seen[static_entity.per_scene_id] = self._metric_step
+                if _forceful:
+                    self._static_last_toucher[static_entity.per_scene_id] = "robot"
+                    self._static_last_touch_step[static_entity.per_scene_id] = self._metric_step
+                    self._static_watch_last_seen[static_entity.per_scene_id] = self._metric_step
                 count_static = True
 
             if ((is_target_0 and not is_dest_0) and is_static_1) or \
                     ((is_target_1 and not is_dest_1) and is_static_0):
                 static_entity = entity1 if is_static_1 else entity0
-                self._static_last_toucher[static_entity.per_scene_id] = "target"
-                self._static_last_touch_step[static_entity.per_scene_id] = self._metric_step
-                self._static_watch_last_seen[static_entity.per_scene_id] = self._metric_step
+                if _forceful:
+                    self._static_last_toucher[static_entity.per_scene_id] = "target"
+                    self._static_last_touch_step[static_entity.per_scene_id] = self._metric_step
+                    self._static_watch_last_seen[static_entity.per_scene_id] = self._metric_step
                 count_target_static = True
 
             # Robot-actuated body (e.g. the drawer being closed) hitting a static
@@ -1039,9 +1044,10 @@ class Bench_base_task(Base_Task):
             if ((is_intended_0 and is_static_1 and not is_intended_1)
                     or (is_intended_1 and is_static_0 and not is_intended_0)):
                 static_entity = entity1 if is_static_1 else entity0
-                self._static_last_toucher[static_entity.per_scene_id] = "intended"
-                self._static_last_touch_step[static_entity.per_scene_id] = self._metric_step
-                self._static_watch_last_seen[static_entity.per_scene_id] = self._metric_step
+                if _forceful:
+                    self._static_last_toucher[static_entity.per_scene_id] = "intended"
+                    self._static_last_touch_step[static_entity.per_scene_id] = self._metric_step
+                    self._static_watch_last_seen[static_entity.per_scene_id] = self._metric_step
                 count_intended_static = True
 
             # Optional dataset stream: every robot/target<->static contact POINT,
@@ -1111,17 +1117,21 @@ class Bench_base_task(Base_Task):
                 self._win_collision_pairs.add(_pair)
                 self._win_collision_impulse = max(self._win_collision_impulse, _cimp)
             # Displacement collision frames require ALL THREE simultaneously:
-            #   touched (robot / non-destination target / actuated body)
-            #   + displaced >=1 cm / 0.1 rad from episode start
-            #   + ACTIVELY MOVING (see detector above): the knock itself is
-            #     flagged; the aftermath (object resting in its displaced pose,
-            #     possibly still in contact) is contact-only. Flag persists at
-            #     most ~1 settle window (~0.12 s) past the last observed motion.
+            #   FORCEFUL contact (impulse > gate — a forceless graze on an
+            #     object moving for other reasons, or sliding back along the
+            #     arm after an already-counted knock, earns no frames)
+            #   + displaced >=1 cm / 0.1 rad from the reference pose
+            #   + IN MOTION (see detector above).
+            # A knock whose threshold crossing happens AFTER the contact is
+            # handled by the watch-gated sweep below: exactly one frame — the
+            # crossing — gets flagged.
             if count_static or count_target_static or count_intended_static:  # robot/target/actuated-body touching a static
                 _step_static = entity1 if is_static_1 else entity0
                 _ssid = _step_static.per_scene_id
-                self._static_last_touch_pair[_ssid] = _pair
-                if (self._static_object_has_significant_pose_change(_ssid, _step_static)
+                if _forceful:
+                    self._static_last_touch_pair[_ssid] = _pair
+                if (_forceful
+                        and self._static_object_has_significant_pose_change(_ssid, _step_static)
                         and self._metric_step - self._static_last_active_step.get(_ssid, -(10 ** 9))
                             <= self.STATIC_SETTLE_WINDOW_STEPS):
                     self._win_collision = True
@@ -1160,18 +1170,18 @@ class Bench_base_task(Base_Task):
         # Displacement-driven counting: a static object whose cumulative pose
         # change from its baseline crosses the thresholds is counted as one
         # collision — whether or not anything touches it at that instant (slow
-        # topples finish after contact ends). The WATCH starts at a robot /
-        # target / actuated-body touch and stays live while the object is
-        # touched OR still moving (detector above extends it), so a slow topple
-        # is followed all the way down; it expires after a full settle window
-        # with neither, and expired watches are not revived by later motion
-        # (object→object chains and settling creep stay unattributed). Checks
-        # only the handful of watched objects via cached entity handles.
+        # topples finish after contact ends). The WATCH starts at a FORCEFUL
+        # robot / target / actuated-body touch and stays live while the object
+        # is touched-with-force OR still moving (detector above extends it),
+        # so a slow topple is followed all the way down; it expires after a
+        # full watch window (90 substeps) with neither, and expired watches
+        # are not revived (object→object chains and settling creep stay
+        # unattributed). Checks only watched objects via cached handles.
         for sid, toucher in self._static_last_toucher.items():
             if (sid in self._counted_displaced_ids
                     or self.static_object_pose_start.get(sid) is None
                     or self._metric_step - self._static_watch_last_seen.get(sid, -(10 ** 9))
-                       > self.STATIC_SETTLE_WINDOW_STEPS):
+                       > self.STATIC_WATCH_WINDOW_STEPS):
                 continue
             entity = self._static_id_to_entity.get(sid)
             if entity is None:

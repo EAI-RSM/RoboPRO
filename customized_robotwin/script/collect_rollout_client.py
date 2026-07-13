@@ -221,8 +221,9 @@ def collect_rollouts(TASK_ENV, args, model, usr_args, collect_num, instruction_t
         print(f"\033[34m[rollout] episode {ep_idx} (seed={seed}) — {policy_name}\033[0m")
         try:
             TASK_ENV.setup_demo(now_ep_num=ep_idx, seed=seed, is_test=fixed_seed, **roll)
+            perturbed_instruction = None
             if hasattr(TASK_ENV, "_maybe_apply_language_perturbation"):
-                TASK_ENV._maybe_apply_language_perturbation()
+                perturbed_instruction = TASK_ENV._maybe_apply_language_perturbation()
             if not fixed_seed and intended_names and hasattr(TASK_ENV, "_intended_contact_names"):
                 TASK_ENV._intended_contact_names |= intended_names
             TASK_ENV.eval_video_path = None  # video comes from merge_pkl_to_hdf5_video
@@ -238,10 +239,14 @@ def collect_rollouts(TASK_ENV, args, model, usr_args, collect_num, instruction_t
             except Exception as e:
                 print(f"[rollout] export_scene failed: {e}")
 
-            # instruction (same banks/flow as before)
-            results = generate_episode_descriptions(args["task_name"], [episode_info["info"]], collect_num)
-            instruction = np.random.choice(results[0][instruction_type])
-            TASK_ENV.set_instruction(instruction=instruction)
+            # instruction: the bank instruction (training-prompt distribution) wins
+            # when language perturbation set one; generated descriptions are the fallback
+            if perturbed_instruction is not None:
+                instruction = perturbed_instruction
+            else:
+                results = generate_episode_descriptions(args["task_name"], [episode_info["info"]], collect_num)
+                instruction = np.random.choice(results[0][instruction_type])
+                TASK_ENV.set_instruction(instruction=instruction)
 
             # action logging (+ optional exploration noise) around take_action
             action_log = []
