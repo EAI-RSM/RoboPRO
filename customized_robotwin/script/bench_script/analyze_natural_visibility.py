@@ -204,6 +204,12 @@ def run_rollout(env, task_name, base_config, seed, dr_overrides, save_path, ep_n
     plan_ok = False
     check_ok = False
     artifact_info = None
+    # Which stage the rollout reached / died at. Starts at "setup"; the expert sets
+    # env.rollout_failure_stage when a curobo move fails mid-plan (hamid + subgoal/baseline
+    # do this). run_rollout then resolves the final stage: success / success_check / setup /
+    # the expert's stage / an exception tag.
+    stage = "setup"
+    raw_fail_stage = None
     try:
         env.setup_demo(**build_cfg(task_name, base_config, seed, dr_overrides,
                                    rollout=True, ep_num=ep_num, save_path=str(save_path)))
@@ -211,11 +217,16 @@ def run_rollout(env, task_name, base_config, seed, dr_overrides, save_path, ep_n
         # a minimal HDF5/MP4 artifact in success/ or fail/.
         if getattr(env, "save_data", False) and getattr(env, "FRAME_IDX", 0) == 0:
             env._take_picture()
+        stage = "execution"                      # setup done -> entering play_once
+        env.rollout_failure_stage = None         # clear any leak from a reused env
+        env.rollout_failure_reason = None
         env.play_once()
         plan_ok = bool(getattr(env, "plan_success", False))
         check_ok = bool(env.check_success())
+        raw_fail_stage = getattr(env, "rollout_failure_stage", None)
         if os.environ.get("ROBOTWIN_LOG_MOVE", "") == "1":
-            print(f"    [rollout seed {seed} ep{ep_num}] plan_success={plan_ok} check_success={check_ok}")
+            print(f"    [rollout seed {seed} ep{ep_num}] plan_success={plan_ok} "
+                  f"check_success={check_ok} stage={raw_fail_stage}")
         # Label by the task's own check_success() -- object placed within tolerance of the
         # pad AND grippers open -- which is the physical ground truth the video shows.
         # plan_success is an internal "every planned segment executed" flag; the
@@ -225,9 +236,21 @@ def run_rollout(env, task_name, base_config, seed, dr_overrides, save_path, ep_n
         # cannot be a false positive here: the target spawns far from the pad, and grippers
         # only end open-over-pad if place_actor fully executed.
         success = check_ok
+        if check_ok:
+            stage = "success"
+        elif raw_fail_stage:
+            stage = raw_fail_stage               # a curobo move failed at this named phase
+        else:
+            stage = "success_check"              # motion completed but object not placed in tolerance
     except Exception as e:
         print(f"    [rollout seed {seed} ep{ep_num}] failed ({type(e).__name__}: {e})")
         success = False
+        raw_fail_stage = getattr(env, "rollout_failure_stage", None)
+        if raw_fail_stage:
+            stage = raw_fail_stage               # expert recorded the phase before it raised
+        elif stage == "execution":
+            stage = f"exception:{type(e).__name__}"
+        # else stage stays "setup" -> setup_demo itself raised
     try:
         env.close_env()
     except Exception:
@@ -244,6 +267,8 @@ def run_rollout(env, task_name, base_config, seed, dr_overrides, save_path, ep_n
         "success": bool(success),
         "plan_success": bool(plan_ok),
         "check_success": bool(check_ok),
+        "rollout_stage": stage,
+        "rollout_failure_stage": raw_fail_stage,
         "artifact_info": artifact_info,
     }
 

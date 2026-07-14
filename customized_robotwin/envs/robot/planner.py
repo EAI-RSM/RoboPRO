@@ -55,6 +55,13 @@ try:
     # table, that padding alone can make CuRobo reject an approach that has no real
     # physical collision. Matches CuRobo's own default unless overridden.
     CUROBO_ATTACH_SPHERE_RADIUS = float(os.environ.get("CUROBO_ATTACH_SPHERE_RADIUS", "0.001"))
+    CUROBO_NEAR_CONTACT_TRAJOPT_SEEDS = int(os.environ.get("CUROBO_NEAR_CONTACT_TRAJOPT_SEEDS", "4"))
+    CUROBO_NEAR_CONTACT_MAX_ATTEMPTS = int(os.environ.get("CUROBO_NEAR_CONTACT_MAX_ATTEMPTS", "8"))
+    CUROBO_NEAR_CONTACT_FINETUNE_ATTEMPTS = int(os.environ.get("CUROBO_NEAR_CONTACT_FINETUNE_ATTEMPTS", "8"))
+    CUROBO_NEAR_CONTACT_FINETUNE_DT_SCALE = float(os.environ.get("CUROBO_NEAR_CONTACT_FINETUNE_DT_SCALE", "1.0"))
+    CUROBO_NEAR_CONTACT_COLLISION_ACTIVATION = float(os.environ.get("CUROBO_NEAR_CONTACT_COLLISION_ACTIVATION", "0.005"))
+    CUROBO_NEAR_CONTACT_POSITION_THRESHOLD = float(os.environ.get("CUROBO_NEAR_CONTACT_POSITION_THRESHOLD", "0.01"))
+    CUROBO_NEAR_CONTACT_INTERPOLATION_DT = float(os.environ.get("CUROBO_NEAR_CONTACT_INTERPOLATION_DT", "0.01"))
 
     class CuroboPlanner:
 
@@ -112,6 +119,7 @@ try:
 
             self.motion_gen = MotionGen(motion_gen_config)
             self.motion_gen.warmup()
+            self.motion_gen_near_contact = None
 
             # Batch planning is memory-hungry. Defer its construction until a caller
             # actually needs plan_batch() so ordinary single-goal planning stays lighter.
@@ -156,7 +164,35 @@ try:
             gens = [self.motion_gen]
             if self.motion_gen_batch is not None:
                 gens.append(self.motion_gen_batch)
+            if self.motion_gen_near_contact is not None:
+                gens.append(self.motion_gen_near_contact)
             return gens
+
+        def _ensure_near_contact_motion_gen(self):
+            if self.motion_gen_near_contact is None:
+                config = MotionGenConfig.load_from_robot_config(
+                    self.yml_path, {"cuboid": {}, "mesh": {}},
+                    interpolation_dt=CUROBO_NEAR_CONTACT_INTERPOLATION_DT,
+                    num_trajopt_seeds=CUROBO_NEAR_CONTACT_TRAJOPT_SEEDS,
+                    collision_cache={"mesh": 1, "obb": 1},
+                    collision_activation_distance=CUROBO_NEAR_CONTACT_COLLISION_ACTIVATION,
+                    position_threshold=CUROBO_NEAR_CONTACT_POSITION_THRESHOLD,
+                    use_cuda_graph=False,
+                )
+                self.motion_gen_near_contact = MotionGen(config)
+                self.motion_gen_near_contact.warmup()
+                if self._last_world_config is not None:
+                    self.motion_gen_near_contact.clear_world_cache()
+                    self.motion_gen_near_contact.update_world(self._last_world_config)
+                for obstacle, joint_states in self._attached_objects:
+                    ok = self.motion_gen_near_contact.attach_external_objects_to_robot(
+                        joint_state=joint_states, external_objects=[obstacle],
+                        link_name="attached_object",
+                        surface_sphere_radius=CUROBO_ATTACH_SPHERE_RADIUS,
+                        voxelize_method="ray",
+                    )
+                    assert ok
+            return self.motion_gen_near_contact
 
         def plan_path(
             self,
@@ -165,6 +201,10 @@ try:
             constraint_pose=None,
             approach_axis=None,
             arms_tag=None,
+            relax_orientation=False,
+            approach_offset=0.05,
+            tstep_fraction=0.8,
+            near_contact=False,
         ):
             world_base_pose = np.concatenate([
                 np.array(self.robot_origion_pose.p),
@@ -201,12 +241,20 @@ try:
                 joint_names=self.active_joints_name,
             )
             # plan
-            _finetune_kwargs = {}
-            if CUROBO_FINETUNE_ATTEMPTS is not None:
-                _finetune_kwargs["finetune_attempts"] = CUROBO_FINETUNE_ATTEMPTS
-            if CUROBO_FINETUNE_DT_SCALE is not None:
-                _finetune_kwargs["finetune_dt_scale"] = CUROBO_FINETUNE_DT_SCALE
-            plan_config = MotionGenPlanConfig(max_attempts=CUROBO_MAX_ATTEMPTS, **_finetune_kwargs)
+            motion_gen = self._ensure_near_contact_motion_gen() if near_contact else self.motion_gen
+            if near_contact:
+                plan_config = MotionGenPlanConfig(
+                    max_attempts=CUROBO_NEAR_CONTACT_MAX_ATTEMPTS,
+                    finetune_attempts=CUROBO_NEAR_CONTACT_FINETUNE_ATTEMPTS,
+                    finetune_dt_scale=CUROBO_NEAR_CONTACT_FINETUNE_DT_SCALE,
+                )
+            else:
+                _finetune_kwargs = {}
+                if CUROBO_FINETUNE_ATTEMPTS is not None:
+                    _finetune_kwargs["finetune_attempts"] = CUROBO_FINETUNE_ATTEMPTS
+                if CUROBO_FINETUNE_DT_SCALE is not None:
+                    _finetune_kwargs["finetune_dt_scale"] = CUROBO_FINETUNE_DT_SCALE
+                plan_config = MotionGenPlanConfig(max_attempts=CUROBO_MAX_ATTEMPTS, **_finetune_kwargs)
             if approach_axis is not None:
                 # create_grasp_approach_metric (unlike the plain hold_partial_pose
                 # metric below) sets offset_tstep_fraction >= 0, which makes CuRobo
@@ -218,19 +266,40 @@ try:
                 # tstep_fraction of the trajectory, instead of constraining the
                 # whole path, and CuRobo auto-resets it after this plan_single call.
                 if os.environ.get("ROBOTWIN_LOG_MOVE", "") == "1":
-                    print(f"[plan_path] using approach_axis={approach_axis} pose_cost_metric")
+                    print(f"[plan_path] using approach_axis={approach_axis} "
+                          f"approach_offset={approach_offset} tstep_fraction={tstep_fraction} "
+                          f"pose_cost_metric")
                 plan_config.pose_cost_metric = PoseCostMetric.create_grasp_approach_metric(
-                    offset_position=0.05, linear_axis=approach_axis, tstep_fraction=0.8,
-                    tensor_args=self.motion_gen.tensor_args,
+                    offset_position=approach_offset, linear_axis=approach_axis,
+                    tstep_fraction=tstep_fraction,
+                    tensor_args=motion_gen.tensor_args,
                 )
             elif constraint_pose is not None:
                 pose_cost_metric = PoseCostMetric(
                     hold_partial_pose=True,
-                    hold_vec_weight=self.motion_gen.tensor_args.to_device(constraint_pose),
+                    hold_vec_weight=motion_gen.tensor_args.to_device(constraint_pose),
                 )
                 plan_config.pose_cost_metric = pose_cost_metric
+            elif relax_orientation:
+                # Position-only goal: for transit-only moves (carrying an already-
+                # grasped object around/over an obstacle) the held object's exact
+                # orientation en route doesn't matter -- check_success() only checks
+                # final x/y position. A check_ik_batch(relax_orientation=True) sweep
+                # confirmed this opens up real, currently-dead combos at the
+                # lift_above_box stage (e.g. seed 8/9: several gap x clearance_z
+                # combos flip from IK-infeasible to feasible once orientation is
+                # freed). MotionGen resets pose_cost_metric automatically at the end
+                # of _plan_attempts, same as the approach_axis/constraint_pose cases
+                # above -- no manual reset needed here.
+                if os.environ.get("ROBOTWIN_LOG_MOVE", "") == "1":
+                    print("[plan_path] using relax_orientation pose_cost_metric")
+                plan_config.pose_cost_metric = PoseCostMetric(
+                    reach_partial_pose=True,
+                    reach_vec_weight=motion_gen.tensor_args.to_device(
+                        [0.0, 0.0, 0.0, 1.0, 1.0, 1.0]),
+                )
 
-            result = self.motion_gen.plan_single(start_joint_states, goal_pose_of_ee, plan_config)
+            result = motion_gen.plan_single(start_joint_states, goal_pose_of_ee, plan_config)
 
             # ------------------------------------------
             if result.success.item() == False and os.environ.get("ROBOTWIN_LOG_MOVE", "") == "1":
@@ -246,11 +315,35 @@ try:
             if result.success.item() == False:
                 res_result["status"] = "Fail"
                 res_result["fail_reason"] = str(result.status)
+                # Diagnostic only: MotionGen sets position_error/rotation_error/
+                # interpolated_plan UNCONDITIONALLY in _plan_from_solve_state's
+                # trajopt/finetune branch, even on FINETUNE_TRAJOPT_FAIL -- the
+                # optimizer converged to *something*, just not within the success
+                # tolerance. Surfacing how close it got (and where it actually
+                # ended up) lets a caller judge whether that near-miss is usable as
+                # an intermediate waypoint, instead of discarding a failed attempt
+                # as pure signal-free noise. Not populated for e.g. IK_FAIL, where
+                # trajopt never ran -- guard on None.
+                if result.position_error is not None:
+                    res_result["position_error"] = float(result.position_error.reshape(-1)[0].item())
+                if result.rotation_error is not None:
+                    res_result["rotation_error"] = float(result.rotation_error.reshape(-1)[0].item())
+                if result.interpolated_plan is not None:
+                    res_result["position"] = np.array(result.interpolated_plan.position.to("cpu"))
+                    res_result["velocity"] = np.array(result.interpolated_plan.velocity.to("cpu"))
                 return res_result
             else:
                 res_result["status"] = "Success"
                 res_result["position"] = np.array(result.interpolated_plan.position.to("cpu"))
                 res_result["velocity"] = np.array(result.interpolated_plan.velocity.to("cpu"))
+                # Export position_error/rotation_error on success too, not just
+                # failure -- callers doing per-slice diagnostics (e.g. records.jsonl's
+                # rollout_descent_slices) want these for every slice, not just the
+                # ones that failed.
+                if result.position_error is not None:
+                    res_result["position_error"] = float(result.position_error.reshape(-1)[0].item())
+                if result.rotation_error is not None:
+                    res_result["rotation_error"] = float(result.rotation_error.reshape(-1)[0].item())
                 return res_result
 
         def plan_batch(
@@ -350,12 +443,20 @@ try:
             res_result["velocity"] = np.array(result.interpolated_plan.velocity.to("cpu"))
             return res_result
 
-        def check_ik_batch(self, target_gripper_pose_list, arms_tag=None):
+        def check_ik_batch(self, target_gripper_pose_list, arms_tag=None, relax_orientation=False):
             """Diagnostic only: batched collision-aware IK feasibility check (no
             trajectory optimization), much cheaper than plan_batch. Used to map out
             the arm's real reachable envelope directly rather than inferring it from
             full-motion-plan failures. Returns a bool numpy array, one per pose,
-            True if a collision-free IK solution exists for that pose."""
+            True if a collision-free IK solution exists for that pose.
+
+            relax_orientation=True: position-only IK (via PoseCostMetric.
+            reach_partial_pose with rotation weights zeroed) -- for probing whether
+            a position that fails strict full-pose IK is reachable under ANY
+            orientation. Reuses this method's own (already-correct) world/base
+            frame transform instead of a separate reimplementation, after an
+            earlier standalone prototype script got the transform wrong (missing
+            the gripper->endlink conversion) and produced misleading results."""
             world_base_pose = np.concatenate([
                 np.array(self.robot_origion_pose.p),
                 np.array(self.robot_origion_pose.q),
@@ -392,11 +493,21 @@ try:
             # solve_batch trips a CUDA-graph batch-size mismatch against whatever
             # batch size motion_gen.warmup() already fixed the ik_solver's graph to;
             # solve_single one at a time matches the graph's original (batch=1) shape.
-            results = []
-            for i in range(poses_cuda.shape[0]):
-                goal_pose = CuroboPose(poses_cuda[i:i + 1, :3], poses_cuda[i:i + 1, 3:])
-                ik_result = self.motion_gen.ik_solver.solve_single(goal_pose)
-                results.append(bool(ik_result.success.reshape(-1)[0].item()))
+            if relax_orientation:
+                self.motion_gen.ik_solver.update_pose_cost_metric(PoseCostMetric(
+                    reach_partial_pose=True,
+                    reach_vec_weight=self.motion_gen.tensor_args.to_device(
+                        [0.0, 0.0, 0.0, 1.0, 1.0, 1.0]),
+                ))
+            try:
+                results = []
+                for i in range(poses_cuda.shape[0]):
+                    goal_pose = CuroboPose(poses_cuda[i:i + 1, :3], poses_cuda[i:i + 1, 3:])
+                    ik_result = self.motion_gen.ik_solver.solve_single(goal_pose)
+                    results.append(bool(ik_result.success.reshape(-1)[0].item()))
+            finally:
+                if relax_orientation:
+                    self.motion_gen.ik_solver.update_pose_cost_metric(PoseCostMetric.reset_metric())
             return np.array(results, dtype=bool)
 
         def plan_grippers(self, now_val, target_val):

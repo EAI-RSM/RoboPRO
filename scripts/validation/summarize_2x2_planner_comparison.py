@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
-"""Paired summary for the 2x2 planner comparison (run_2x2_planner_comparison.sh).
+"""Paired summary for the planner comparison (run_2x2_planner_comparison.sh).
 
-Reads the four cells' records.jsonl:
-    <root>/curated_rollout/{baseline,reachability}/records.jsonl
-    <root>/typical_rollout/{baseline,reachability}/records.jsonl
+Reads each cell's records.jsonl:
+    <root>/<scene>_rollout/<algo>/records.jsonl
+(default scene = curated, default algos = baseline vs hamid)
 
 and reports, per cell, the rollout success rate with a Wilson 95% CI, then a
-WITHIN-SCENE paired baseline-vs-reachability comparison (McNemar exact test on the
-seeds both cells share -- valid because seed acceptance is planner-independent, so
-both planners saw the same scenes).
+WITHIN-SCENE paired comparison of the two planners (McNemar exact test on the seeds
+both cells share -- valid because seed acceptance is planner-independent, so both
+planners saw the same scenes).
 
 stdlib only (math/json/argparse); no numpy/scipy needed.
 """
@@ -19,8 +19,8 @@ import json
 import math
 from pathlib import Path
 
-SCENES = ["curated", "typical"]
-ALGOS = ["baseline", "reachability"]
+DEFAULT_SCENES = ["curated"]
+DEFAULT_ALGOS = ["baseline", "hamid"]
 
 
 def load_records(cell_dir: Path) -> dict[int, bool]:
@@ -41,8 +41,61 @@ def load_records(cell_dir: Path) -> dict[int, bool]:
             continue
         secs = r.get("rollout_seconds")
         out[int(r["seed"])] = {"success": bool(r["rollout_success"]),
-                               "seconds": float(secs) if secs is not None else None}
+                               "seconds": float(secs) if secs is not None else None,
+                               "stage": r.get("rollout_stage")}
     return out
+
+
+# Coarse failure/outcome taxonomy, in pipeline order. Both planners are normalized into
+# this: baseline already emits these names; hamid emits granular checkpoint names that we
+# bucket by substring here.
+STAGE_ORDER = ["setup", "forward/grasp", "transition", "backward-placement",
+               "final descent", "success check", "success", "exception", "other", "unknown"]
+
+
+def coarse_stage(s: str | None) -> str:
+    """Map a raw rollout_stage (coarse baseline label OR granular hamid checkpoint) to one
+    of STAGE_ORDER."""
+    if not s:
+        return "unknown"
+    if s == "success":
+        return "success"
+    if s == "success_check":
+        return "success check"
+    if s in STAGE_ORDER:
+        return s                      # baseline already emits coarse names
+    if s.startswith("exception"):
+        return "exception"
+    r = s.lower()
+    if "descent" in r or "place_actor" in r:
+        return "final descent"
+    if "placement" in r or "place" in r:
+        return "backward-placement"
+    if "attach" in r or "enable_table" in r or "lift" in r:
+        return "transition"
+    if "grasp" in r or "waypoint" in r:
+        return "forward/grasp"
+    return "other"
+
+
+def stage_tally_table(algos: list[str], res_by_algo: dict[str, dict]) -> None:
+    """Print a stage x planner count table for one scene."""
+    counts = {al: {st: 0 for st in STAGE_ORDER} for al in algos}
+    for al in algos:
+        for v in res_by_algo[al].values():
+            counts[al][coarse_stage(v.get("stage"))] += 1
+    # only show rows any planner hit
+    rows = [st for st in STAGE_ORDER if any(counts[al][st] for al in algos)]
+    if not rows:
+        print("  stage tally: (no rollout_stage in records -- older run?)")
+        return
+    w = max(len("stage"), max(len(st) for st in rows))
+    header = "  " + "stage".ljust(w) + "".join(f"  {al:>12}" for al in algos)
+    print(header)
+    print("  " + "-" * (len(header) - 2))
+    for st in rows:
+        line = "  " + st.ljust(w) + "".join(f"  {counts[al][st]:>12d}" for al in algos)
+        print(line)
 
 
 def wilson_ci(k: int, n: int, z: float = 1.959963984540054) -> tuple[float, float]:
@@ -59,8 +112,8 @@ def wilson_ci(k: int, n: int, z: float = 1.959963984540054) -> tuple[float, floa
 
 def mcnemar_exact_p(b: int, c: int) -> float:
     """Two-sided exact (binomial) McNemar p-value on the discordant pairs.
-    b = only-baseline-succeeds, c = only-reachability-succeeds. Under H0 each
-    discordant pair is a fair coin, so p = 2 * P(X <= min(b,c)), X ~ Bin(b+c, 0.5)."""
+    b = only-A-succeeds, c = only-B-succeeds. Under H0 each discordant pair is a
+    fair coin, so p = 2 * P(X <= min(b,c)), X ~ Bin(b+c, 0.5)."""
     n = b + c
     if n == 0:
         return 1.0
@@ -104,48 +157,49 @@ def summarize_cell(algo: str, st: dict | None) -> None:
         print("   |  (no timing in these records)")
 
 
-def paired_scene(base: dict[int, dict], reach: dict[int, dict]) -> None:
-    shared = sorted(set(base) & set(reach))
+def paired_scene(a_res: dict[int, dict], b_res: dict[int, dict],
+                 a_name: str, b_name: str) -> None:
+    shared = sorted(set(a_res) & set(b_res))
     if not shared:
         print(f"  paired test: SKIPPED (no shared seeds between the two planners)")
         return
-    only_b = set(base) - set(reach)
-    only_r = set(reach) - set(base)
-    if only_b or only_r:
-        print(f"  note: seed sets differ (baseline-only={len(only_b)}, "
-              f"reachability-only={len(only_r)}); pairing on the {len(shared)} shared seeds")
+    only_a = set(a_res) - set(b_res)
+    only_b = set(b_res) - set(a_res)
+    if only_a or only_b:
+        print(f"  note: seed sets differ ({a_name}-only={len(only_a)}, "
+              f"{b_name}-only={len(only_b)}); pairing on the {len(shared)} shared seeds")
 
-    bs = {s: base[s]["success"] for s in shared}
-    rs = {s: reach[s]["success"] for s in shared}
-    both = sum(1 for s in shared if bs[s] and rs[s])
-    neither = sum(1 for s in shared if not bs[s] and not rs[s])
-    b = sum(1 for s in shared if bs[s] and not rs[s])       # only baseline solved
-    c = sum(1 for s in shared if rs[s] and not bs[s])       # only reachability solved
+    asucc = {s: a_res[s]["success"] for s in shared}
+    bsucc = {s: b_res[s]["success"] for s in shared}
+    both = sum(1 for s in shared if asucc[s] and bsucc[s])
+    neither = sum(1 for s in shared if not asucc[s] and not bsucc[s])
+    b = sum(1 for s in shared if asucc[s] and not bsucc[s])       # only A solved
+    c = sum(1 for s in shared if bsucc[s] and not asucc[s])       # only B solved
     p = mcnemar_exact_p(b, c)
 
-    base_rate = sum(bs.values()) / len(shared)
-    reach_rate = sum(rs.values()) / len(shared)
-    delta = reach_rate - base_rate
+    a_rate = sum(asucc.values()) / len(shared)
+    b_rate = sum(bsucc.values()) / len(shared)
+    delta = b_rate - a_rate
 
     print(f"  paired on {len(shared)} seeds:")
-    print(f"     both solved      : {both}")
-    print(f"     both failed      : {neither}")
-    print(f"     only baseline    : {b}")
-    print(f"     only reachability: {c}")
-    print(f"     reachability - baseline = {delta:+.1%} "
-          f"({reach_rate:.1%} vs {base_rate:.1%})")
+    print(f"     both solved       : {both}")
+    print(f"     both failed       : {neither}")
+    print(f"     only {a_name:<12}: {b}")
+    print(f"     only {b_name:<12}: {c}")
+    print(f"     {b_name} - {a_name} = {delta:+.1%} "
+          f"({b_rate:.1%} vs {a_rate:.1%})")
     verdict = "significant" if p < 0.05 else "not significant"
     print(f"     McNemar exact two-sided p = {p:.4f}  ({verdict} at alpha=0.05)")
 
 
-def make_figure(stats: dict, out_path: Path) -> None:
+def make_figure(stats: dict, out_path: Path, scenes: list[str], algos: list[str]) -> None:
     """Two-panel bar chart: (left) avg time per rollout, (right) usable samples/hour,
-    baseline vs reachability within each scene. Skips cells with no timing."""
+    the two planners within each scene. Skips cells with no timing."""
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
-    cells = [(sc, al) for sc in SCENES for al in ALGOS
+    cells = [(sc, al) for sc in scenes for al in algos
              if stats.get((sc, al)) and stats[(sc, al)]["avg_seconds"] is not None]
     if not cells:
         print("no timing data -> skipping figure")
@@ -154,7 +208,7 @@ def make_figure(stats: dict, out_path: Path) -> None:
     labels = [f"{sc}\n{al}" for sc, al in cells]
     times = [stats[c]["avg_seconds"] for c in cells]
     thru = [stats[c]["samples_per_hour"] for c in cells]
-    colors = ["#4C72B0" if al == "baseline" else "#DD8452" for _, al in cells]
+    colors = ["#4C72B0" if al == algos[0] else "#DD8452" for _, al in cells]
     x = range(len(cells))
 
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 5))
@@ -186,40 +240,44 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--root", required=True, type=Path,
                     help="results root passed to run_2x2_planner_comparison.sh")
+    ap.add_argument("--scenes", nargs="+", default=DEFAULT_SCENES,
+                    help=f"scenes to summarize (default: {' '.join(DEFAULT_SCENES)})")
+    ap.add_argument("--algos", nargs=2, default=DEFAULT_ALGOS, metavar=("ALGO_A", "ALGO_B"),
+                    help=f"the two planners to pair (default: {' '.join(DEFAULT_ALGOS)})")
     args = ap.parse_args()
+
+    scenes, algos = args.scenes, args.algos
+    a_name, b_name = algos
 
     data: dict[tuple[str, str], dict[int, dict]] = {}
     stats: dict[tuple[str, str], dict | None] = {}
-    for scene in SCENES:
-        for algo in ALGOS:
+    for scene in scenes:
+        for algo in algos:
             cell = args.root / f"{scene}_rollout" / algo
             data[(scene, algo)] = load_records(cell)
             stats[(scene, algo)] = cell_stats(data[(scene, algo)])
 
     print("=" * 64)
-    print("2x2 PLANNER COMPARISON SUMMARY")
+    print(f"PLANNER COMPARISON SUMMARY  ({a_name} vs {b_name})")
     print(f"root: {args.root}")
     print("=" * 64)
 
-    for scene in SCENES:
-        title = ("CURATED  (milk-box occluder + bottle)" if scene == "curated"
+    for scene in scenes:
+        title = ("CURATED  (milk-box occluder + bottle + clutter)" if scene == "curated"
                  else "TYPICAL  (random clutter + mouse)")
         print(f"\n[{scene.upper()}] {title}")
-        for algo in ALGOS:
+        for algo in algos:
             summarize_cell(algo, stats[(scene, algo)])
-        paired_scene(data[(scene, "baseline")], data[(scene, "reachability")])
+        paired_scene(data[(scene, a_name)], data[(scene, b_name)], a_name, b_name)
+        print("  stage breakdown (rollouts per outcome/failure stage):")
+        stage_tally_table(algos, {al: data[(scene, al)] for al in algos})
 
-    make_figure(stats, args.root / "timing_throughput.png")
+    make_figure(stats, args.root / "timing_throughput.png", scenes, algos)
 
-    # Cross-scene reminder: we do NOT pair across scenes (different objects/scenes),
-    # so those are descriptive only.
     print("\n" + "-" * 64)
-    print("Note: baseline vs reachability is paired WITHIN each scene (same seeds).")
-    print("Curated vs typical is descriptive only (different object + scene).")
-    print("For cell TYPICAL/reachability, eyeball a few videos under")
-    print("  <root>/typical_rollout/reachability/{success,fail}/  --  the placement")
-    print("path is box-tuned, so confirm failures are real clutter collisions, not a")
-    print("gratuitous high box-detour.")
+    print(f"Note: {a_name} vs {b_name} is paired WITHIN each scene (same seeds).")
+    if len(scenes) > 1:
+        print("Across scenes is descriptive only (different object + scene).")
 
 
 if __name__ == "__main__":

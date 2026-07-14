@@ -1,20 +1,22 @@
 #!/usr/bin/env bash
 # ============================================================================
-# 2x2 planner comparison  (old vs new curobo planner) x (two scene types)
+# Planner comparison: baseline vs hamid, on the curated (occluder + clutter) scene
 #
-#   rows  (planner):  baseline      = dev vanilla grasp->lift->place, no routing
-#                     reachability  = new candidate-search planner
-#   cols  (scene):    curated       = milk-box occluder + BOTTLE target
-#                     typical       = random clutter, NO occluder + MOUSE target
+#   planners:  baseline = dev vanilla grasp->lift->place, no routing
+#              hamid    = Hamid's single deployable planner (vendored, scene-paired)
+#   scene:     curated  = milk-box occluder + BOTTLE target + standard table clutter
 #
-# Fully unattended: runs all four cells sequentially, each in its own process so
-# one cell crashing does NOT abort the others, tees every cell to its own log,
-# saves rollout VIDEOS + HDF5 + records.jsonl per cell, then prints a paired
-# success-rate + Wilson-CI + within-scene McNemar summary.
+# Runs both cells sequentially, each in its own process so one cell crashing does
+# NOT abort the other, tees every cell to its own log, saves rollout VIDEOS + HDF5
+# + records.jsonl per cell, then prints a paired success-rate + Wilson-CI + McNemar
+# summary.
 #
-# Shared curobo knobs are FROZEN identically across all four cells, so the only
-# variable is (planner, scene). Seed acceptance is planner-independent, so within
-# each scene baseline and reachability see the SAME seeds -> paired comparison.
+# Shared curobo knobs are FROZEN identically across both cells, so the only
+# variable is the planner. Seed acceptance is planner-independent, so both planners
+# see the SAME seeds -> paired comparison.
+#
+# (Repurposed from the old 2x2 baseline-vs-reachability x scene grid; typical/mouse
+#  scene is left plumbed but off by default. Override ALGO_A/ALGO_B/SCENES to revive.)
 #
 # Usage (all optional; sensible defaults):
 #   NUM_SEEDS=50 CLUTTER_DENSITY=10 bash scripts/validation/run_2x2_planner_comparison.sh
@@ -44,9 +46,12 @@ BASE_CONFIG="${BASE_CONFIG:-bench_demo_office_clean}"
 # DEBUG=1 -> verbose per-move planning trace (ROBOTWIN_LOG_MOVE) in every cell log. Off by
 # default so big runs aren't flooded; turn on for small diagnostic runs.
 DEBUG="${DEBUG:-0}"
-# Which scenes to run. Default both; set SCENES="curated" to run only the (working) curated
-# scene, e.g. while the typical/mouse scene is still being sorted out.
-SCENES="${SCENES:-curated typical}"
+# Which scenes to run. Default curated only (occluder + clutter); set SCENES="curated typical"
+# to also run the mouse/clutter scene.
+SCENES="${SCENES:-curated}"
+# The two planners being compared (paired within each scene). Default baseline vs hamid.
+ALGO_A="${ALGO_A:-baseline}"
+ALGO_B="${ALGO_B:-hamid}"
 
 # ---- Frozen shared curobo knobs (identical for ALL four cells) ----
 export CUROBO_TRAJOPT_SEEDS="${CUROBO_TRAJOPT_SEEDS:-16}"
@@ -74,7 +79,7 @@ if [[ ! -x "$PYTHON" ]]; then
 fi
 
 echo "============================================================"
-echo " 2x2 planner comparison"
+echo " planner comparison: $ALGO_A vs $ALGO_B"
 echo "   seeds        : $NUM_SEEDS (from $SEED_START)"
 echo "   curated      : occluder ON, offset=$OFFSET, clutter=$CURATED_CLUTTER_DENSITY, bottle target"
 echo "   typical      : occluder OFF, clutter_density=$CLUTTER_DENSITY, mouse target"
@@ -118,24 +123,25 @@ scene_enabled () { [[ " $SCENES " == *" $1 "* ]]; }
 
 # ---- Curated scene (bottle + milk box + clutter): occluder ALWAYS on ----
 if scene_enabled curated; then
-  run_cell curated_baseline     "${COMMON[@]}" --out-dir "$CURATED_OUT" \
-    --offsets "$OFFSET" --clutter-densities "$CURATED_CLUTTER_DENSITY" --no-occluder-prob 0 --plan-algo baseline
-  run_cell curated_reachability "${COMMON[@]}" --out-dir "$CURATED_OUT" \
-    --offsets "$OFFSET" --clutter-densities "$CURATED_CLUTTER_DENSITY" --no-occluder-prob 0 --plan-algo reachability
+  run_cell "curated_$ALGO_A" "${COMMON[@]}" --out-dir "$CURATED_OUT" \
+    --offsets "$OFFSET" --clutter-densities "$CURATED_CLUTTER_DENSITY" --no-occluder-prob 0 --plan-algo "$ALGO_A"
+  run_cell "curated_$ALGO_B" "${COMMON[@]}" --out-dir "$CURATED_OUT" \
+    --offsets "$OFFSET" --clutter-densities "$CURATED_CLUTTER_DENSITY" --no-occluder-prob 0 --plan-algo "$ALGO_B"
 fi
 
 # ---- Typical scene (mouse + clutter): occluder ALWAYS off, clutter on ----
 if scene_enabled typical; then
-  run_cell typical_baseline     "${COMMON[@]}" --out-dir "$TYPICAL_OUT" \
-    --offsets "$OFFSET" --clutter-densities "$CLUTTER_DENSITY" --no-occluder-prob 1 --plan-algo baseline
-  run_cell typical_reachability "${COMMON[@]}" --out-dir "$TYPICAL_OUT" \
-    --offsets "$OFFSET" --clutter-densities "$CLUTTER_DENSITY" --no-occluder-prob 1 --plan-algo reachability
+  run_cell "typical_$ALGO_A" "${COMMON[@]}" --out-dir "$TYPICAL_OUT" \
+    --offsets "$OFFSET" --clutter-densities "$CLUTTER_DENSITY" --no-occluder-prob 1 --plan-algo "$ALGO_A"
+  run_cell "typical_$ALGO_B" "${COMMON[@]}" --out-dir "$TYPICAL_OUT" \
+    --offsets "$OFFSET" --clutter-densities "$CLUTTER_DENSITY" --no-occluder-prob 1 --plan-algo "$ALGO_B"
 fi
 
 # ---- Paired summary ----
 echo ""
 echo ">>> [$(date +%T)] Summarizing ..."
 "$PYTHON" "$SCRIPT_DIR/summarize_2x2_planner_comparison.py" --root "$OUT_ROOT" \
+  --scenes $SCENES --algos "$ALGO_A" "$ALGO_B" \
   2>&1 | tee "$OUT_ROOT/summary.txt"
 
 echo ""

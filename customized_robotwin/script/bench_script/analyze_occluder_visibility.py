@@ -408,6 +408,10 @@ def make_occluder_task():
             target_p0 = self.target_obj.get_pose().p        # original target location (pre-grasp)
             self._place_target_y = float(target_p0[1])      # available to backward subgoals
             arm_tag = ArmTag("right" if target_p0[0] > 0 else "left")
+            # Coarse stage where a curobo move first fails (set by _dbg below, read by
+            # run_rollout). None until plan_success drops.
+            self.rollout_failure_stage = None
+            self.rollout_failure_reason = None
 
             # --plan-algo baseline: reproduce dev's vanilla expert. The box still spawns and is
             # in curobo's world (update_world above), so curobo plans around it directly; we just
@@ -420,7 +424,15 @@ def make_occluder_task():
             # plan_path failure lands on + the EE height there, so INVALID_START_STATE_WORLD_
             # COLLISION can be tied to the grasp/lift/place step (baseline has none otherwise).
             _dbg_on = os.environ.get("ROBOTWIN_LOG_MOVE", "") == "1"
+            _STAGE_OF = {"after grasp": "forward/grasp", "after lift": "transition",
+                         "pre place": "backward-placement", "after place": "final descent"}
             def _dbg(step):
+                # Record the coarse failure stage the FIRST time plan_success drops: move()
+                # short-circuits every later move to a no-op, so the first _dbg after the drop
+                # names the phase that actually failed.
+                if (step in _STAGE_OF and not getattr(self, "plan_success", True)
+                        and self.rollout_failure_stage is None):
+                    self.rollout_failure_stage = _STAGE_OF[step]
                 if _dbg_on:
                     z = float(self.get_arm_pose(arm_tag)[2])
                     print(f"[baseline] {step}: plan_success={getattr(self, 'plan_success', None)} EE_z={z:.3f}")
@@ -1576,8 +1588,16 @@ def run(args):
     rollout = getattr(args, "rollout", False)
     ep_counter = 0   # unique episode id per rollout (-> video/episode{N}.mp4)
 
-    env = make_occluder_task()()
-    env.PLAN_ALGO = getattr(args, "plan_algo", "subgoal")
+    _algo = getattr(args, "plan_algo", "subgoal")
+    if _algo == "hamid":
+        # Hamid's single deployable planner, vendored as a separate class (scene-paired to our
+        # occluder scene). Runs his expert unmodified as a controlled comparison point; his
+        # class ignores PLAN_ALGO (its play_once is the one algorithm).
+        from hamid_occluder_expert import make_occluder_task as make_hamid_task
+        env = make_hamid_task()()
+    else:
+        env = make_occluder_task()()
+    env.PLAN_ALGO = _algo
     print(f"plan_algo={env.PLAN_ALGO}")
     print(f"seeds from {args.seed_start}, want {args.num_seeds} STABLE  offsets={offsets}  "
           f"clutter_densities={clutter_densities}  rollout={rollout}  camera={CAMERA}")
@@ -1725,6 +1745,10 @@ def run(args):
                     # have check_success False -> genuinely not placed / not released).
                     rec["plan_success"] = rollout_result.get("plan_success")
                     rec["check_success"] = rollout_result.get("check_success")
+                    # which stage the rollout reached / failed at (setup, forward/grasp,
+                    # transition, backward-placement, final descent, success check, success)
+                    rec["rollout_stage"] = rollout_result.get("rollout_stage")
+                    rec["rollout_failure_stage"] = rollout_result.get("rollout_failure_stage")
                     rec["rollout_ep"] = ep_counter
                     rec["rollout_video"] = artifact.get("video_relpath",
                                                         f"video/episode{ep_counter}.mp4")
@@ -1777,13 +1801,15 @@ def main():
                          "saves videos, and adds success-only distribution + P(success) per bucket)")
     ap.add_argument("--plot-only", action="store_true")
     ap.add_argument("--plan-algo", default="subgoal",
-                    choices=["subgoal", "reachability", "baseline", "dev"],
+                    choices=["subgoal", "reachability", "baseline", "dev", "hamid"],
                     help="expert planner: 'subgoal' (this file's default), 'reachability' "
                          "(check_ik_batch candidate search from 35-occluder-spawn-hamid-A), "
                          "'baseline' (subgoal with routing OFF -- carries harness tuning, NOT "
-                         "dev-faithful), or 'dev' (verbatim reproduction of dev's "
+                         "dev-faithful), 'dev' (verbatim reproduction of dev's "
                          "put_mouse_on_pad expert -- the TRUE old-planner control; pair with "
-                         "CUROBO_MAX_ATTEMPTS=10 for a full dev floor)")
+                         "CUROBO_MAX_ATTEMPTS=10 for a full dev floor), or 'hamid' (Hamid's "
+                         "single deployable planner from 35-occluder-spawn, vendored in "
+                         "hamid_occluder_expert.py and scene-paired to our occluder scene)")
     args = ap.parse_args()
 
     if not args.plot_only:
