@@ -718,7 +718,7 @@ class Bench_base_task(Base_Task):
             "robot_to_furniture": 0,
             "robot_to_static_object": 0,
             "target_to_static_object": 0,
-            "intended_to_static_object": 0,  # pushed via a robot-actuated body (drawer, ...)
+            "intended_to_static_object": 0,  # RETIRED 2026-07-14 (kept for schema compat, always 0): actuated-body shoves are contact-only
         }
         # Displacement-driven static-collision counting state (ported from the
         # collison_free_data_gen branch): a collision IS a static object moving
@@ -726,7 +726,7 @@ class Bench_base_task(Base_Task):
         # which body (robot / held target) last touched it.
         self._static_last_toucher: dict[int, str] = {}   # per_scene_id -> "robot"|"target"
         self._static_last_touch_step: dict[int, int] = {}  # per_scene_id -> _metric_step of last touch
-        self._counted_displaced_ids: set[int] = set()    # counted once per episode
+        self._counted_displaced_ids: set[int] = set()    # counted once per displacement EVENT (re-armed when the object settles + re-baselines)
         self._displaced_categories: dict[int, str] = {}  # per_scene_id -> counted category
         # "Actively moving" detector state for the per-frame collision flag:
         # rolling reference pose (~settle-window old) per object, and the last
@@ -949,11 +949,15 @@ class Bench_base_task(Base_Task):
             # completes STATIC_BASELINE_RESET_STEPS of stillness after having
             # moved; re-arms if it becomes active again. Objects that never
             # moved have no last-active entry and keep their episode-start
-            # baseline.
+            # baseline. The settle also ENDS the displacement event: the object
+            # becomes countable again, so knock -> settle -> knock again logs
+            # two collisions (counting is per displacement EVENT, not per
+            # object per episode).
             if (_last_act is not None
                     and self._metric_step - _last_act == self.STATIC_BASELINE_RESET_STEPS
                     and _sid in self.static_object_pose_start):
                 self.static_object_pose_start[_sid] = (_p, _q)
+                self._counted_displaced_ids.discard(_sid)
 
         for contact in contacts:
             entity0 = contact.bodies[0].entity
@@ -1038,16 +1042,14 @@ class Bench_base_task(Base_Task):
                 count_target_static = True
 
             # Robot-actuated body (e.g. the drawer being closed) hitting a static
-            # object: robot-caused through the operated body. One side intended,
-            # the other a plain static — intended<->intended (drawer's own links)
-            # and robot<->intended (the grasp itself) never land here.
+            # object: classified so the CONTACT flag records it (robot-caused
+            # through the operated body) — but NOT a collision (2026-07-14):
+            # no watch arming, no toucher attribution, no collision frames.
+            # grasp_actor never runs in pure policy EVAL, so the intended set
+            # is empty there; excluding it from collision on the collection
+            # side keeps eval collision numbers exactly comparable.
             if ((is_intended_0 and is_static_1 and not is_intended_1)
                     or (is_intended_1 and is_static_0 and not is_intended_0)):
-                static_entity = entity1 if is_static_1 else entity0
-                if _forceful:
-                    self._static_last_toucher[static_entity.per_scene_id] = "intended"
-                    self._static_last_touch_step[static_entity.per_scene_id] = self._metric_step
-                    self._static_watch_last_seen[static_entity.per_scene_id] = self._metric_step
                 count_intended_static = True
 
             # Optional dataset stream: every robot/target<->static contact POINT,
@@ -1124,8 +1126,9 @@ class Bench_base_task(Base_Task):
             #   + IN MOTION (see detector above).
             # A knock whose threshold crossing happens AFTER the contact is
             # handled by the watch-gated sweep below: exactly one frame — the
-            # crossing — gets flagged.
-            if count_static or count_target_static or count_intended_static:  # robot/target/actuated-body touching a static
+            # crossing — gets flagged. Actuated-body (drawer) shoves are
+            # contact-only, never collision.
+            if count_static or count_target_static:  # robot / held-target touching a static
                 _step_static = entity1 if is_static_1 else entity0
                 _ssid = _step_static.per_scene_id
                 if _forceful:
@@ -1188,8 +1191,7 @@ class Bench_base_task(Base_Task):
                 continue
             if self._static_object_has_significant_pose_change(sid, entity):
                 category = {"robot": "robot_to_static_object",
-                            "target": "target_to_static_object",
-                            "intended": "intended_to_static_object"}[toucher]
+                            "target": "target_to_static_object"}[toucher]
                 self.collision_metrics[category] = self.collision_metrics.get(category, 0) + 1
                 self._counted_displaced_ids.add(sid)
                 self._displaced_categories[sid] = category

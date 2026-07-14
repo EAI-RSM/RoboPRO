@@ -83,7 +83,7 @@ def _load_episode_meta(run_dir, ep_idx):
     evidence and should not be traced under a collision window."""
     p = os.path.join(run_dir, "scene_info.json")
     if not os.path.exists(p):
-        return None, {}, set()
+        return None, {}, set(), {}
     try:
         db = json.load(open(p, encoding="utf-8"))
         e = db.get(f"episode_{ep_idx}", {})
@@ -100,9 +100,9 @@ def _load_episode_meta(run_dir, ep_idx):
                 role_names.add(v)
             elif isinstance(v, (list, tuple)):
                 role_names.update(x for x in v if isinstance(x, str))
-        return ids, amap, role_names
+        return ids, amap, role_names, e.get("collision_metrics") or {}
     except Exception:
-        return None, {}, set()
+        return None, {}, set(), {}
 
 
 def _object_movement(pair, a, b, obj_poses, pose_ids, amap, role_names=frozenset()):
@@ -176,7 +176,7 @@ def show_episode(run_dir, ep_idx, min_impulse):
         attrs = dict(f.attrs)
         T = f["joint_action/vector"].shape[0] if "joint_action/vector" in f else None
 
-    pose_ids, amap, role_names = _load_episode_meta(run_dir, ep_idx)
+    pose_ids, amap, role_names, coll_metrics = _load_episode_meta(run_dir, ep_idx)
     dt = float(attrs.get("physics_timestep", 1.0 / 250.0))  # J (N*s) -> F ~ J/dt
 
     regime = {1: "BLIND planner (collision-unaware)",
@@ -186,6 +186,21 @@ def show_episode(run_dir, ep_idx, min_impulse):
     print(f"  frames: {T}  |  video: {os.path.relpath(video_path)} @ {fps:g} fps "
           f"({_fmt_t((T or 0) / fps)} long)")
     print(f"  regime: {regime}  |  metrics on: {attrs.get('enable_collision_metrics')}")
+    if coll_metrics:
+        # episode-level counters from scene_info.json: each object counted ONCE
+        # per episode (displacement crossing while watched / furniture impulse)
+        _cats = ("robot_to_static_object", "target_to_static_object",
+                 "intended_to_static_object", "robot_to_furniture")
+        total = coll_metrics.get("total_collision_count",
+                                 sum(int(coll_metrics.get(c) or 0) for c in _cats))
+        print(f"  episode collisions: {total} total (one per displacement event; "
+              f"an object that settles and is knocked again counts again)")
+        for cat in ("robot_to_static_object", "target_to_static_object",
+                    "intended_to_static_object", "robot_to_furniture"):
+            names = coll_metrics.get(f"{cat}_names") or []
+            if coll_metrics.get(cat):
+                print(f"      {cat}: {coll_metrics[cat]}"
+                      + (f"  ({', '.join(names)})" if names else ""))
 
     # ── contact: impulse-filtered ────────────────────────────────────────────
     if contact is None:

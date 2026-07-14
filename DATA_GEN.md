@@ -233,7 +233,10 @@ displacement, 10 N furniture impulse gate** (`_bench_base_task.py` constants).
   DESTINATIONS (`des_obj*`), and INTENDED contacts (anything the task passed to
   `grasp_actor` — drawer/appliance handles + their articulation links).
 - `collision[t]` = impulse-gated non-gripper robot↔furniture hit, OR a static
-  object simultaneously (a) touched by the robot / held target / actuated body,
+  object simultaneously (a) touched by the robot / held target (an object
+  shoved by a robot-ACTUATED body — the drawer being closed — is CONTACT-only,
+  never collision: grasp_actor never runs in pure policy eval, so excluding it
+  keeps eval collision numbers exactly comparable to collection),
   (b) displaced ≥ threshold from its episode-start pose, and (c) **in
   motion** — where the touch must be FORCE-BEARING (impulse > 1e-6 N·s): a
   forceless graze on a moving object, or an object sliding back along the arm
@@ -249,9 +252,12 @@ displacement, 10 N furniture impulse gate** (`_bench_base_task.py` constants).
   again. No baseline snapshot ⇒
   NOT a collision — no phantom flags.
 - Episode-level counts (scene_info `collision_metrics`; categories
-  robot/target/intended_to_static_object + robot_to_furniture) use
-  displacement-driven counting: a touched static object is counted once when
-  its cumulative pose change from baseline crosses threshold. The watch starts
+  robot/target_to_static_object + robot_to_furniture (intended_to_static_object
+  retired 2026-07-14, kept in the schema as always-0)) use
+  displacement-driven counting: a touched static object is counted once per
+  DISPLACEMENT EVENT, at the moment its cumulative pose change from baseline
+  crosses threshold; the settled re-baseline ends the event and re-arms the
+  object, so knock → settle (90 still substeps) → knock again = 2 collisions. The watch starts
   at a FORCE-BEARING touch (impulse > 1e-6 N·s — same principle as the contact
   flag; forceless margin contacts earn no causal credit) and stays live while
   the object is touched-with-force OR still moving (a slow topple is followed
