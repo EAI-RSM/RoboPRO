@@ -250,10 +250,6 @@ Common setup problems and where their fixes live:
 | `pip install -r script/requirements.txt` can't find a `sapien==3.0.0b1` wheel (aarch64 / ARM machines) | Build SAPIEN from source: [docs/setup_sapien_aarch64.md](docs/setup_sapien_aarch64.md) |
 | Eval success rates differ unexpectedly from reported numbers | Check `sapien.__version__` — must be `3.0.0b1`; other versions change physics/rendering and skew results (Installation step 2) |
 | `ModuleNotFoundError: pkg_resources` when importing sapien | `pip install setuptools==69.5.1` (Installation step 2) |
-| sapien/torch resolve to `~/.local/lib` instead of the conda env | Set `PYTHONNOUSERSITE=1` on the env (Installation step 1) |
-| CuRobo can't attach grasped objects / missing `attached_object` link | Run `scripts/install/patch_aloha_curobo.py` (Installation step 3) |
-| Stale collision meshes across episodes | Apply the `clear_cache` patch (Installation step 4) |
-| `scikit-image` prints a scipy version-conflict warning | Harmless — see Installation step 2 |
 
 ## License
 
