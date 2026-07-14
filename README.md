@@ -247,7 +247,7 @@ Common setup problems and where their fixes live:
 
 | Symptom | Fix |
 |---|---|
-| `pip install -r script/requirements.txt` can't find a `sapien==3.0.0b1` wheel (aarch64 / ARM machines) | Build SAPIEN from source: [docs/setup_sapien_aarch64.md](docs/setup_sapien_aarch64.md) — includes its own error table for build failures (pybind11 `smart_holder`, NEON intrinsics, OIDN sm_120, PhysX aarch64 libs) |
+| `pip install -r script/requirements.txt` can't find a `sapien==3.0.0b1` wheel (aarch64 / ARM machines) | Build SAPIEN from source: [docs/setup_sapien_aarch64.md](docs/setup_sapien_aarch64.md) |
 | Eval success rates differ unexpectedly from reported numbers | Check `sapien.__version__` — must be `3.0.0b1`; other versions change physics/rendering and skew results (Installation step 2) |
 | `ModuleNotFoundError: pkg_resources` when importing sapien | `pip install setuptools==69.5.1` (Installation step 2) |
 | sapien/torch resolve to `~/.local/lib` instead of the conda env | Set `PYTHONNOUSERSITE=1` on the env (Installation step 1) |

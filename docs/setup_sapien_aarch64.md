@@ -1,24 +1,15 @@
 # Building SAPIEN 3.0.0b1 from source on aarch64 (GB10 / DGX Spark)
 
-PyPI ships no aarch64 wheel for `sapien==3.0.0b1`, so on ARM machines (e.g. NVIDIA GB10
-/ DGX Spark) the `pip install -r script/requirements.txt` step fails to resolve sapien.
-The fix is to build the wheel from source. The script below automates the whole build,
-including the patches needed for aarch64 and for the GB10's sm_121 GPU (Blackwell,
-PTX-compatible with sm_120).
+PyPI ships no aarch64 wheel for `sapien==3.0.0b1`, so on ARM machines the
+`pip install -r script/requirements.txt` step fails to resolve sapien. Build the wheel
+from source with the script below, then re-run the requirements install.
 
-## Prerequisites
-
-- `gcc-11` / `g++-11` (`sudo apt install gcc-11 g++-11`) — newer GCC breaks the vendored deps
-- CUDA 12.x toolkit (nvcc), `cmake`, `git`, `curl`, `unzip`
-- The `robopro` conda env activated (the wheel is built against its Python)
-- Two variables set before running:
+Set these two variables before running:
 
 ```bash
 THIRD_PARTY_DIR=/path/to/third_party    # where the SAPIEN source tree will live
-CUDA_12=/usr/local/cuda-12.4            # your CUDA 12.x install root
+CUDA_12=/usr/local/cuda-12              # your CUDA 12.x install root
 ```
-
-## Build script
 
 ```bash
 # ── SAPIEN 3.0.0b1 (build from source for aarch64) ───────────────────────────
@@ -127,42 +118,4 @@ git submodule update --init --recursive
 pip install "${SAPIEN_SRC}/dist"/sapien-*.whl
 ```
 
-The build runs twice by design: the first `python setup.py bdist_wheel` only exists to
-make CMake fetch the vendored dependencies (ktx, OIDN, PhysX5, pybind11) into
-`sapien_build/_sapien_deps/`, and is allowed to fail. The patches are then applied to
-those fetched sources, and the second build produces the wheel. If the build fails, the
-full log is at `${SAPIEN_SRC}/sapien_build_log.txt`.
-
-After a successful `pip install`, verify with:
-
-```bash
-python -c "import sapien; print(sapien.__version__)"
-```
-
-## Troubleshooting
-
-Each patch in the script exists because of a real build failure. If you hit one of
-these errors, the corresponding patch did not apply (e.g. the file path changed in a
-newer SAPIEN commit) — fix the patch rather than the symptom.
-
-| Error in `sapien_build_log.txt` | Cause | Handled by |
-|---|---|---|
-| `fatal: Remote branch smart_holder not found` (pybind11 clone fails) | pybind11's `smart_holder` branch was archived to `archive/smart_holder` | pybind11 `sed` patches (applied twice: once to the repo copy, once to the copy CMake fetches during the first build) |
-| `nvcc fatal : Unsupported gpu architecture 'compute_86'` or kernels silently built for the wrong GPU | CMakeLists hardcodes `CUDA_ARCHITECTURES "60;61;70;75;80;86"`, which excludes Blackwell | `CUDA_ARCHITECTURES` sed patches + `CUDAARCHS=120` export |
-| `error: cannot convert 'int32x4_t' to 'int8x16_t'` (or similar NEON intrinsic type errors) in `astcenc_vecmathlib_neon_4.h` | ASTC encoder's NEON code relies on Clang-only implicit vector conversions; GCC enforces strict types | ASTC NEON `sed` patches |
-| OIDN build fails with unsupported gencode, or at runtime `OIDN: unsupported CUDA device` | OIDN's CMake has no sm_120 gencode entry, and `maxSMArch = 99` rejects the GB10 (sm_121) at device init | OIDN CMakeLists + `cuda_device.h` patches |
-| Link errors against PhysX (`skipping incompatible ... libPhysX*.a`, undefined `Px*` symbols) | SAPIEN downloads x86_64 PhysX5 precompiled libs | PhysX5 aarch64 lib replacement |
-| Random header-not-found or wrong-header errors from vendored deps | A conda env leaking `CPLUS_INCLUDE_PATH` / `C_INCLUDE_PATH` into the build | `unset CPLUS_INCLUDE_PATH C_INCLUDE_PATH` in the subshell |
-| C++ errors deep inside vendored deps with GCC 12/13 | The 3.0.0b1 sources don't compile with newer GCC | `CC`/`CXX`/`CUDAHOSTCXX` pinned to gcc-11 |
-| OIDN still built for the old arch after re-running the script | Stale CMake cache in `_sapien_build` / `oidn-build` | The `rm -rf` of both build dirs before the final build |
-
-Other things worth knowing:
-
-- **Re-running after a failure:** the script starts with `rm -rf "${SAPIEN_SRC}"`, i.e. a
-  full re-clone and re-download. If you're iterating on a single patch, comment out the
-  `rm -rf`/`git clone` lines and re-run from the subshell onward.
-- **Different GPU arch:** `CUDAARCHS=120` and the sm_120 patches target GB10/Blackwell.
-  For another GPU, set `CUDAARCHS` to your arch (e.g. `90` for GH200) and adjust the
-  OIDN gencode/`maxSMArch` patches accordingly.
-- **`pkg_resources` missing at import time:** sapien 3.0.0b1 imports `pkg_resources`;
-  make sure `setuptools==69.5.1` is installed in the env (see main README, step 2).
+If the build fails, the full log is at `${SAPIEN_SRC}/sapien_build_log.txt`.
