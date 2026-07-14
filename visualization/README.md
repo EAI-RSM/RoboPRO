@@ -94,7 +94,7 @@ python visualization/export.py <run_dir> 0 --what bbox3d_exact --frames all
 | `pcd` | `pcd_<cam>_f<k>.ply` | dense role-colored point cloud (+ exact-box wireframes when available), open in MeshLab. Honors `--frames`. |
 | `bbox2d` | `bbox2d.json` | per frame, per object: pixel box (xyxy) + id + name + role |
 | `bbox3d` | `bbox3d.json` | per frame, per object: world AABB of its **visible surface** (what the camera sees) |
-| `bbox3d_exact` | `bbox3d_exact.json` | per frame, per object: **exact full-extent** world AABB + pose from physx (incl. occluded parts). Needs `actor_bbox` in the HDF5. |
+| `bbox3d_exact` | `bbox3d_exact.json` | per frame, per object: **exact full-extent ORIENTED box** (center/half_size/quat/corners) aligned to the object's own pose (incl. occluded parts). Needs `actor_bbox` in the HDF5. |
 | always | `meta.json` | id→name map, role→ids, units, `actor_bbox_available` flag |
 
 Notes:

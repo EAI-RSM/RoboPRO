@@ -22,16 +22,17 @@ from argparse import ArgumentParser
 
 from export_scene import export_scene
 
-# grounding masking (target/bin per stage) is a first-class per-episode output:
-# resolve it from the just-written HDF5 + scene_info and save masking/episode{i}.json.
+# grounding is a first-class per-episode output: from the just-written HDF5 + scene_info
+# we save masking/episode{i}.json (stage metadata) AND bake the target/bin masks into the
+# HDF5, so a dataloader gets everything by reading the files (no functions to call).
 _VIZ_DIR = os.path.abspath(os.path.join(
     os.path.dirname(os.path.abspath(__file__)), "..", "..", "visualization"))
 sys.path.insert(0, _VIZ_DIR)
 try:
-    from masking_resolve import write_masking_json
+    from masking_resolve import finalize_grounding
 except Exception as _e:  # noqa: BLE001
-    write_masking_json = None
-    print(f"\033[93mmasking_resolve unavailable — masking.json will be skipped: {_e}\033[0m")
+    finalize_grounding = None
+    print(f"\033[93mmasking_resolve unavailable — grounding will be skipped: {_e}\033[0m")
 
 current_file_path = os.path.abspath(__file__)
 parent_directory = os.path.dirname(current_file_path)
@@ -413,13 +414,14 @@ def run(TASK_ENV, args):
                         if os.path.exists(ext_path):
                             os.remove(ext_path)
                     continue
-                # episode kept -> derive the grounding masking sidecar from the HDF5
-                # (target/bin per stage, all frames) so it ships beside scene_info.json.
-                if write_masking_json is not None:
+                # episode kept -> derive grounding from the HDF5: masking sidecar +
+                # baked target/bin masks in the HDF5 (all frames, all cameras).
+                if finalize_grounding is not None:
                     try:
-                        write_masking_json(args["save_path"], episode_idx)
+                        finalize_grounding(args["save_path"], episode_idx,
+                                           obj_pad=args.get("table_obj_pad"))
                     except Exception as _me:  # noqa: BLE001
-                        print(f"\033[93mmasking.json failed (episode {episode_idx}): {_me}\033[0m")
+                        print(f"\033[93mgrounding failed (episode {episode_idx}): {_me}\033[0m")
             except Exception as e:
                 # one bad episode (CuRobo/mesh crash, missing frames, etc.) must NOT
                 # kill the whole run — log it, record it, clean up, move on.

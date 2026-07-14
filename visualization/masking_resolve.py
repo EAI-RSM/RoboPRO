@@ -81,32 +81,48 @@ def load_sidecar(run_dir, ep):
     return ep_info, id_map, roles, robot_ids
 
 
-def _quat2mat(q):
-    """quaternion (w, x, y, z) -> 3x3 rotation matrix."""
-    w, x, y, z = q
-    return np.array([
-        [1 - 2 * (y * y + z * z), 2 * (x * y - z * w), 2 * (x * z + y * w)],
-        [2 * (x * y + z * w), 1 - 2 * (x * x + z * z), 2 * (y * z - x * w)],
-        [2 * (x * z - y * w), 2 * (y * z + x * w), 1 - 2 * (x * x + y * y)]])
+_OBB_SIGNS = np.array([[sx, sy, sz] for sx in (-1, 1) for sy in (-1, 1) for sz in (-1, 1)], float)
+
+
+def _quat_to_R(q):
+    """quaternion(s) (...,4) wxyz -> rotation matrix/matrices (...,3,3). Works for a
+    single quat (4,) or a batched array."""
+    q = np.asarray(q, float)
+    w, x, y, z = q[..., 0], q[..., 1], q[..., 2], q[..., 3]
+    R = np.empty(q.shape[:-1] + (3, 3), float)
+    R[..., 0, 0] = 1 - 2 * (y*y + z*z); R[..., 0, 1] = 2 * (x*y - z*w); R[..., 0, 2] = 2 * (x*z + y*w)
+    R[..., 1, 0] = 2 * (x*y + z*w); R[..., 1, 1] = 1 - 2 * (x*x + z*z); R[..., 1, 2] = 2 * (y*z - x*w)
+    R[..., 2, 0] = 2 * (x*z - y*w); R[..., 2, 1] = 2 * (y*z + x*w); R[..., 2, 2] = 1 - 2 * (x*x + y*y)
+    return R
+
+
+def _obb_to_aabb(center, half, quat):
+    """Oriented box arrays (center/half (...,3), quat (...,4)) -> the axis-aligned bound
+    (amin, amax). Used to derive an AABB for internal containment checks when only the
+    OBB is stored."""
+    R = _quat_to_R(quat)
+    ext = np.matmul(np.abs(R), np.asarray(half, float)[..., None])[..., 0]
+    center = np.asarray(center, float)
+    return center - ext, center + ext
+
+
+def _obb_dict(center, half, quat):
+    """Single oriented box (center, half, quat) -> serializable dict with 8 world corners."""
+    center, half = np.asarray(center, float), np.asarray(half, float)
+    corners = (_OBB_SIGNS * half) @ _quat_to_R(quat).T + center
+    return {"center": center.round(4).tolist(), "half_size": half.round(4).tolist(),
+            "quat": np.asarray(quat, float).round(6).tolist(), "corners": corners.round(4).tolist()}
 
 
 def obb_from_local(pose, lmn, lmx):
-    """Oriented box from a world pose (x,y,z,qw,qx,qy,qz) + local-frame extents ->
-    dict(center, half_size, quat, corners) in world frame, or None if the object had
-    no boxable geometry (local extents NaN -> caller falls back to the AABB)."""
+    """LEGACY (pre-OBB data): build the box dict from a world pose (x,y,z,qw,qx,qy,qz) +
+    local-frame extents, or None if the object had no boxable geometry."""
     lmn, lmx = np.asarray(lmn, float), np.asarray(lmx, float)
     if not (np.all(np.isfinite(lmn)) and np.all(np.isfinite(lmx))):
         return None
     p = np.asarray(pose, float)
-    pos, q = p[:3], p[3:7]
-    R = _quat2mat(q)
-    c_local, half = (lmn + lmx) / 2.0, (lmx - lmn) / 2.0
-    signs = np.array([[sx, sy, sz] for sx in (-1, 1) for sy in (-1, 1) for sz in (-1, 1)], float)
-    corners = (signs * half + c_local) @ R.T + pos
-    return {"center": (R @ c_local + pos).round(4).tolist(),
-            "half_size": half.round(4).tolist(),
-            "quat": q.round(6).tolist(),
-            "corners": corners.round(4).tolist()}
+    center = _quat_to_R(p[3:7]) @ ((lmn + lmx) / 2.0) + p[:3]
+    return _obb_dict(center, (lmx - lmn) / 2.0, p[3:7])
 
 # ---- tunables (Phase 3 knobs) -------------------------------------------------
 MOVE_MIN = 0.05      # a "mover" must displace >= 5 cm over the episode
@@ -148,26 +164,36 @@ def task_from_run_dir(run_dir):
     return os.path.basename(os.path.dirname(os.path.abspath(run_dir)))
 
 
+def _read_bbox_group(g):
+    """One bbox group -> (id, center(T,N,3), quat(T,N,4), amin(T,N,3), amax(T,N,3)).
+    Handles the OBB schema (obb_center/half/quat, current) and the legacy pose+AABB
+    schema. Center/quat feed motion segmentation; amin/amax feed containment/tables."""
+    bid = g["id"][:]
+    if "obb_center" in g:
+        center, half, quat = g["obb_center"][:], g["obb_half"][:], g["obb_quat"][:]
+        amin, amax = _obb_to_aabb(center, half, quat)
+        return bid, center, quat, amin, amax
+    pose = g["pose"][:]                          # legacy (T, N, 7)
+    return bid, pose[:, :, :3], pose[:, :, 3:7], g["aabb_min"][:], g["aabb_max"][:]
+
+
 def load_actor_bbox(h5path):
-    """Per-frame id/pose/AABB for rigid actors, with articulation links (link_bbox)
-    appended as extra columns when present -- so drawer/fridge/cabinet/microwave links
-    resolve by the SAME motion + containment rules as rigid actors. Absent link_bbox
-    (older data) => rigid-only, identical to before."""
+    """Per-frame id/center/orientation/AABB for rigid actors, with articulation links
+    (link_bbox) appended as extra columns when present -- so drawer/fridge/cabinet/
+    microwave links resolve by the SAME motion + containment rules as rigid actors.
+    Absent link_bbox (older data) => rigid-only. Accepts both the OBB and legacy schema."""
     with h5py.File(h5path, "r") as f:
         if "actor_bbox" not in f:
             raise SystemExit(f"!! {h5path} has no actor_bbox group (need data_type.actor_bbox on)")
-        bid = f["actor_bbox/id"][:]              # (T, N)
-        pose = f["actor_bbox/pose"][:, :, :3]    # (T, N, 3) positions
-        amin = f["actor_bbox/aabb_min"][:]       # (T, N, 3)
-        amax = f["actor_bbox/aabb_max"][:]       # (T, N, 3)
-        quat = f["actor_bbox/pose"][:, :, 3:7]   # (T, N, 4) wxyz — for revolute doors
+        bid, pose, quat, amin, amax = _read_bbox_group(f["actor_bbox"])
         if "link_bbox" in f:
-            T = min(bid.shape[0], f["link_bbox/id"].shape[0])
-            bid = np.concatenate([bid[:T], f["link_bbox/id"][:T]], axis=1)
-            pose = np.concatenate([pose[:T], f["link_bbox/pose"][:T, :, :3]], axis=1)
-            quat = np.concatenate([quat[:T], f["link_bbox/pose"][:T, :, 3:7]], axis=1)
-            amin = np.concatenate([amin[:T], f["link_bbox/aabb_min"][:T]], axis=1)
-            amax = np.concatenate([amax[:T], f["link_bbox/aabb_max"][:T]], axis=1)
+            lbid, lpose, lquat, lamin, lamax = _read_bbox_group(f["link_bbox"])
+            T = min(bid.shape[0], lbid.shape[0])
+            bid = np.concatenate([bid[:T], lbid[:T]], axis=1)
+            pose = np.concatenate([pose[:T], lpose[:T]], axis=1)
+            quat = np.concatenate([quat[:T], lquat[:T]], axis=1)
+            amin = np.concatenate([amin[:T], lamin[:T]], axis=1)
+            amax = np.concatenate([amax[:T], lamax[:T]], axis=1)
     return (bid, pose.astype(np.float64), quat.astype(np.float64),
             amin.astype(np.float64), amax.astype(np.float64))
 
@@ -731,26 +757,28 @@ def load_masking(run_dir, ep):
 
 
 def build_obbs(actor_bbox, k, id_map=None, drop_scene=True):
-    """Per-object 3D boxes at frame k from an actor_bbox (or link_bbox) group of arrays
-    (id/pose/aabb_min/aabb_max[/local_min/local_max]). Each entry carries the oriented
-    box ('obb'; None if the body has no local extents -> use the AABB) + the world AABB.
-    The reference a dataloader uses to build 3D boxes straight from the HDF5."""
-    ids, pose = actor_bbox["id"][k], actor_bbox["pose"][k]
-    amn, amx = actor_bbox["aabb_min"][k], actor_bbox["aabb_max"][k]
-    lmn, lmx = actor_bbox.get("local_min"), actor_bbox.get("local_max")
+    """Per-object oriented 3D boxes at frame k from an `actor_bbox` (or `link_bbox`) group
+    of arrays. Reads the stored OBB (obb_center/half/quat) directly, or reconstructs it
+    from the legacy pose+local schema. Each entry: {id, name, obb:{center,half_size,quat,
+    corners}}. The reference a dataloader uses to build 3D boxes straight from the HDF5."""
+    ids = actor_bbox["id"][k]
+    have_obb = "obb_center" in actor_bbox
+    if not have_obb:
+        pose = actor_bbox["pose"][k]
+        lmn, lmx = actor_bbox.get("local_min"), actor_bbox.get("local_max")
     out = []
     for j in range(len(ids)):
         i = int(ids[j])
         name = id_map.get(i, "") if id_map else ""
         if drop_scene and id_map is not None and is_scene(name):
             continue
-        mn, mx = np.asarray(amn[j], float), np.asarray(amx[j], float)
-        out.append({
-            "id": i, "name": name,
-            "obb": (obb_from_local(pose[j], lmn[k][j], lmx[k][j])
-                    if lmn is not None and lmx is not None else None),
-            "aabb_min": mn.round(4).tolist(), "aabb_max": mx.round(4).tolist(),
-            "pose": np.asarray(pose[j], float).round(4).tolist()})
+        if have_obb:
+            obb = _obb_dict(actor_bbox["obb_center"][k][j], actor_bbox["obb_half"][k][j],
+                            actor_bbox["obb_quat"][k][j])
+        else:
+            obb = (obb_from_local(pose[j], lmn[k][j], lmx[k][j])
+                   if lmn is not None and lmx is not None else None)
+        out.append({"id": i, "name": name, "obb": obb})
     return out
 
 
@@ -770,27 +798,96 @@ def build_masks(run_dir, ep, frame, cam="countertop_camera", masking=None):
                  if "depth" in g else None)
         K, E = np.asarray(g["intrinsic_cv"]), np.asarray(g["extrinsic_cv"])
         abox = None
-        if "actor_bbox" in f:
-            ab = f["actor_bbox"]
-            abox = {kk: np.asarray(ab[kk]) for kk in ("id", "aabb_min", "aabb_max")}
-    tgt = np.zeros(seg.shape, bool)
-    binm = np.zeros(seg.shape, bool)
+        if "actor_bbox" in f:                    # footprints for the table padding
+            bid, _, _, amin, amax = _read_bbox_group(f["actor_bbox"])
+            abox = {"id": bid, "aabb_min": amin, "aabb_max": amax}
     st = stage_at(masking, frame)
-    if st is not None:
-        tgt = seg == int(st["target_id"])
-        b = st["bin"]
-        bt = b["bin_type"]
-        if bt == "object":
-            binm = seg == int(b["bin_id"])
-        elif bt.startswith("region") and depth is not None:
-            Kf = K[frame] if K.ndim == 3 else K
-            Ef = E[frame] if E.ndim == 3 else E
-            world, valid = backproject_full(depth, Kf, Ef)
+    wv = (None, None)
+    if st is not None and st["bin"]["bin_type"].startswith("region") and depth is not None:
+        Kf = K[frame] if K.ndim == 3 else K
+        Ef = E[frame] if E.ndim == 3 else E
+        wv = backproject_full(depth, Kf, Ef)
+    lab = _grounding_label_map(seg, st, table_ids, id_map, robot_ids, abox, frame, wv)
+    return {"target": lab == 1, "bin": lab == 2, "stage": st}
+
+
+def _grounding_label_map(seg, st, table_ids, id_map, robot_ids, abox, frame, world_valid):
+    """(H,W) uint8 map: 0=background, 1=target, 2=bin, for one frame's stage. Target
+    wins over bin where they'd overlap. This is what gets baked into the HDF5."""
+    lab = np.zeros(seg.shape, np.uint8)
+    if st is None:
+        return lab
+    b = st["bin"]
+    bt = b["bin_type"]
+    if bt == "object":
+        lab[seg == int(b["bin_id"])] = 2
+    elif bt.startswith("region"):
+        world, valid = world_valid
+        if world is not None:
             rects = (table_obstacle_rects(abox, frame, id_map, robot_ids, int(st["target_id"]),
                                           b.get("obj_pad", TABLE_OBJ_PAD), b.get("surface_z"))
                      if bt == "region_table" else None)
-            binm = region_bin_mask(b, seg, table_ids, world, valid, rects)
-    return {"target": tgt, "bin": binm, "stage": st}
+            lab[region_bin_mask(b, seg, table_ids, world, valid, rects)] = 2
+    lab[seg == int(st["target_id"])] = 1
+    return lab
+
+
+def bake_grounding_masks(run_dir, ep, cams=None, masking=None):
+    """Write a per-frame grounding label map (0=none,1=target,2=bin, PNG-encoded like the
+    segmentation) into the HDF5 under observation/<cam>/grounding_mask, for every camera.
+    The padding/region math is applied here ONCE so a dataloader reads finished masks and
+    never calls back into this module. Idempotent (overwrites)."""
+    if masking is None:
+        masking = load_masking(run_dir, ep)
+    _, id_map, _, robot_ids = load_sidecar(run_dir, ep)
+    table_ids = table_ids_of(id_map)
+    need_region = any(s["bin"]["bin_type"].startswith("region") for s in masking["stages"])
+    with h5py.File(os.path.join(run_dir, "data", f"episode{ep}.hdf5"), "a") as f:
+        abox = None
+        if "actor_bbox" in f:
+            bid, _, _, amin, amax = _read_bbox_group(f["actor_bbox"])
+            abox = {"id": bid, "aabb_min": amin, "aabb_max": amax}
+        obs = f["observation"]
+        for cam in (cams or list(obs.keys())):
+            g = obs.get(cam)
+            if g is None or "actor_segmentation" not in g:
+                continue
+            seg = load_seg(g["actor_segmentation"])           # (T,H,W)
+            depth = K = E = None
+            if need_region and "depth" in g:
+                depth = np.stack(decode_frames(g["depth"], cv2.IMREAD_UNCHANGED)).astype(np.float32)
+                K, E = np.asarray(g["intrinsic_cv"]), np.asarray(g["extrinsic_cv"])
+            enc = []
+            for t in range(seg.shape[0]):
+                st = stage_at(masking, t)
+                wv = (None, None)
+                if st is not None and st["bin"]["bin_type"].startswith("region") and depth is not None:
+                    Kf = K[t] if K.ndim == 3 else K
+                    Ef = E[t] if E.ndim == 3 else E
+                    wv = backproject_full(depth[t], Kf, Ef)
+                lab = _grounding_label_map(seg[t], st, table_ids, id_map, robot_ids, abox, t, wv)
+                enc.append(cv2.imencode(".png", lab)[1].tobytes())
+            maxlen = max(len(b) for b in enc)
+            if "grounding_mask" in g:
+                del g["grounding_mask"]
+            g.create_dataset("grounding_mask", data=np.array(enc, dtype=f"S{maxlen}"))
+    return masking
+
+
+def finalize_grounding(run_dir, ep, cams=None, obj_pad=None):
+    """Collection hook (called per kept episode): resolve the stages, write the metadata
+    sidecar masking/episode{ep}.json, and bake the grounding masks into the HDF5 -- so the
+    episode ships self-contained (HDF5 has masks + oriented boxes, no functions needed)."""
+    global TABLE_OBJ_PAD
+    if obj_pad is not None:
+        TABLE_OBJ_PAD = float(obj_pad)
+    masking = resolve_episode(run_dir, ep, verbose=False)
+    d = os.path.join(run_dir, "masking")
+    os.makedirs(d, exist_ok=True)
+    with open(os.path.join(d, f"episode{ep}.json"), "w") as fp:
+        json.dump(masking, fp, indent=2)
+    bake_grounding_masks(run_dir, ep, cams=cams, masking=masking)
+    return masking
 
 
 def main():

@@ -32,12 +32,12 @@ from typing import Optional, Literal
 
 
 # --- oriented-box helpers ---------------------------------------------------
-# actor_bbox/link_bbox store the WORLD axis-aligned box (inflates for rotated
-# objects). Recording each body's box in ITS OWN frame (constant for a rigid
-# body) lets offline tools reconstruct a tight ORIENTED box from local extents +
-# the per-frame pose (matters for grasping). We read it straight off the physx
-# collision shapes; all frames are optional -> unsupported shapes fall back to
-# the world AABB downstream (local_min/max = NaN).
+# actor_bbox / link_bbox store an ORIENTED box (center, half-size, quaternion)
+# aligned to each body's own pose -- a tight, grasp-relevant box, unlike an
+# axis-aligned box which inflates when the object is rotated. The box size comes
+# from the body's local-frame extents, read straight off the physx collision
+# shapes (visual mesh as fallback); combined with the per-frame pose in
+# _obb_fields. Bodies with no boxable geometry fall back to the world AABB.
 def _obb_box_corners(mn, mx):
     mn, mx = np.asarray(mn, float), np.asarray(mx, float)
     return np.array([[mn[0] if sx < 0 else mx[0],
@@ -158,6 +158,23 @@ def _local_aabb(components):
     body that reports the world AABB may be a render body with no collision shapes."""
     components = list(components)
     return _collision_local_aabb(components) or _render_local_aabb(components)
+
+
+def _obb_fields(pos, quat, la, world_aabb):
+    """Oriented box (center, half, quat) in the WORLD frame from a body's pose + its
+    local-frame AABB. This is what we STORE (the AABB is derivable from it and is not
+    kept). Falls back to the world AABB as an axis-aligned box (identity quat) when the
+    body has no boxable geometry, so every body still gets a valid box."""
+    quat = np.asarray(quat, float)
+    if la:
+        lmn, lmx = np.asarray(la[0], float), np.asarray(la[1], float)
+        R = t3d.quaternions.quat2mat(quat)
+        center = np.asarray(pos, float) + R @ ((lmn + lmx) / 2.0)
+        half = (lmx - lmn) / 2.0
+    else:
+        mn, mx = np.asarray(world_aabb[0], float), np.asarray(world_aabb[1], float)
+        center, half, quat = (mn + mx) / 2.0, (mx - mn) / 2.0, np.array([1.0, 0.0, 0.0, 0.0])
+    return (center.astype(np.float32), half.astype(np.float32), quat.astype(np.float32))
 
 
 current_file_path = os.path.abspath(__file__)
@@ -658,15 +675,17 @@ class Base_Task(gym.Env):
         # pointcloud
         if self.data_type.get("pointcloud", False):
             pkl_dic["pointcloud"] = self.cameras.get_pcd(self.data_type.get("conbine", False))
-        # actor_bbox: exact per-frame 6-DoF pose + world AABB for every rigid scene
-        # object, straight from the physics engine. Unlike camera-derived boxes this
-        # includes occluded/out-of-view extents and CANNOT be reconstructed from
-        # rgb/depth after the fact — it must be recorded while the scene exists.
+        # actor_bbox: per-frame ORIENTED 3D box (center, half-size, quaternion) for every
+        # rigid scene object, aligned to the object's own pose -> grasp-relevant, unlike
+        # an axis-aligned box which inflates when the object is rotated. Built from the
+        # physics pose + the object's local-frame extents (collision geometry, else the
+        # visual mesh). CANNOT be reconstructed from rgb/depth; recorded while the scene
+        # exists. The axis-aligned AABB is derivable from this and is deliberately NOT kept.
         if self.data_type.get("actor_bbox", False):
             lcache = getattr(self, "_local_aabb_cache", None)
             if lcache is None:
                 lcache = self._local_aabb_cache = {}
-            ids, poses, mins, maxs, lmins, lmaxs = [], [], [], [], [], []
+            ids, ocen, ohalf, oquat = [], [], [], []
             for actor in self.scene.get_all_actors():
                 pid = getattr(actor, "per_scene_id", None)
                 if pid is None:
@@ -683,34 +702,27 @@ class Base_Task(gym.Env):
                 if aabb is None:
                     continue
                 p = actor.get_pose()
-                ids.append(int(pid))
-                poses.append(np.concatenate([p.p, p.q]).astype(np.float32))
-                mins.append(np.asarray(aabb[0], np.float32))
-                maxs.append(np.asarray(aabb[1], np.float32))
-                # local-frame extents (constant per rigid body) -> oriented box offline
                 la = lcache.get(pid)
                 if la is None:
                     la = _local_aabb(getattr(actor, "components", []))
                     lcache[pid] = la if la is not None else False
-                lmins.append(np.asarray(la[0], np.float32) if la
-                             else np.full(3, np.nan, np.float32))
-                lmaxs.append(np.asarray(la[1], np.float32) if la
-                             else np.full(3, np.nan, np.float32))
+                c, h, qq = _obb_fields(p.p, p.q, la, aabb)
+                ids.append(int(pid))
+                ocen.append(c)
+                ohalf.append(h)
+                oquat.append(qq)
             if ids:
                 pkl_dic["actor_bbox"] = {
                     "id": np.asarray(ids, np.int32),
-                    "pose": np.stack(poses),
-                    "aabb_min": np.stack(mins),
-                    "aabb_max": np.stack(maxs),
-                    "local_min": np.stack(lmins),
-                    "local_max": np.stack(lmaxs),
+                    "obb_center": np.stack(ocen),   # (T, N, 3) world-frame box center
+                    "obb_half": np.stack(ohalf),    # (T, N, 3) half extents in the box frame
+                    "obb_quat": np.stack(oquat),    # (T, N, 4) orientation, wxyz
                 }
-        # link_bbox: same per-frame pose + world AABB, but for ARTICULATION LINKS
-        # (drawer / cabinet / fridge / microwave doors + interiors) which
-        # get_all_actors() misses. Recorded as a SEPARATE group so actor_bbox stays
-        # rigid-only for existing readers. Lets offline masking resolve articulated-
-        # fixture bins + open/close door targets with the SAME motion/containment
-        # rules used for rigid actors. Columns sorted by per_scene_id for stability.
+        # link_bbox: same per-frame ORIENTED box, but for ARTICULATION LINKS (drawer /
+        # cabinet / fridge / microwave doors + interiors) which get_all_actors() misses.
+        # SEPARATE group so actor_bbox stays rigid-only. Lets offline masking resolve
+        # articulated-fixture bins + open/close door targets by the SAME rules as rigid
+        # actors. Columns sorted by per_scene_id for stability.
         if self.data_type.get("link_bbox", False):
             lcache = getattr(self, "_local_aabb_cache", None)
             if lcache is None:
@@ -752,21 +764,15 @@ class Base_Task(gym.Env):
                         comps = [link] + list(getattr(ent, "components", []) or [])
                         la = _local_aabb(comps)
                         lcache[pid] = la if la is not None else False
-                    lmn = np.asarray(la[0], np.float32) if la else np.full(3, np.nan, np.float32)
-                    lmx = np.asarray(la[1], np.float32) if la else np.full(3, np.nan, np.float32)
-                    rows.append((int(pid),
-                                 np.concatenate([p.p, p.q]).astype(np.float32),
-                                 np.asarray(aabb[0], np.float32),
-                                 np.asarray(aabb[1], np.float32), lmn, lmx))
+                    c, h, qq = _obb_fields(p.p, p.q, la, aabb)
+                    rows.append((int(pid), c, h, qq))
             if rows:
                 rows.sort(key=lambda r: r[0])
                 pkl_dic["link_bbox"] = {
                     "id": np.asarray([r[0] for r in rows], np.int32),
-                    "pose": np.stack([r[1] for r in rows]),
-                    "aabb_min": np.stack([r[2] for r in rows]),
-                    "aabb_max": np.stack([r[3] for r in rows]),
-                    "local_min": np.stack([r[4] for r in rows]),
-                    "local_max": np.stack([r[5] for r in rows]),
+                    "obb_center": np.stack([r[1] for r in rows]),
+                    "obb_half": np.stack([r[2] for r in rows]),
+                    "obb_quat": np.stack([r[3] for r in rows]),
                 }
 
         self.now_obs = deepcopy(pkl_dic)

@@ -243,13 +243,13 @@ def main():
                                timestep=getattr(task, 'timestep', None))
     info["seed"] = seed
     update_scene_info(run_dir, episode_idx, info)
-    # grounding masking sidecar (target/bin per stage) -> masking/episode{idx}.json,
-    # first-class per-episode output beside the HDF5 / scene_info (mass-gen path).
-    if getattr(cd, "write_masking_json", None) is not None:
+    # grounding: masking/episode{idx}.json sidecar + baked target/bin masks in the HDF5
+    # (mass-gen path). First-class per-episode output beside the HDF5 / scene_info.
+    if getattr(cd, "finalize_grounding", None) is not None:
         try:
-            cd.write_masking_json(args["save_path"], episode_idx)
+            cd.finalize_grounding(args["save_path"], episode_idx, obj_pad=args.get("table_obj_pad"))
         except Exception as _me:  # noqa: BLE001
-            print(f"[seed {seed}] masking.json failed (episode {episode_idx}): {_me}")
+            print(f"[seed {seed}] grounding failed (episode {episode_idx}): {_me}")
     print(f"[seed {seed}] episode {episode_idx} saved")
     sys.exit(0)
 
