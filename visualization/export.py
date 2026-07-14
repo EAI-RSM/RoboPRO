@@ -42,7 +42,7 @@ from viz_episode import (ROLE_COLORS, ROBOT_COLOR, SCENE_NAMES,
                          boxes2d_image, box_edge_points)
 from masking_resolve import (resolve_episode, compute_visible_ids, frame_role_sets,
                              table_ids_of, region_bin_mask, backproject_full,
-                             table_obstacle_rects, TABLE_OBJ_PAD, build_obbs,
+                             table_obstacle_rects, TABLE_OBJ_PAD, _obb_dict,
                              _obb_to_aabb, render_masking_panel, BIN_COL)
 
 
@@ -141,16 +141,27 @@ def obb_edge_points(corners, per_edge=24):
 
 
 def boxes3d_exact(actor_bbox, k, id_map, role_ids, robot_ids):
-    """Per-object exact 3D boxes at frame k. PRIMARY is the oriented box (obb); a derived
-    axis-aligned min/max is included for convenience. Schema-agnostic via build_obbs."""
+    """Per-object exact 3D boxes at frame k, read from the HDF5. PRIMARY is the oriented
+    box (obb); a derived axis-aligned min/max is included for convenience. Handles the OBB
+    schema (obb_center/half/quat) and legacy AABB data (obb=None)."""
+    ids = actor_bbox["id"][k]
+    have_obb = "obb_center" in actor_bbox
     out = []
-    for e in build_obbs(actor_bbox, k, id_map, drop_scene=True):
-        rec = {"id": e["id"], "name": e["name"],
-               "role": role_of_id(e["id"], role_ids, robot_ids),
-               "obb": e["obb"]}
-        if e["obb"]:
-            c = np.asarray(e["obb"]["corners"], float)
-            rec["min"], rec["max"] = c.min(0).round(4).tolist(), c.max(0).round(4).tolist()
+    for j in range(len(ids)):
+        i = int(ids[j])
+        nm = id_map.get(i, "")
+        if i not in id_map or nm.split("/")[-1] in SCENE_NAMES:
+            continue
+        rec = {"id": i, "name": nm, "role": role_of_id(i, role_ids, robot_ids)}
+        if have_obb:
+            obb = _obb_dict(actor_bbox["obb_center"][k][j], actor_bbox["obb_half"][k][j],
+                            actor_bbox["obb_quat"][k][j])
+            c = np.asarray(obb["corners"], float)
+            rec["obb"], rec["min"], rec["max"] = obb, c.min(0).round(4).tolist(), c.max(0).round(4).tolist()
+        else:
+            mn = np.asarray(actor_bbox["aabb_min"][k][j], float)
+            mx = np.asarray(actor_bbox["aabb_max"][k][j], float)
+            rec["obb"], rec["min"], rec["max"] = None, mn.round(4).tolist(), mx.round(4).tolist()
         out.append(rec)
     return out
 

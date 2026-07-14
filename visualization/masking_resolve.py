@@ -36,11 +36,10 @@ import h5py
 import numpy as np
 
 # --- self-contained io + palette -------------------------------------------
-# This module is the standalone grounding ENGINE: the resolver, the region/OBB
-# builders, and the dataloader contract API (build_masks / build_obbs). It depends
-# only on numpy / h5py / cv2 / json -- NOT on any visualization tool -- so the team's
-# dataloader can import it directly. viz_episode.py and export.py import these helpers
-# FROM here (dependency inversion), so the engine ships without the viz layer.
+# This module is the standalone grounding ENGINE: the resolver + the region/OBB logic
+# that BAKES target/bin masks into the HDF5 at collection time (finalize_grounding).
+# It depends only on numpy / h5py / cv2 / json -- NOT on any visualization tool.
+# viz_episode.py and export.py import these io helpers FROM here (dependency inversion).
 SCENE_NAMES = {"ground", "wall", "table", "floor"}   # shell: never a target/bin/obstacle
 ROBOT_COLOR = np.array([80, 130, 230], np.uint8)
 OTHER_COLOR = np.array([130, 220, 220], np.uint8)
@@ -113,16 +112,6 @@ def _obb_dict(center, half, quat):
     return {"center": center.round(4).tolist(), "half_size": half.round(4).tolist(),
             "quat": np.asarray(quat, float).round(6).tolist(), "corners": corners.round(4).tolist()}
 
-
-def obb_from_local(pose, lmn, lmx):
-    """LEGACY (pre-OBB data): build the box dict from a world pose (x,y,z,qw,qx,qy,qz) +
-    local-frame extents, or None if the object had no boxable geometry."""
-    lmn, lmx = np.asarray(lmn, float), np.asarray(lmx, float)
-    if not (np.all(np.isfinite(lmn)) and np.all(np.isfinite(lmx))):
-        return None
-    p = np.asarray(pose, float)
-    center = _quat_to_R(p[3:7]) @ ((lmn + lmx) / 2.0) + p[:3]
-    return _obb_dict(center, (lmx - lmn) / 2.0, p[3:7])
 
 # ---- tunables (Phase 3 knobs) -------------------------------------------------
 MOVE_MIN = 0.05      # a "mover" must displace >= 5 cm over the episode
@@ -630,16 +619,15 @@ def region_bin_mask(binspec, seg, table_ids, world, valid, obstacle_rects=None):
     return np.zeros(seg.shape, bool)
 
 
-def masking_overlay(rgb, seg, target_id, binmask, robot_ids):
+def masking_overlay(rgb, seg, target_mask, binmask, robot_ids):
     out = (rgb.astype(np.float32) * 0.5).astype(np.uint8)
     if robot_ids:
         m = np.isin(seg, list(robot_ids))
         out[m] = (0.6 * out[m] + 0.4 * ROBOT_COLOR).astype(np.uint8)
     if binmask is not None and binmask.any():
         out[binmask] = (0.35 * out[binmask] + 0.65 * BIN_COL).astype(np.uint8)
-    if target_id is not None:
-        m = seg == target_id
-        out[m] = (0.25 * out[m] + 0.75 * TARGET_COL).astype(np.uint8)
+    if target_mask is not None and target_mask.any():
+        out[target_mask] = (0.25 * out[target_mask] + 0.75 * TARGET_COL).astype(np.uint8)
     return out
 
 
@@ -673,10 +661,15 @@ def render_masking_panel(run_dir, ep, cam="countertop_camera", out_path=None, ma
         seg = load_seg(g["actor_segmentation"])
         depth = np.stack(decode_frames(g["depth"], cv2.IMREAD_UNCHANGED)).astype(np.float32)
         K = np.asarray(g["intrinsic_cv"]); E = np.asarray(g["extrinsic_cv"])
+        # prefer the BAKED grounding masks (what the dataloader gets); fall back to
+        # re-deriving them for pre-bake data.
+        gmask = (np.stack(decode_frames(g["grounding_mask"], cv2.IMREAD_UNCHANGED))
+                 if "grounding_mask" in g else None)
         abox = None
-        if "actor_bbox" in f:
-            ab = f["actor_bbox"]
-            abox = {kk: np.asarray(ab[kk]) for kk in ("id", "aabb_min", "aabb_max")}
+        if "actor_bbox" in f:                    # footprints for table padding (both schemas)
+            bid, _, _, amin, amax = _read_bbox_group(f["actor_bbox"])
+            abox = {"id": bid, "aabb_min": amin, "aabb_max": amax}
+    src = "HDF5 grounding_mask" if gmask is not None else "re-derived"
     stages, rows, W = masking["stages"], [], rgb.shape[2]
     if not stages:
         art = {i for i, n in id_map.items()
@@ -691,26 +684,25 @@ def render_masking_panel(run_dir, ep, cam="countertop_camera", out_path=None, ma
         b = st["bin"]
         for tag, fr in [("grasp", st["start"]), ("settle", st["settle"])]:
             fr = int(np.clip(fr, 0, len(rgb) - 1))
-            if b["bin_type"] == "region_anchor":
-                Kf = K[fr] if K.ndim == 3 else K
-                Ef = E[fr] if E.ndim == 3 else E
-                world, valid = backproject_full(depth[fr], Kf, Ef)
-                bm = region_bin_mask(b, seg[fr], table_ids, world, valid)
-            elif b["bin_type"] == "region_table":
-                Kf = K[fr] if K.ndim == 3 else K
-                Ef = E[fr] if E.ndim == 3 else E
-                world, valid = backproject_full(depth[fr], Kf, Ef)
-                rects = table_obstacle_rects(abox, fr, id_map, robot_ids,
-                                             int(st["target_id"]), b.get("obj_pad", TABLE_OBJ_PAD),
-                                             b.get("surface_z"))
-                bm = region_bin_mask(b, seg[fr], table_ids, world, valid, rects)
-            elif b["bin_type"] == "object":
-                bm = seg[fr] == b["bin_id"]
-            else:
-                bm = None
-            ov = masking_overlay(rgb[fr], seg[fr], st["target_id"], bm, robot_ids)
+            if gmask is not None:                            # read the BAKED masks
+                tmask, bm = gmask[fr] == 1, gmask[fr] == 2
+            else:                                            # re-derive (pre-bake data)
+                tmask = seg[fr] == st["target_id"]
+                if b["bin_type"] in ("region_anchor", "region_table"):
+                    Kf = K[fr] if K.ndim == 3 else K
+                    Ef = E[fr] if E.ndim == 3 else E
+                    world, valid = backproject_full(depth[fr], Kf, Ef)
+                    rects = (table_obstacle_rects(abox, fr, id_map, robot_ids, int(st["target_id"]),
+                                                  b.get("obj_pad", TABLE_OBJ_PAD), b.get("surface_z"))
+                             if b["bin_type"] == "region_table" else None)
+                    bm = region_bin_mask(b, seg[fr], table_ids, world, valid, rects)
+                elif b["bin_type"] == "object":
+                    bm = seg[fr] == b["bin_id"]
+                else:
+                    bm = None
+            ov = masking_overlay(rgb[fr], seg[fr], tmask, bm, robot_ids)
             rows.append(_label_bar(W * 2,
-                f"stage {st['stage']} [{tag} f{fr}]: target={st['target_name']}  {bin_caption(b)}"))
+                f"stage {st['stage']} [{tag} f{fr}]: target={st['target_name']}  {bin_caption(b)}  ({src})"))
             rows.append(np.concatenate([rgb[fr], ov], 1))
     panel = np.concatenate(rows, 0)
     if out_path is None:
@@ -722,16 +714,11 @@ def render_masking_panel(run_dir, ep, cam="countertop_camera", out_path=None, ma
 
 
 # =============================================================================
-# DATALOADER CONTRACT API
-# The team's dataloader needs only three files per episode:
-#     data/episode{ep}.hdf5      all per-frame signals (rgb/depth/seg/actor_bbox/...)
-#     scene_info.json            id -> name / role maps  (keyed by episode_{ep})
-#     masking/episode{ep}.json   per-stage target + bin  (written at collect time)
-# and imports THIS module (no viz tools needed) for the two builders below:
-#     build_masks(run_dir, ep, frame)  -> per-frame TARGET + BIN boolean masks
-#     build_obbs(actor_bbox, k, id_map) -> per-object oriented 3D boxes
-# Both are the exact reference the panels use, so a dataloader that calls them
-# matches the visualization 1:1 (incl. the table-region object padding).
+# COLLECTION-TIME GROUNDING (bake into the HDF5)
+# finalize_grounding() runs once per kept episode: it writes the grounding masks
+# (target/bin, PNG-encoded like segmentation) into the HDF5 and a masking/episode
+# {ep}.json stage-timeline sidecar. The dataloader then reads the masks + the OBB
+# fields straight from the HDF5 -- it does NOT import this module.
 # =============================================================================
 
 def write_masking_json(run_dir, ep, verbose=False):
@@ -754,61 +741,6 @@ def load_masking(run_dir, ep):
         with open(p) as f:
             return json.load(f)
     return resolve_episode(run_dir, ep, verbose=False)
-
-
-def build_obbs(actor_bbox, k, id_map=None, drop_scene=True):
-    """Per-object oriented 3D boxes at frame k from an `actor_bbox` (or `link_bbox`) group
-    of arrays. Reads the stored OBB (obb_center/half/quat) directly, or reconstructs it
-    from the legacy pose+local schema. Each entry: {id, name, obb:{center,half_size,quat,
-    corners}}. The reference a dataloader uses to build 3D boxes straight from the HDF5."""
-    ids = actor_bbox["id"][k]
-    have_obb = "obb_center" in actor_bbox
-    if not have_obb:
-        pose = actor_bbox["pose"][k]
-        lmn, lmx = actor_bbox.get("local_min"), actor_bbox.get("local_max")
-    out = []
-    for j in range(len(ids)):
-        i = int(ids[j])
-        name = id_map.get(i, "") if id_map else ""
-        if drop_scene and id_map is not None and is_scene(name):
-            continue
-        if have_obb:
-            obb = _obb_dict(actor_bbox["obb_center"][k][j], actor_bbox["obb_half"][k][j],
-                            actor_bbox["obb_quat"][k][j])
-        else:
-            obb = (obb_from_local(pose[j], lmn[k][j], lmx[k][j])
-                   if lmn is not None and lmx is not None else None)
-        out.append({"id": i, "name": name, "obb": obb})
-    return out
-
-
-def build_masks(run_dir, ep, frame, cam="countertop_camera", masking=None):
-    """THE per-frame grounding call for a dataloader. Returns a dict with boolean (H,W)
-    'target' and 'bin' masks for the given frame + camera, built from the HDF5 + the
-    masking sidecar EXACTLY as training needs (region bins rebuilt with the same object
-    padding the panels use). 'stage' is the active stage dict (None outside any stage)."""
-    if masking is None:
-        masking = load_masking(run_dir, ep)
-    _, id_map, _, robot_ids = load_sidecar(run_dir, ep)
-    table_ids = table_ids_of(id_map)
-    with h5py.File(os.path.join(run_dir, "data", f"episode{ep}.hdf5"), "r") as f:
-        g = f[f"observation/{cam}"]
-        seg = load_seg(g["actor_segmentation"])[frame]
-        depth = (decode_frames(g["depth"], cv2.IMREAD_UNCHANGED)[frame].astype(np.float32)
-                 if "depth" in g else None)
-        K, E = np.asarray(g["intrinsic_cv"]), np.asarray(g["extrinsic_cv"])
-        abox = None
-        if "actor_bbox" in f:                    # footprints for the table padding
-            bid, _, _, amin, amax = _read_bbox_group(f["actor_bbox"])
-            abox = {"id": bid, "aabb_min": amin, "aabb_max": amax}
-    st = stage_at(masking, frame)
-    wv = (None, None)
-    if st is not None and st["bin"]["bin_type"].startswith("region") and depth is not None:
-        Kf = K[frame] if K.ndim == 3 else K
-        Ef = E[frame] if E.ndim == 3 else E
-        wv = backproject_full(depth, Kf, Ef)
-    lab = _grounding_label_map(seg, st, table_ids, id_map, robot_ids, abox, frame, wv)
-    return {"target": lab == 1, "bin": lab == 2, "stage": st}
 
 
 def _grounding_label_map(seg, st, table_ids, id_map, robot_ids, abox, frame, world_valid):
