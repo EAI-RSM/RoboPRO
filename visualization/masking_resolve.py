@@ -35,14 +35,78 @@ import cv2
 import h5py
 import numpy as np
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from viz_episode import (load_sidecar, load_seg, decode_frames, SCENE_NAMES,  # noqa: E402
-                         ROBOT_COLOR)
+# --- self-contained io + palette -------------------------------------------
+# This module is the standalone grounding ENGINE: the resolver, the region/OBB
+# builders, and the dataloader contract API (build_masks / build_obbs). It depends
+# only on numpy / h5py / cv2 / json -- NOT on any visualization tool -- so the team's
+# dataloader can import it directly. viz_episode.py and export.py import these helpers
+# FROM here (dependency inversion), so the engine ships without the viz layer.
+SCENE_NAMES = {"ground", "wall", "table", "floor"}   # shell: never a target/bin/obstacle
+ROBOT_COLOR = np.array([80, 130, 230], np.uint8)
+OTHER_COLOR = np.array([130, 220, 220], np.uint8)
+ROLE_COLORS = {  # RGB, for overlays
+    "target": np.array([230, 40, 40], np.uint8),
+    "destination": np.array([40, 200, 60], np.uint8),
+    "obstacle": np.array([255, 160, 20], np.uint8),
+}
+TARGET_COL = np.array([230, 40, 40], np.uint8)   # training target mask = red
+BIN_COL = np.array([40, 200, 60], np.uint8)      # training bin mask = green
+ART_COL = np.array([200, 70, 210], np.uint8)     # articulation links (unresolved fixtures)
 
-# training role colors (target=red, bin=green); matches viz_episode ROLE_COLORS
-TARGET_COL = np.array([230, 40, 40], np.uint8)
-BIN_COL = np.array([40, 200, 60], np.uint8)
-ART_COL = np.array([200, 70, 210], np.uint8)   # articulation links (unresolved fixtures)
+
+def decode_frames(ds, flags):
+    return [cv2.imdecode(np.frombuffer(bytes(b), np.uint8), flags) for b in ds]
+
+
+def load_seg(ds):
+    """Segmentation dataset -> (T,H,W) uint16. Handles PNG-encoded and raw."""
+    if ds.dtype.kind == "S":
+        return np.stack(decode_frames(ds, cv2.IMREAD_UNCHANGED)).astype(np.uint16)
+    arr = np.asarray(ds)
+    if arr.ndim == 4:
+        sys.exit("!! segmentation is COLORIZED (T,H,W,3) legacy data — "
+                 "re-collect with the patched camera.py (raw uint16 ids).")
+    return arr.astype(np.uint16)
+
+
+def load_sidecar(run_dir, ep):
+    """scene_info.json for one episode -> (ep_info, id_map, roles, robot_ids)."""
+    with open(os.path.join(run_dir, "scene_info.json")) as f:
+        ep_info = json.load(f).get(f"episode_{ep}", {})
+    id_map = {}
+    for k, v in ep_info.get("actor_id_map", {}).items():
+        id_map[int(k)] = ("robot" + v) if v.startswith("/") else v  # old data: robot art unnamed
+    roles = ep_info.get("role_names", {})
+    robot_ids = {i for i, n in id_map.items() if n.startswith("robot/")}
+    return ep_info, id_map, roles, robot_ids
+
+
+def _quat2mat(q):
+    """quaternion (w, x, y, z) -> 3x3 rotation matrix."""
+    w, x, y, z = q
+    return np.array([
+        [1 - 2 * (y * y + z * z), 2 * (x * y - z * w), 2 * (x * z + y * w)],
+        [2 * (x * y + z * w), 1 - 2 * (x * x + z * z), 2 * (y * z - x * w)],
+        [2 * (x * z - y * w), 2 * (y * z + x * w), 1 - 2 * (x * x + y * y)]])
+
+
+def obb_from_local(pose, lmn, lmx):
+    """Oriented box from a world pose (x,y,z,qw,qx,qy,qz) + local-frame extents ->
+    dict(center, half_size, quat, corners) in world frame, or None if the object had
+    no boxable geometry (local extents NaN -> caller falls back to the AABB)."""
+    lmn, lmx = np.asarray(lmn, float), np.asarray(lmx, float)
+    if not (np.all(np.isfinite(lmn)) and np.all(np.isfinite(lmx))):
+        return None
+    p = np.asarray(pose, float)
+    pos, q = p[:3], p[3:7]
+    R = _quat2mat(q)
+    c_local, half = (lmn + lmx) / 2.0, (lmx - lmn) / 2.0
+    signs = np.array([[sx, sy, sz] for sx in (-1, 1) for sy in (-1, 1) for sz in (-1, 1)], float)
+    corners = (signs * half + c_local) @ R.T + pos
+    return {"center": (R @ c_local + pos).round(4).tolist(),
+            "half_size": half.round(4).tolist(),
+            "quat": q.round(6).tolist(),
+            "corners": corners.round(4).tolist()}
 
 # ---- tunables (Phase 3 knobs) -------------------------------------------------
 MOVE_MIN = 0.05      # a "mover" must displace >= 5 cm over the episode
@@ -57,6 +121,9 @@ ELEVATED = 0.04      # settle this far above the table + no rigid bin + fixtures
                      # => resting in an articulated fixture we can't box yet (Phase 2)
 ANCHOR_MAX = 0.30    # anchor for a "next to" region must be within this of the settle (m)
 REGION_MARGIN = 0.06 # disk radius floor = anchor xy half-extent + this (m)
+TABLE_OBJ_PAD = 0.05 # table free-space bins keep this clearance (m) around every other
+                     # object's footprint (a destination shouldn't hug an existing object).
+                     # Tunable; also recorded per-bin in masking.json ("obj_pad").
 VIS_FRAMES = 6       # frames sampled per camera for the visibility filter
 MIN_PIXELS = 30      # an id must cover >= this many pixels somewhere to be maskable
 GRIP_NEAR = 0.28     # a real target stays within this of a gripper while carried
@@ -347,12 +414,12 @@ def resolve_bin(st, task, bid, pose, amin, amax, id_map, visible, has_articulati
                     "reason": f"next-to {aname} (landing {reach*100:.1f}cm off centre)"}
         tid, tz = table_surface(bid, amax, id_map, settle)
         return {"bin_type": "region_table", "table_id": tid, "surface_z": tz,
-                "reason": "relational, no anchor -> table"}
+                "obj_pad": TABLE_OBJ_PAD, "reason": "relational, no anchor -> table"}
 
     if any(tok in name_l for tok in TABLE_TOKENS):
         tid, tz = table_surface(bid, amax, id_map, settle)
         return {"bin_type": "region_table", "table_id": tid, "surface_z": tz,
-                "reason": "explicit table destination"}
+                "obj_pad": TABLE_OBJ_PAD, "reason": "explicit table destination"}
 
     # geometry-first: smallest rigid container the target sits in/on
     hits = containers_at(pt, settle, bid, amin, amax, id_map, st["col"], visible)
@@ -373,7 +440,7 @@ def resolve_bin(st, task, bid, pose, amin, amax, id_map, visible, has_articulati
 
     # placed in open space on the table
     return {"bin_type": "region_table", "table_id": tid, "surface_z": tz,
-            "reason": "open-space placement -> table free-space"}
+            "obj_pad": TABLE_OBJ_PAD, "reason": "open-space placement -> table free-space"}
 
 
 # ---- top level ----------------------------------------------------------------
@@ -488,11 +555,47 @@ def backproject_full(depth_mm, K, E):
     return ((pcam - t) @ R).reshape(H, W, 3), (z > 0)
 
 
-def region_bin_mask(binspec, seg, table_ids, world, valid):
-    """Boolean (H,W) mask for a REGION bin (anchor disk or whole-table free-space)."""
+def table_obstacle_rects(actor_bbox, frame, id_map, robot_ids, target_id, pad, surface_z):
+    """Padded xy footprints [(x0,y0,x1,y1), ...] of every rigid object resting on the
+    table (excludes the scene shell, the robot, and the target being placed). Used to
+    carve clearance out of a table free-space bin so the destination never hugs an
+    existing object. Same computation a dataloader would run from actor_bbox."""
+    rects = []
+    if actor_bbox is None:
+        return rects
+    ids = actor_bbox["id"][frame]
+    mns, mxs = actor_bbox["aabb_min"][frame], actor_bbox["aabb_max"][frame]
+    rob = set(int(r) for r in (robot_ids or []))
+    for j in range(len(ids)):
+        i = int(ids[j])
+        if i == target_id or i in rob:
+            continue
+        n = id_map.get(i, "") if id_map else ""
+        if not n or is_scene(n):
+            continue
+        mn, mx = np.asarray(mns[j], float), np.asarray(mxs[j], float)
+        if surface_z is not None and (mx[2] < surface_z - 0.03 or mn[2] > surface_z + 0.5):
+            continue  # not resting on this table surface (below it, or floating high)
+        rects.append((float(mn[0] - pad), float(mn[1] - pad),
+                      float(mx[0] + pad), float(mx[1] + pad)))
+    return rects
+
+
+def region_bin_mask(binspec, seg, table_ids, world, valid, obstacle_rects=None):
+    """Boolean (H,W) mask for a REGION bin (anchor disk or whole-table free-space).
+    obstacle_rects (world-xy padded footprints) carve clearance out of a table bin."""
     bt = binspec["bin_type"]
     if bt == "region_table":
-        return np.isin(seg, list(table_ids))
+        m = np.isin(seg, list(table_ids))
+        if valid is not None:
+            m = m & valid
+        if obstacle_rects and world is not None:
+            wx, wy = world[:, :, 0], world[:, :, 1]
+            excl = np.zeros(seg.shape, bool)
+            for x0, y0, x1, y1 in obstacle_rects:
+                excl |= (wx >= x0) & (wx <= x1) & (wy >= y0) & (wy <= y1)
+            m = m & ~excl
+        return m
     if bt == "region_anchor" and world is not None:
         on_table = np.isin(seg, list(table_ids)) & valid
         cx, cy = binspec["center"]
@@ -544,6 +647,10 @@ def render_masking_panel(run_dir, ep, cam="countertop_camera", out_path=None, ma
         seg = load_seg(g["actor_segmentation"])
         depth = np.stack(decode_frames(g["depth"], cv2.IMREAD_UNCHANGED)).astype(np.float32)
         K = np.asarray(g["intrinsic_cv"]); E = np.asarray(g["extrinsic_cv"])
+        abox = None
+        if "actor_bbox" in f:
+            ab = f["actor_bbox"]
+            abox = {kk: np.asarray(ab[kk]) for kk in ("id", "aabb_min", "aabb_max")}
     stages, rows, W = masking["stages"], [], rgb.shape[2]
     if not stages:
         art = {i for i, n in id_map.items()
@@ -564,7 +671,13 @@ def render_masking_panel(run_dir, ep, cam="countertop_camera", out_path=None, ma
                 world, valid = backproject_full(depth[fr], Kf, Ef)
                 bm = region_bin_mask(b, seg[fr], table_ids, world, valid)
             elif b["bin_type"] == "region_table":
-                bm = region_bin_mask(b, seg[fr], table_ids, None, None)
+                Kf = K[fr] if K.ndim == 3 else K
+                Ef = E[fr] if E.ndim == 3 else E
+                world, valid = backproject_full(depth[fr], Kf, Ef)
+                rects = table_obstacle_rects(abox, fr, id_map, robot_ids,
+                                             int(st["target_id"]), b.get("obj_pad", TABLE_OBJ_PAD),
+                                             b.get("surface_z"))
+                bm = region_bin_mask(b, seg[fr], table_ids, world, valid, rects)
             elif b["bin_type"] == "object":
                 bm = seg[fr] == b["bin_id"]
             else:
@@ -582,21 +695,117 @@ def render_masking_panel(run_dir, ep, cam="countertop_camera", out_path=None, ma
     return out_path
 
 
+# =============================================================================
+# DATALOADER CONTRACT API
+# The team's dataloader needs only three files per episode:
+#     data/episode{ep}.hdf5      all per-frame signals (rgb/depth/seg/actor_bbox/...)
+#     scene_info.json            id -> name / role maps  (keyed by episode_{ep})
+#     masking/episode{ep}.json   per-stage target + bin  (written at collect time)
+# and imports THIS module (no viz tools needed) for the two builders below:
+#     build_masks(run_dir, ep, frame)  -> per-frame TARGET + BIN boolean masks
+#     build_obbs(actor_bbox, k, id_map) -> per-object oriented 3D boxes
+# Both are the exact reference the panels use, so a dataloader that calls them
+# matches the visualization 1:1 (incl. the table-region object padding).
+# =============================================================================
+
+def write_masking_json(run_dir, ep, verbose=False):
+    """Resolve one episode and write <run_dir>/masking/episode{ep}.json. Called at
+    collect time so masking is a first-class output beside the HDF5 / scene_info."""
+    out = resolve_episode(run_dir, ep, verbose=verbose)
+    d = os.path.join(run_dir, "masking")
+    os.makedirs(d, exist_ok=True)
+    p = os.path.join(d, f"episode{ep}.json")
+    with open(p, "w") as f:
+        json.dump(out, f, indent=2)
+    return p
+
+
+def load_masking(run_dir, ep):
+    """masking for one episode: read masking/episode{ep}.json if it exists, else
+    resolve on the fly from the HDF5 (works whether or not collection wrote it)."""
+    p = os.path.join(run_dir, "masking", f"episode{ep}.json")
+    if os.path.exists(p):
+        with open(p) as f:
+            return json.load(f)
+    return resolve_episode(run_dir, ep, verbose=False)
+
+
+def build_obbs(actor_bbox, k, id_map=None, drop_scene=True):
+    """Per-object 3D boxes at frame k from an actor_bbox (or link_bbox) group of arrays
+    (id/pose/aabb_min/aabb_max[/local_min/local_max]). Each entry carries the oriented
+    box ('obb'; None if the body has no local extents -> use the AABB) + the world AABB.
+    The reference a dataloader uses to build 3D boxes straight from the HDF5."""
+    ids, pose = actor_bbox["id"][k], actor_bbox["pose"][k]
+    amn, amx = actor_bbox["aabb_min"][k], actor_bbox["aabb_max"][k]
+    lmn, lmx = actor_bbox.get("local_min"), actor_bbox.get("local_max")
+    out = []
+    for j in range(len(ids)):
+        i = int(ids[j])
+        name = id_map.get(i, "") if id_map else ""
+        if drop_scene and id_map is not None and is_scene(name):
+            continue
+        mn, mx = np.asarray(amn[j], float), np.asarray(amx[j], float)
+        out.append({
+            "id": i, "name": name,
+            "obb": (obb_from_local(pose[j], lmn[k][j], lmx[k][j])
+                    if lmn is not None and lmx is not None else None),
+            "aabb_min": mn.round(4).tolist(), "aabb_max": mx.round(4).tolist(),
+            "pose": np.asarray(pose[j], float).round(4).tolist()})
+    return out
+
+
+def build_masks(run_dir, ep, frame, cam="countertop_camera", masking=None):
+    """THE per-frame grounding call for a dataloader. Returns a dict with boolean (H,W)
+    'target' and 'bin' masks for the given frame + camera, built from the HDF5 + the
+    masking sidecar EXACTLY as training needs (region bins rebuilt with the same object
+    padding the panels use). 'stage' is the active stage dict (None outside any stage)."""
+    if masking is None:
+        masking = load_masking(run_dir, ep)
+    _, id_map, _, robot_ids = load_sidecar(run_dir, ep)
+    table_ids = table_ids_of(id_map)
+    with h5py.File(os.path.join(run_dir, "data", f"episode{ep}.hdf5"), "r") as f:
+        g = f[f"observation/{cam}"]
+        seg = load_seg(g["actor_segmentation"])[frame]
+        depth = (decode_frames(g["depth"], cv2.IMREAD_UNCHANGED)[frame].astype(np.float32)
+                 if "depth" in g else None)
+        K, E = np.asarray(g["intrinsic_cv"]), np.asarray(g["extrinsic_cv"])
+        abox = None
+        if "actor_bbox" in f:
+            ab = f["actor_bbox"]
+            abox = {kk: np.asarray(ab[kk]) for kk in ("id", "aabb_min", "aabb_max")}
+    tgt = np.zeros(seg.shape, bool)
+    binm = np.zeros(seg.shape, bool)
+    st = stage_at(masking, frame)
+    if st is not None:
+        tgt = seg == int(st["target_id"])
+        b = st["bin"]
+        bt = b["bin_type"]
+        if bt == "object":
+            binm = seg == int(b["bin_id"])
+        elif bt.startswith("region") and depth is not None:
+            Kf = K[frame] if K.ndim == 3 else K
+            Ef = E[frame] if E.ndim == 3 else E
+            world, valid = backproject_full(depth, Kf, Ef)
+            rects = (table_obstacle_rects(abox, frame, id_map, robot_ids, int(st["target_id"]),
+                                          b.get("obj_pad", TABLE_OBJ_PAD), b.get("surface_z"))
+                     if bt == "region_table" else None)
+            binm = region_bin_mask(b, seg, table_ids, world, valid, rects)
+    return {"target": tgt, "bin": binm, "stage": st}
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("run_dir")
     ap.add_argument("episode", type=int, nargs="?", default=0)
     ap.add_argument("--task", default=None)
-    ap.add_argument("--write", action="store_true", help="write masking.json")
+    ap.add_argument("--write", action="store_true",
+                    help="write masking/episode{ep}.json (the collection-time output)")
     ap.add_argument("--panel", action="store_true", help="also render the masking panel")
     ap.add_argument("--cam", default="countertop_camera")
     args = ap.parse_args()
     out = resolve_episode(args.run_dir, args.episode, task=args.task)
     if args.write:
-        p = os.path.join(args.run_dir, "masking.json")
-        with open(p, "w") as f:
-            json.dump({f"episode_{args.episode}": out}, f, indent=2)
-        print(f"\nwrote {p}")
+        print("\nwrote", write_masking_json(args.run_dir, args.episode))
     if args.panel:
         print("wrote", render_masking_panel(args.run_dir, args.episode, args.cam, masking=out))
 

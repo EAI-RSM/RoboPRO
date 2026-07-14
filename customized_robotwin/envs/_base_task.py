@@ -30,6 +30,136 @@ from ._GLOBAL_CONFIGS import *
 
 from typing import Optional, Literal
 
+
+# --- oriented-box helpers ---------------------------------------------------
+# actor_bbox/link_bbox store the WORLD axis-aligned box (inflates for rotated
+# objects). Recording each body's box in ITS OWN frame (constant for a rigid
+# body) lets offline tools reconstruct a tight ORIENTED box from local extents +
+# the per-frame pose (matters for grasping). We read it straight off the physx
+# collision shapes; all frames are optional -> unsupported shapes fall back to
+# the world AABB downstream (local_min/max = NaN).
+def _obb_box_corners(mn, mx):
+    mn, mx = np.asarray(mn, float), np.asarray(mx, float)
+    return np.array([[mn[0] if sx < 0 else mx[0],
+                      mn[1] if sy < 0 else mx[1],
+                      mn[2] if sz < 0 else mx[2]]
+                     for sx in (-1, 1) for sy in (-1, 1) for sz in (-1, 1)], float)
+
+
+def _shape_local_corners(sh):
+    """8 corners (shape frame) of one collision shape's local AABB, or None."""
+    hs = getattr(sh, "half_size", None)                 # box
+    if hs is not None:
+        h = np.asarray(hs, float)
+        return _obb_box_corners(-h, h)
+    verts = getattr(sh, "vertices", None)               # convex / triangle mesh
+    if verts is not None:
+        v = np.asarray(verts, float)
+        if v.size == 0:
+            return None
+        sc = getattr(sh, "scale", None)
+        if sc is not None:
+            v = v * np.asarray(sc, float)
+        return _obb_box_corners(v.min(0), v.max(0))
+    r = getattr(sh, "radius", None)
+    if r is not None:
+        r = float(r)
+        hl = getattr(sh, "half_length", None)           # capsule (x axis) vs sphere
+        if hl is not None:
+            return _obb_box_corners([-(hl + r), -r, -r], [hl + r, r, r])
+        return _obb_box_corners([-r, -r, -r], [r, r, r])
+    return None                                          # plane / unknown -> skip
+
+
+def _pose_matrix(pose):
+    try:
+        return np.asarray(pose.to_transformation_matrix(), float)
+    except Exception:
+        T = np.eye(4)
+        T[:3, :3] = t3d.quaternions.quat2mat(np.asarray(pose.q, float))
+        T[:3, 3] = np.asarray(pose.p, float)
+        return T
+
+
+def _component_local_aabb(comp):
+    """(min, max) of a physx component's collision geometry in ITS OWN frame, or
+    None. Pair with the component's world pose to get an oriented box."""
+    getter = getattr(comp, "get_collision_shapes", None)
+    if getter is None:
+        return None
+    try:
+        shapes = getter()
+    except Exception:
+        return None
+    pts = []
+    for sh in shapes:
+        c = _shape_local_corners(sh)
+        if c is None or len(c) == 0:
+            continue
+        try:
+            T = _pose_matrix(sh.get_local_pose())
+        except Exception:
+            T = np.eye(4)
+        pts.append((np.c_[c, np.ones(len(c))] @ T.T)[:, :3])
+    if not pts:
+        return None
+    P = np.concatenate(pts, 0)
+    return P.min(0), P.max(0)
+
+
+def _union(acc, mn, mx):
+    if acc[0] is None:
+        return [mn.copy(), mx.copy()]
+    return [np.minimum(acc[0], mn), np.maximum(acc[1], mx)]
+
+
+def _collision_local_aabb(components):
+    """Union of collision-geometry local AABBs over the given components."""
+    acc = [None, None]
+    for comp in components:
+        if getattr(comp, "get_collision_shapes", None) is None:
+            continue                       # e.g. a render body -> no collision shapes
+        la = _component_local_aabb(comp)
+        if la is not None:
+            acc = _union(acc, la[0], la[1])
+    return None if acc[0] is None else (acc[0], acc[1])
+
+
+def _render_local_aabb(components):
+    """Fallback: union of VISUAL mesh bounds (render shapes) in the entity frame."""
+    acc = [None, None]
+    for comp in components:
+        shapes = getattr(comp, "render_shapes", None)
+        if not shapes:
+            continue
+        for sh in shapes:
+            try:
+                T = _pose_matrix(sh.get_local_pose())
+                sc = np.asarray(sh.get_scale(), float)
+            except Exception:
+                T, sc = np.eye(4), np.ones(3)
+            for part in (getattr(sh, "parts", None) or []):
+                try:
+                    v = np.asarray(part.get_vertices(), float)
+                except Exception:
+                    continue
+                if v.size == 0:
+                    continue
+                v = v * sc
+                c = _obb_box_corners(v.min(0), v.max(0))
+                w = (np.c_[c, np.ones(len(c))] @ T.T)[:, :3]
+                acc = _union(acc, w.min(0), w.max(0))
+    return None if acc[0] is None else (acc[0], acc[1])
+
+
+def _local_aabb(components):
+    """Local-frame box for an oriented box: collision geometry if present (physical
+    grasp surface), else the visual mesh bounds. Searches ALL components because the
+    body that reports the world AABB may be a render body with no collision shapes."""
+    components = list(components)
+    return _collision_local_aabb(components) or _render_local_aabb(components)
+
+
 current_file_path = os.path.abspath(__file__)
 parent_directory = os.path.dirname(current_file_path)
 
@@ -533,7 +663,10 @@ class Base_Task(gym.Env):
         # includes occluded/out-of-view extents and CANNOT be reconstructed from
         # rgb/depth after the fact — it must be recorded while the scene exists.
         if self.data_type.get("actor_bbox", False):
-            ids, poses, mins, maxs = [], [], [], []
+            lcache = getattr(self, "_local_aabb_cache", None)
+            if lcache is None:
+                lcache = self._local_aabb_cache = {}
+            ids, poses, mins, maxs, lmins, lmaxs = [], [], [], [], [], []
             for actor in self.scene.get_all_actors():
                 pid = getattr(actor, "per_scene_id", None)
                 if pid is None:
@@ -554,12 +687,23 @@ class Base_Task(gym.Env):
                 poses.append(np.concatenate([p.p, p.q]).astype(np.float32))
                 mins.append(np.asarray(aabb[0], np.float32))
                 maxs.append(np.asarray(aabb[1], np.float32))
+                # local-frame extents (constant per rigid body) -> oriented box offline
+                la = lcache.get(pid)
+                if la is None:
+                    la = _local_aabb(getattr(actor, "components", []))
+                    lcache[pid] = la if la is not None else False
+                lmins.append(np.asarray(la[0], np.float32) if la
+                             else np.full(3, np.nan, np.float32))
+                lmaxs.append(np.asarray(la[1], np.float32) if la
+                             else np.full(3, np.nan, np.float32))
             if ids:
                 pkl_dic["actor_bbox"] = {
                     "id": np.asarray(ids, np.int32),
                     "pose": np.stack(poses),
                     "aabb_min": np.stack(mins),
                     "aabb_max": np.stack(maxs),
+                    "local_min": np.stack(lmins),
+                    "local_max": np.stack(lmaxs),
                 }
         # link_bbox: same per-frame pose + world AABB, but for ARTICULATION LINKS
         # (drawer / cabinet / fridge / microwave doors + interiors) which
@@ -568,6 +712,9 @@ class Base_Task(gym.Env):
         # fixture bins + open/close door targets with the SAME motion/containment
         # rules used for rigid actors. Columns sorted by per_scene_id for stability.
         if self.data_type.get("link_bbox", False):
+            lcache = getattr(self, "_local_aabb_cache", None)
+            if lcache is None:
+                lcache = self._local_aabb_cache = {}
             rows = []
             for art in self.scene.get_all_articulations():
                 if not art.get_name():
@@ -600,10 +747,17 @@ class Base_Task(gym.Env):
                     if aabb is None:
                         continue
                     p = link.get_pose()
+                    la = lcache.get(pid)
+                    if la is None:
+                        comps = [link] + list(getattr(ent, "components", []) or [])
+                        la = _local_aabb(comps)
+                        lcache[pid] = la if la is not None else False
+                    lmn = np.asarray(la[0], np.float32) if la else np.full(3, np.nan, np.float32)
+                    lmx = np.asarray(la[1], np.float32) if la else np.full(3, np.nan, np.float32)
                     rows.append((int(pid),
                                  np.concatenate([p.p, p.q]).astype(np.float32),
                                  np.asarray(aabb[0], np.float32),
-                                 np.asarray(aabb[1], np.float32)))
+                                 np.asarray(aabb[1], np.float32), lmn, lmx))
             if rows:
                 rows.sort(key=lambda r: r[0])
                 pkl_dic["link_bbox"] = {
@@ -611,6 +765,8 @@ class Base_Task(gym.Env):
                     "pose": np.stack([r[1] for r in rows]),
                     "aabb_min": np.stack([r[2] for r in rows]),
                     "aabb_max": np.stack([r[3] for r in rows]),
+                    "local_min": np.stack([r[4] for r in rows]),
+                    "local_max": np.stack([r[5] for r in rows]),
                 }
 
         self.now_obs = deepcopy(pkl_dic)

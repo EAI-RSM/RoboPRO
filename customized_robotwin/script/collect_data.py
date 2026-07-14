@@ -22,6 +22,17 @@ from argparse import ArgumentParser
 
 from export_scene import export_scene
 
+# grounding masking (target/bin per stage) is a first-class per-episode output:
+# resolve it from the just-written HDF5 + scene_info and save masking/episode{i}.json.
+_VIZ_DIR = os.path.abspath(os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "..", "..", "visualization"))
+sys.path.insert(0, _VIZ_DIR)
+try:
+    from masking_resolve import write_masking_json
+except Exception as _e:  # noqa: BLE001
+    write_masking_json = None
+    print(f"\033[93mmasking_resolve unavailable — masking.json will be skipped: {_e}\033[0m")
+
 current_file_path = os.path.abspath(__file__)
 parent_directory = os.path.dirname(current_file_path)
 bench_root = Path(os.environ["BENCH_ROOT"])
@@ -402,6 +413,13 @@ def run(TASK_ENV, args):
                         if os.path.exists(ext_path):
                             os.remove(ext_path)
                     continue
+                # episode kept -> derive the grounding masking sidecar from the HDF5
+                # (target/bin per stage, all frames) so it ships beside scene_info.json.
+                if write_masking_json is not None:
+                    try:
+                        write_masking_json(args["save_path"], episode_idx)
+                    except Exception as _me:  # noqa: BLE001
+                        print(f"\033[93mmasking.json failed (episode {episode_idx}): {_me}\033[0m")
             except Exception as e:
                 # one bad episode (CuRobo/mesh crash, missing frames, etc.) must NOT
                 # kill the whole run — log it, record it, clean up, move on.

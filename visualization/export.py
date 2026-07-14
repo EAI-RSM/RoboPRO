@@ -42,6 +42,7 @@ from viz_episode import (ROLE_COLORS, ROBOT_COLOR, SCENE_NAMES,
                          boxes2d_image, box_edge_points)
 from masking_resolve import (resolve_episode, compute_visible_ids, frame_role_sets,
                              table_ids_of, region_bin_mask, backproject_full,
+                             table_obstacle_rects, TABLE_OBJ_PAD, obb_from_local,
                              render_masking_panel, BIN_COL)
 
 WHAT_ALL = ("pcd", "bbox2d", "bbox3d", "bbox3d_exact", "panel")
@@ -117,21 +118,39 @@ def boxes3d_visible(pts, seg_vals, id_map, role_ids, robot_ids, min_pts=30):
     return out
 
 
+# 12 edges of the 8-corner box, corner order = (sx,sy,sz) with sx outer, sz inner
+_OBB_EDGES = [(0, 1), (2, 3), (4, 5), (6, 7), (0, 2), (1, 3),
+              (4, 6), (5, 7), (0, 4), (1, 5), (2, 6), (3, 7)]
+
+
+def obb_edge_points(corners, per_edge=24):
+    """Wireframe points along the 12 edges of an 8-corner oriented box."""
+    corners = np.asarray(corners, float)
+    t = np.linspace(0, 1, per_edge)[:, None]
+    return np.concatenate([corners[a] * (1 - t) + corners[b] * t for a, b in _OBB_EDGES], 0)
+
+
 def boxes3d_exact(actor_bbox, k, id_map, role_ids, robot_ids):
     ids = actor_bbox["id"][k]
     mns, mxs, poses = actor_bbox["aabb_min"][k], actor_bbox["aabb_max"][k], actor_bbox["pose"][k]
+    lmns, lmxs = actor_bbox.get("local_min"), actor_bbox.get("local_max")
     out = []
     for j in range(len(ids)):
         i = int(ids[j])
         if i not in id_map or id_map[i].split("/")[-1] in SCENE_NAMES:
             continue
         mn, mx = np.asarray(mns[j], float), np.asarray(mxs[j], float)
-        out.append({"id": i, "name": id_map.get(i, ""),
-                    "role": role_of_id(i, role_ids, robot_ids),
-                    "min": mn.round(4).tolist(), "max": mx.round(4).tolist(),
-                    "center": ((mn + mx) / 2).round(4).tolist(),
-                    "size": (mx - mn).round(4).tolist(),
-                    "pose": np.asarray(poses[j], float).round(4).tolist()})
+        rec = {"id": i, "name": id_map.get(i, ""),
+               "role": role_of_id(i, role_ids, robot_ids),
+               "pose": np.asarray(poses[j], float).round(4).tolist(),
+               # world axis-aligned box (kept for fast containment / legacy readers)
+               "min": mn.round(4).tolist(), "max": mx.round(4).tolist(),
+               "center": ((mn + mx) / 2).round(4).tolist(),
+               "size": (mx - mn).round(4).tolist()}
+        # PRIMARY: oriented box aligned to the object's own pose (grasp-relevant)
+        rec["obb"] = (obb_from_local(poses[j], lmns[k][j], lmxs[k][j])
+                      if lmns is not None and lmxs is not None else None)
+        out.append(rec)
     return out
 
 
@@ -195,6 +214,9 @@ def main():
         if "actor_bbox" in f:
             gb = f["actor_bbox"]
             actor_bbox = {kk: np.asarray(gb[kk]) for kk in ("id", "pose", "aabb_min", "aabb_max")}
+            for kk in ("local_min", "local_max"):        # present on post-OBB data only
+                if kk in gb:
+                    actor_bbox[kk] = np.asarray(gb[kk])
 
     T = len(data[cams[0]]["seg"])
     frames = parse_frames(args.frames, T)
@@ -251,7 +273,9 @@ def main():
                     if exact is not None:
                         for b in exact[f"f{k}"]:
                             if b["role"] in ROLE_COLORS:
-                                edge = box_edge_points(b["min"], b["max"])
+                                # draw the oriented box when available, else the AABB
+                                edge = (obb_edge_points(b["obb"]["corners"]) if b.get("obb")
+                                        else box_edge_points(b["min"], b["max"]))
                                 pts = np.concatenate([pts, edge])
                                 cols = np.concatenate(
                                     [cols, np.tile(ROLE_COLORS[b["role"]], (len(edge), 1))])
@@ -283,7 +307,12 @@ def main():
                     K = d["K"][k] if d["K"].ndim == 3 else d["K"]
                     E = d["E"][k] if d["E"].ndim == 3 else d["E"]
                     world, valid = backproject_full(d["depth"][k], K, E)
-                    bm = region_bin_mask(st["bin"], seg, table_ids, world, valid)
+                    rects = (table_obstacle_rects(actor_bbox, k, id_map, robot_ids,
+                                                  int(st["target_id"]),
+                                                  st["bin"].get("obj_pad", TABLE_OBJ_PAD),
+                                                  st["bin"].get("surface_z"))
+                             if st["bin"]["bin_type"] == "region_table" else None)
+                    bm = region_bin_mask(st["bin"], seg, table_ids, world, valid, rects)
                     over[bm] = (0.4 * over[bm] + 0.6 * BIN_COL).astype(np.uint8)
                 cells = [header]
                 if "depth" in d:
@@ -315,7 +344,9 @@ def main():
             "actor_id_map": {str(k): v for k, v in sorted(id_map.items())},
             "units": {"xyz": "meters, world frame", "bbox2d": "pixels xyxy",
                       "bbox3d": "meters, world frame, VISIBLE-surface AABB",
-                      "bbox3d_exact": "meters, world frame, EXACT full-extent AABB (physx)"},
+                      "bbox3d_exact": "meters, world frame; 'obb' = PRIMARY oriented box "
+                                      "(center/half_size/quat/corners), 'min/max' = legacy "
+                                      "axis-aligned AABB; obb null on pre-OBB data"},
         }, f, indent=2)
 
     print(f"wrote {out_dir}/  (masking.json + masking_panel.png + {what})")
