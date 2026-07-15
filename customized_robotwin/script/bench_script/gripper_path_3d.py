@@ -19,13 +19,22 @@ Only the ACTIVE arm is drawn. The task is single-armed but which arm it picks va
 the bottle's x, so we sample both TCPs and keep whichever actually moved (longest path).
 
 Four viewing angles are saved per seed -- a single static 3D projection is hard to read.
+An mp4 of the rollout is saved alongside them (--no-video to skip).
+
+OUTPUT LAYOUT: every run writes to its OWN timestamped folder, so re-running never
+overwrites an earlier run's figures:
+
+    <out-dir>/<YYYYmmdd-HHMMSS>/grippath_seed0001_FAILED_iso.png
+                               video/episode1.mp4
 
 USAGE (from customized_robotwin, env sourced + ROBOTWIN_BENCH_TASK=bench):
     python script/bench_script/gripper_path_3d.py --seed 1
     python script/bench_script/gripper_path_3d.py --seed 7 --offset 0.2 --stride 5
+    python script/bench_script/gripper_path_3d.py --seed 1 --no-video
 """
 
 import argparse
+from datetime import datetime
 from pathlib import Path
 
 import numpy as np
@@ -65,11 +74,11 @@ def _box_wireframe(ax, box_p, half, height):
     ax.plot([], [], [], color="dimgray", lw=1.2, label="milk-box occluder")
 
 
-def _plot_path(seed, pts, ok_overall, box_p, tgt_p, pad_xy, arm_name, args):
+def _plot_path(seed, pts, ok_overall, box_p, tgt_p, pad_xy, arm_name, run_dir, args):
     """3D polyline coloured by time (viridis: dark = start, bright = end)."""
     from mpl_toolkits.mplot3d.art3d import Line3DCollection
 
-    out = Path(args.out_dir)
+    out = Path(run_dir)
     out.mkdir(parents=True, exist_ok=True)
 
     # segment i spans pts[i] -> pts[i+1]; colour by normalised time at the segment start
@@ -127,6 +136,11 @@ def _plot_path(seed, pts, ok_overall, box_p, tgt_p, pad_xy, arm_name, args):
 
 
 def run(args):
+    # One folder per run, so re-running a seed never clobbers the previous figures/video.
+    run_dir = Path(args.out_dir) / datetime.now().strftime("%Y%m%d-%H%M%S")
+    run_dir.mkdir(parents=True, exist_ok=True)
+    print(f"[run] writing to {run_dir}")
+
     env = make_occluder_task()()
     env.spawn_occluder = True
     env.occluder_offset = args.offset
@@ -135,9 +149,12 @@ def run(args):
     # rollout=True is required: it sets need_plan=True so play_once actually PLANS. With the
     # default (rollout=False) the env is a t=0 measurement build that replays a joint-path
     # cache nothing ever filled -> IndexError on the first move.
+    # save_path=run_dir -> the mp4 lands in <run_dir>/video/episode{seed}.mp4.
     cfg = build_cfg("put_mouse_on_pad", args.base_config, args.seed, DR_CLEAN,
-                    rollout=True, ep_num=args.seed)
-    cfg["save_data"] = False          # execute the plan but skip frame capture (faster)
+                    rollout=True, ep_num=args.seed,
+                    save_path=(str(run_dir) if args.save_video else None))
+    if not args.save_video:
+        cfg["save_data"] = False      # execute the plan but skip frame capture (faster)
     env.setup_demo(**cfg)
 
     box_p = np.array(env.occluder.get_pose().p)
@@ -168,7 +185,7 @@ def run(args):
     if len(L) < 2:
         print(f"[seed {args.seed}] only {len(L)} sample(s) captured -- nothing to plot "
               f"(the rollout failed before any arm motion). Try another seed.")
-        _safe_close(env)
+        _write_video(env, args)
         return
 
     # path length decides the active arm; the idle arm holds its home pose and moves ~0
@@ -179,15 +196,28 @@ def run(args):
           f"{len(pts)} samples; path length left={dl:.3f} m right={dr:.3f} m "
           f"-> plotting {arm_name} arm")
 
-    _plot_path(args.seed, pts, ok_overall, box_p, tgt_p, np.array(PAD_XY), arm_name, args)
-    _safe_close(env)
+    _plot_path(args.seed, pts, ok_overall, box_p, tgt_p, np.array(PAD_XY), arm_name,
+               run_dir, args)
+    _write_video(env, args)
 
 
-def _safe_close(env):
+def _write_video(env, args):
+    """Close the env and merge the captured frames into <run_dir>/video/episode{seed}.mp4.
+    Same close -> merge -> drop-cache order visualize_task_scene.py uses; the merge only
+    has frames to work with when save_data was on (i.e. not --no-video)."""
     try:
-        env.close_env()
-    except Exception:
-        pass
+        env.close_env(clear_cache=True)
+    except Exception as e:
+        print(f"[video] close_env failed ({type(e).__name__}: {e})")
+        return
+    if not args.save_video:
+        return
+    try:
+        env.merge_pkl_to_hdf5_video()
+        env.remove_data_cache()
+    except Exception as e:
+        # a missing video must not sink an otherwise-good figure run
+        print(f"[video] merge failed ({type(e).__name__}: {e}); figures are unaffected")
 
 
 def main():
@@ -206,7 +236,12 @@ def main():
     ap.add_argument("--zmin", type=float, default=0.70, help="table top sits at ~0.742 m")
     ap.add_argument("--zmax", type=float, default=1.20)
     ap.add_argument("--out-dir", default="../scripts/validation/results/gripper_path_3d",
-                    help="repo-root results location (same convention as other bench scripts)")
+                    help="repo-root results location (same convention as other bench scripts). "
+                         "Each run lands in its own <out-dir>/<timestamp>/ subfolder.")
+    ap.add_argument("--no-video", dest="save_video", action="store_false",
+                    help="skip the rollout mp4 (faster: no frame capture). By default the "
+                         "video is written to <out-dir>/<timestamp>/video/episode{seed}.mp4")
+    ap.set_defaults(save_video=True)
     run(ap.parse_args())
 
 
