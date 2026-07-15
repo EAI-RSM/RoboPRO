@@ -302,7 +302,11 @@ try:
             result = motion_gen.plan_single(start_joint_states, goal_pose_of_ee, plan_config)
 
             # ------------------------------------------
-            if result.success.item() == False:
+            if result.success.item() == False and os.environ.get("ROBOTWIN_LOG_MOVE", "") == "1":
+                # A failed plan is EXPECTED and frequent during the reachability
+                # planner's candidate search (it probes many infeasible poses on
+                # purpose), so this floods the console. The reason is still returned
+                # below in fail_reason; only print it when diagnostics are requested.
                 print("[Error]: CuroboPlanner plan_path failed:", result.status)
             # ------------------------------------------
 
