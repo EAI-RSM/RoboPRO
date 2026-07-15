@@ -69,13 +69,22 @@ def load_pkl_file(pkl_path):
     return data
 
 
+def _normalize_array_for_hdf5(value):
+    arr = np.array(value)
+    if arr.dtype.kind in {"U", "O"}:
+        encoded = [str(v).encode("utf-8") for v in value]
+        max_len = max((len(v) for v in encoded), default=1)
+        return np.array(encoded, dtype=f"S{max_len}")
+    return arr
+
+
 def create_hdf5_from_dict(hdf5_group, data_dict):
     for key, value in data_dict.items():
         if isinstance(value, dict):
             subgroup = hdf5_group.create_group(key)
             create_hdf5_from_dict(subgroup, value)
         elif isinstance(value, list):
-            value = np.array(value)
+            value = _normalize_array_for_hdf5(value)
             if "rgb" in key:
                 encode_data, max_len = images_encoding(value)
                 hdf5_group.create_dataset(key, data=encode_data, dtype=f"S{max_len}")

@@ -431,13 +431,53 @@ class Robot:
                 arms_tag="right",
             )
 
+    def left_check_ik_batch(self, target_lst, relax_orientation=False):
+        """Diagnostic only: cheap collision-aware IK feasibility check (no trajectory
+        optimization) for a batch of flat [x,y,z,qw,qx,qy,qz] poses. Returns a bool
+        array, one per pose. relax_orientation=True: position-only IK (see
+        CuroboPlanner.check_ik_batch)."""
+        target_lst_copy = deepcopy(target_lst)
+        for i in range(len(target_lst_copy)):
+            target_lst_copy[i] = self._trans_from_gripper_to_endlink(target_lst_copy[i], arm_tag="left")
+        if self.communication_flag:
+            self.left_conn.send({
+                "cmd": "check_ik_batch",
+                "target_pose_list": target_lst_copy,
+                "arms_tag": "left",
+                "relax_orientation": relax_orientation,
+            })
+            return self.left_conn.recv()
+        else:
+            return self.left_planner.check_ik_batch(target_lst_copy, arms_tag="left", relax_orientation=relax_orientation)
+
+    def right_check_ik_batch(self, target_lst, relax_orientation=False):
+        """Diagnostic only: cheap collision-aware IK feasibility check (no trajectory
+        optimization) for a batch of flat [x,y,z,qw,qx,qy,qz] poses. Returns a bool
+        array, one per pose. relax_orientation=True: position-only IK (see
+        CuroboPlanner.check_ik_batch)."""
+        target_lst_copy = deepcopy(target_lst)
+        for i in range(len(target_lst_copy)):
+            target_lst_copy[i] = self._trans_from_gripper_to_endlink(target_lst_copy[i], arm_tag="right")
+        if self.communication_flag:
+            self.right_conn.send({
+                "cmd": "check_ik_batch",
+                "target_pose_list": target_lst_copy,
+                "arms_tag": "right",
+                "relax_orientation": relax_orientation,
+            })
+            return self.right_conn.recv()
+        else:
+            return self.right_planner.check_ik_batch(target_lst_copy, arms_tag="right", relax_orientation=relax_orientation)
+
     def left_plan_path(
         self,
         target_pose,
         constraint_pose=None,
+        approach_axis=None,
         use_point_cloud=False,
         use_attach=False,
         last_qpos=None,
+        relax_orientation=False,
     ):
         if constraint_pose is not None:
             constraint_pose = self.get_constraint_pose(constraint_pose, arm_tag="left")
@@ -454,7 +494,9 @@ class Robot:
                 "qpos": now_qpos,
                 "target_pose": trans_target_pose,
                 "constraint_pose": constraint_pose,
+                "approach_axis": approach_axis,
                 "arms_tag": "left",
+                "relax_orientation": relax_orientation,
             })
             return self.left_conn.recv()
         else:
@@ -462,16 +504,20 @@ class Robot:
                 now_qpos,
                 trans_target_pose,
                 constraint_pose=constraint_pose,
+                approach_axis=approach_axis,
                 arms_tag="left",
+                relax_orientation=relax_orientation,
             )
 
     def right_plan_path(
         self,
         target_pose,
         constraint_pose=None,
+        approach_axis=None,
         use_point_cloud=False,
         use_attach=False,
         last_qpos=None,
+        relax_orientation=False,
     ):
         if constraint_pose is not None:
             constraint_pose = self.get_constraint_pose(constraint_pose, arm_tag="right")
@@ -487,7 +533,9 @@ class Robot:
                 "qpos": now_qpos,
                 "target_pose": trans_target_pose,
                 "constraint_pose": constraint_pose,
+                "approach_axis": approach_axis,
                 "arms_tag": "right",
+                "relax_orientation": relax_orientation,
             })
             return self.right_conn.recv()
         else:
@@ -495,7 +543,9 @@ class Robot:
                 now_qpos,
                 trans_target_pose,
                 constraint_pose=constraint_pose,
+                approach_axis=approach_axis,
                 arms_tag="right",
+                relax_orientation=relax_orientation,
             )
 
     # The data of gripper has been normalized
@@ -728,7 +778,9 @@ def planner_process_worker(conn, args):
                     msg["qpos"],
                     msg["target_pose"],
                     constraint_pose=msg.get("constraint_pose", None),
+                    approach_axis=msg.get("approach_axis", None),
                     arms_tag=msg["arms_tag"],
+                    relax_orientation=msg.get("relax_orientation", False),
                 )
                 conn.send(result)
 
@@ -738,6 +790,14 @@ def planner_process_worker(conn, args):
                     msg["target_pose_list"],
                     constraint_pose=msg.get("constraint_pose", None),
                     arms_tag=msg["arms_tag"],
+                )
+                conn.send(result)
+
+            elif msg["cmd"] == "check_ik_batch":
+                result = planner.check_ik_batch(
+                    msg["target_pose_list"],
+                    arms_tag=msg["arms_tag"],
+                    relax_orientation=msg.get("relax_orientation", False),
                 )
                 conn.send(result)
 
