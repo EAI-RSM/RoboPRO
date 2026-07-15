@@ -30,13 +30,23 @@ Only the ACTIVE arm is stamped -- the task is single-armed, but which arm it pic
 with the bottle's x, so both TCPs are sampled and whichever actually moved wins.
 
 A rollout that fails is still plotted (volume as far as it got, last TCP point marked with
-a red X). The SUCCESS/FAILED verdict goes in every title.
+a red X on the stage it died in). The SUCCESS/FAILED verdict goes in every title.
+
+SPLIT BY STAGE: the whole-rollout volume is one opaque blob that hides its own interior, so
+the rollout is sliced into its NAMED stages and each gets its own figure (four view angles
+as a 2x2 panel, shared axis limits so stages stay comparable). Stage names come from
+play_once's own checkpoint() calls -- grasp, lift, place_actor, ... -- via `env.stage_hook`,
+so they are the expert's real stages, not a guess. Stages that execute no motion
+(attach_object, enable_table) produce no samples and are skipped.
 
 OUTPUT LAYOUT: every run writes to its OWN timestamped folder, so re-running never
 overwrites an earlier run:
 
-    <out-dir>/<YYYYmmdd-HHMMSS>/sweptvol_seed0001_SUCCESS_iso.png
-                               sweptvol_seed0001.npz     (grid + landmarks, for re-render)
+    <out-dir>/<YYYYmmdd-HHMMSS>/sweptvol_seed0001_00_all.png        (whole rollout)
+                               sweptvol_seed0001_01_waypoint_move.png
+                               sweptvol_seed0001_02_grasp.png
+                               sweptvol_seed0001_03_lift.png        (... one per stage)
+                               sweptvol_seed0001.npz     (grid + stages, for re-render)
                                video/episode1.mp4
 
 USAGE (from customized_robotwin, env sourced + ROBOTWIN_BENCH_TASK=bench):
@@ -75,6 +85,11 @@ SPHERE_YML = {"left": "collision_aloha_left.yml", "right": "collision_aloha_righ
 LINK_PREFIX = {"left": "fl_", "right": "fr_"}
 # ee_link is *_link6; 7/8 are the fingers. Used by --gripper-only.
 GRIPPER_SUFFIXES = ("link6", "link7", "link8")
+
+# Warm orange for the volume: every other mark in the figure is cool (bottle = blue, pad =
+# magenta, box = grey, path = viridis), so the envelope reads as its own thing. It was
+# tab:blue, which collided with the bottle-start marker.
+VOL_COLOR = "#e0813c"
 
 
 def _load_spheres(side, gripper_only):
@@ -161,71 +176,86 @@ def _build_volume(poses, spheres, args):
     return grid, origin
 
 
-def _plot_volume(seed, grid, origin, pts, ok_overall, box_p, tgt_p, pad_xy, arm_name,
-                 run_dir, args):
-    """Swept volume as a marching-cubes isosurface, with the TCP path drawn inside it."""
+def _isosurface(grid, origin, args):
+    """Marching-cubes triangles for an occupancy grid, in world coords. None if empty."""
     from skimage import measure
-    from mpl_toolkits.mplot3d.art3d import Poly3DCollection, Line3DCollection
-
     if grid.sum() == 0:
-        print("isosurface skipped: empty volume"); return
+        return None
     try:
         verts, faces, _, _ = measure.marching_cubes(grid.astype(np.float32), level=0.5,
                                                     spacing=(args.res,) * 3)
-    except (ValueError, RuntimeError) as e:
-        print(f"isosurface skipped: {e}"); return
+    except (ValueError, RuntimeError):
+        return None
     # grid is indexed (x,y,z), so verts columns are already (x,y,z) in index*spacing
-    tri = (verts + origin)[faces]                     # (nfaces, 3, 3)
+    return (verts + origin)[faces]                    # (nfaces, 3, 3)
 
-    segs = np.stack([pts[:-1], pts[1:]], axis=1)
-    tnorm = np.linspace(0.0, 1.0, len(segs))
-    vol_l = float(grid.sum()) * (args.res ** 3) * 1000.0     # m^3 -> litres
 
-    out = Path(run_dir)
-    for tag, elev, azim in VIEWS:
-        fig = plt.figure(figsize=(9.5, 8))
-        ax = fig.add_subplot(111, projection="3d")
+def _draw_panel(ax, tri, pts, box_p, tgt_p, pad_xy, fail_pt, vol_l, elev, azim, args):
+    """One 3D view: volume + its TCP path + landmarks. `fail_pt` marks a red X when set."""
+    from mpl_toolkits.mplot3d.art3d import Poly3DCollection, Line3DCollection
 
-        ax.add_collection3d(Poly3DCollection(tri, alpha=0.18, facecolor="tab:blue",
+    if tri is not None:
+        ax.add_collection3d(Poly3DCollection(tri, alpha=0.22, facecolor=VOL_COLOR,
                                              edgecolor="none"))
+    if len(pts) >= 2:
+        segs = np.stack([pts[:-1], pts[1:]], axis=1)
         lc = Line3DCollection(segs, cmap="viridis", norm=plt.Normalize(0, 1), lw=2.0)
-        lc.set_array(tnorm)
+        lc.set_array(np.linspace(0.0, 1.0, len(segs)))
         ax.add_collection3d(lc)
 
-        _box_wireframe(ax, box_p, OCC_HALF_FOOTPRINT, OCC_HEIGHT)
-        ax.scatter([tgt_p[0]], [tgt_p[1]], [tgt_p[2]], color="tab:blue", s=70, marker="o",
-                   depthshade=False, ec="black", label="bottle start")
-        ax.scatter([pad_xy[0]], [pad_xy[1]], [float(box_p[2])], color="magenta", s=80,
-                   marker="s", depthshade=False, ec="black", label="pad (destination)")
-        if not ok_overall:
-            ax.scatter([pts[-1, 0]], [pts[-1, 1]], [pts[-1, 2]], color="red", s=110,
-                       marker="X", depthshade=False, ec="black", label="rollout failed here")
-        ax.plot([], [], [], color="tab:blue", lw=6, alpha=0.3,
-                label=f"swept volume ({vol_l:.1f} L)")
+    _box_wireframe(ax, box_p, OCC_HALF_FOOTPRINT, OCC_HEIGHT)
+    ax.scatter([tgt_p[0]], [tgt_p[1]], [tgt_p[2]], color="tab:blue", s=70, marker="o",
+               depthshade=False, ec="black", label="bottle start")
+    ax.scatter([pad_xy[0]], [pad_xy[1]], [float(box_p[2])], color="magenta", s=80,
+               marker="s", depthshade=False, ec="black", label="pad (destination)")
+    if len(pts):
+        ax.scatter([pts[0, 0]], [pts[0, 1]], [pts[0, 2]], color="black", s=40, marker="^",
+                   depthshade=False, label="stage start")
+    if fail_pt is not None:
+        ax.scatter([fail_pt[0]], [fail_pt[1]], [fail_pt[2]], color="red", s=110, marker="X",
+                   depthshade=False, ec="black", label="rollout failed here")
+    ax.plot([], [], [], color=VOL_COLOR, lw=6, alpha=0.5, label=f"swept volume ({vol_l:.1f} L)")
 
-        ax.set_xlabel("x (m)"); ax.set_ylabel("y (m)"); ax.set_zlabel("z (m)")
-        ax.set_xlim(args.xmin, args.xmax); ax.set_ylim(args.ymin, args.ymax)
-        ax.set_zlim(args.zmin, args.zmax)
-        try:
-            ax.set_box_aspect((args.xmax - args.xmin, args.ymax - args.ymin,
-                               args.zmax - args.zmin))
-        except Exception:
-            pass
-        ax.view_init(elev=elev, azim=azim)
-        ax.legend(loc="upper left", fontsize=8)
+    ax.set_xlabel("x (m)"); ax.set_ylabel("y (m)"); ax.set_zlabel("z (m)")
+    ax.set_xlim(args.xmin, args.xmax); ax.set_ylim(args.ymin, args.ymax)
+    ax.set_zlim(args.zmin, args.zmax)
+    try:
+        ax.set_box_aspect((args.xmax - args.xmin, args.ymax - args.ymin,
+                           args.zmax - args.zmin))
+    except Exception:
+        pass                                          # older matplotlib: default aspect
+    ax.view_init(elev=elev, azim=azim)
 
-        scope = "gripper (links 6/7/8)" if args.gripper_only else "full arm"
-        ax.set_title(f"seed {seed}  |  {arm_name} {scope} swept volume  |  "
-                     f"rollout {'SUCCESS' if ok_overall else 'FAILED'}\n"
-                     f"space the PLANNER models the arm sweeping (padded CuRobo spheres, "
-                     f"not exact mesh)\n"
-                     f"occluder offset {args.offset:.2f} m, no clutter (density 0)  |  "
-                     f"{args.res * 100:.1f} cm grid  |  view: {tag}")
 
-        vtag = "SUCCESS" if ok_overall else "FAILED"
-        p = out / f"sweptvol_seed{seed:04d}_{vtag}_{tag}.png"
-        fig.savefig(p, dpi=130, bbox_inches="tight"); plt.close(fig)
-        print(f"saved {p}")
+def _plot_stage(seed, grid, origin, pts, label, subtitle, fail_pt, ok_overall, box_p,
+                tgt_p, pad_xy, arm_name, run_dir, args, fname):
+    """One PNG per rollout part: the four view angles as a 2x2 panel of the SAME volume.
+
+    Splitting by stage is the whole point -- the all-stages volume is a single blob that
+    hides its own interior, so each stage gets its own figure at the same axis limits
+    (fixed limits keep the stages visually comparable to each other and to the overview)."""
+    tri = _isosurface(grid, origin, args)
+    vol_l = float(grid.sum()) * (args.res ** 3) * 1000.0
+    fig = plt.figure(figsize=(15, 12.5))
+    for i, (tag, elev, azim) in enumerate(VIEWS):
+        ax = fig.add_subplot(2, 2, i + 1, projection="3d")
+        _draw_panel(ax, tri, pts, box_p, tgt_p, pad_xy, fail_pt, vol_l, elev, azim, args)
+        ax.set_title(f"view: {tag}", fontsize=10)
+        if i == 0:
+            ax.legend(loc="upper left", fontsize=8)
+
+    scope = "gripper (links 6/7/8)" if args.gripper_only else "full arm"
+    fig.suptitle(f"seed {seed}  |  {arm_name} {scope}  |  {label}  |  {vol_l:.1f} L  |  "
+                 f"rollout {'SUCCESS' if ok_overall else 'FAILED'}\n"
+                 f"{subtitle}\n"
+                 f"space the PLANNER models the arm sweeping (padded CuRobo spheres, not "
+                 f"exact mesh)  |  occluder offset {args.offset:.2f} m, no clutter "
+                 f"(density 0)  |  {args.res * 100:.1f} cm grid",
+                 fontsize=11)
+    fig.tight_layout(rect=[0, 0, 1, 0.94])
+    p = Path(run_dir) / fname
+    fig.savefig(p, dpi=110); plt.close(fig)
+    print(f"saved {p}  ({vol_l:.1f} L)")
 
 
 def run(args):
@@ -269,7 +299,20 @@ def run(args):
         tcps["left"].append(env.robot.get_left_tcp_pose()[:3])
         tcps["right"].append(env.robot.get_right_tcp_pose()[:3])
 
+    # Stage slicing: play_once's checkpoint(name) fires AFTER each named stage, so every
+    # sample taken since the previous checkpoint belongs to `name`. Stages that execute no
+    # motion (attach_object, enable_table, ...) produce no samples and are skipped here.
+    stages = []          # (name, start_idx, end_idx) into the sample sequence
+    mark = [0]
+
+    def stage_hook(name):
+        cur = len(tcps["left"])
+        if cur > mark[0]:
+            stages.append((name, mark[0], cur))
+        mark[0] = cur
+
     env.step_hook = hook
+    env.stage_hook = stage_hook
     try:
         env.play_once()
         ok_overall = bool(getattr(env, "plan_success", False))
@@ -278,6 +321,10 @@ def run(args):
               f"plotting what it swept up to the failure")
         ok_overall = False
     env.step_hook = None
+    env.stage_hook = None
+    # Motion after the last checkpoint belongs to no named stage; keep it rather than drop it.
+    if len(tcps["left"]) > mark[0]:
+        stages.append(("(after last checkpoint)", mark[0], len(tcps["left"])))
 
     L, R = np.array(tcps["left"], dtype=float), np.array(tcps["right"], dtype=float)
     if len(L) < 2:
@@ -305,11 +352,32 @@ def run(args):
     npz = Path(run_dir) / f"sweptvol_seed{args.seed:04d}.npz"
     np.savez_compressed(npz, grid=grid, origin=origin, res=args.res, pts=pts,
                         box_p=box_p, tgt_p=tgt_p, pad_xy=np.array(PAD_XY),
-                        ok=ok_overall, arm=arm_name)
+                        ok=ok_overall, arm=arm_name,
+                        stages=np.array([(n, a, b) for n, a, b in stages], dtype=object))
     print(f"saved {npz}")
 
-    _plot_volume(args.seed, grid, origin, pts, ok_overall, box_p, tgt_p,
-                 np.array(PAD_XY), arm_name, run_dir, args)
+    pad = np.array(PAD_XY)
+    # (1) overview: the whole rollout in one blob (hard to read on its own -- that is why
+    # the per-stage figures below exist), then (2) one figure per named stage.
+    _plot_stage(args.seed, grid, origin, pts, "ALL STAGES",
+                f"whole rollout, {len(pts)} samples", (None if ok_overall else pts[-1]),
+                ok_overall, box_p, tgt_p, pad, arm_name, run_dir, args,
+                f"sweptvol_seed{args.seed:04d}_00_all.png")
+
+    print(f"[stages] {len(stages)} stage(s) with motion: "
+          f"{', '.join(n for n, _, _ in stages)}")
+    for i, (name, a, b) in enumerate(stages, start=1):
+        sub_poses = {ln: seq[a:b] for ln, seq in poses[arm_name].items()}
+        sgrid, sorigin = _build_volume(sub_poses, spheres, args)
+        # only the stage the rollout died in gets the failure marker
+        last = (i == len(stages)) and not ok_overall
+        safe = name.replace(":", "_").replace(" ", "_").replace("(", "").replace(")", "")
+        _plot_stage(args.seed, sgrid, sorigin, pts[a:b], f"stage {i}/{len(stages)}: {name}",
+                    f"samples {a}-{b} of {len(pts)} ({b - a} steps)",
+                    (pts[b - 1] if last else None), ok_overall, box_p, tgt_p, pad,
+                    arm_name, run_dir, args,
+                    f"sweptvol_seed{args.seed:04d}_{i:02d}_{safe}.png")
+
     _write_video(env, args)
 
 
