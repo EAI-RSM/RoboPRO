@@ -1505,6 +1505,12 @@ class Bench_base_task(Base_Task):
                 self._snapshot_static_object_poses()
             self.scene.step()
 
+            # Optional per-step observer (set by tooling, e.g. gripper_path_3d.py). Fires
+            # after every executed physics step; never set during normal collection.
+            step_hook = getattr(self, "step_hook", None)
+            if step_hook is not None:
+                step_hook(control_idx)
+
             if self.render_freq and control_idx % self.render_freq == 0:
                 self._update_render()
                 self.viewer.render()
