@@ -145,6 +145,9 @@ episodes, the metrics blob names **which objects were actually hit** — free ca
 
 - Routing: run from `customized_robotwin/` with `ROBOTWIN_BENCH_TASK=bench` +
   `source set_env.sh`; configs resolve by *name* from `benchmark/bench_task_config/`.
+- ARM / aarch64 hosts (GB10 / DGX Spark): SAPIEN 3.0.0b1 has no aarch64 wheel and must be
+  built from source — see `docs/setup_sapien_aarch64.md`. This is purely an environment
+  build step; it does not affect the data schema, grounding, or 3D boxes produced here.
 - Collection is **resumable**: existing `episodeN.hdf5` skipped, `seed.txt` continues.
   Corollary: after changing what gets collected, delete old episodes (or rename the
   config) or collection silently no-ops.
