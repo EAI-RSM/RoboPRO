@@ -33,16 +33,6 @@ from typing import Optional, Literal
 current_file_path = os.path.abspath(__file__)
 parent_directory = os.path.dirname(current_file_path)
 
-# Visibility buckets as ordered (name, upper-exclusive bound on visible_fraction).
-# `not_visible` is the special case visible_fraction == 0 (handled separately).
-# Tunable; pass a custom list to classify_visibility / measure_target_visibility.
-DEFAULT_VISIBILITY_BUCKETS = [
-    ("heavily_occluded", 0.25),    # 0    < frac < 0.25
-    ("mostly_occluded", 0.5),      # 0.25 <= frac < 0.5
-    ("partially_occluded", 0.9),   # 0.5  <= frac < 0.9
-    ("fully_visible", float("inf")),  # 0.9 <= frac
-]
-
 
 class Base_Task(gym.Env):
 
@@ -547,122 +537,6 @@ class Base_Task(gym.Env):
         self.cameras.update_picture()
         rgb = self.cameras.get_rgb()
         save_img(save_path, rgb[camera_name]['rgb'])
-
-    # =================================== Visibility measurement (issue #28) ===================================
-
-    def _resolve_target_seg_ids(self, target_actor) -> set:
-        """
-        Map a target to the integer actor-level segmentation id(s) it occupies in
-        the raw segmentation image (channel 1 == entity ``per_scene_id``).
-
-        Accepts either a raw SAPIEN ``Entity`` / articulation, or one of this
-        codebase's ``Actor`` / ``ArticulationActor`` wrappers (``.actor`` holds
-        the underlying object). A rigid object is a single entity -> one id; an
-        articulation spans several link entities -> a set of ids.
-        """
-        actor = getattr(target_actor, "actor", target_actor)
-
-        if hasattr(actor, "get_links"):  # PhysxArticulation: one entity per link
-            ids = set()
-            for link in actor.get_links():
-                entity = getattr(link, "entity", None)
-                if entity is None and hasattr(link, "get_entity"):
-                    entity = link.get_entity()
-                ids.add(int(entity.per_scene_id))
-            return ids
-
-        if hasattr(actor, "per_scene_id"):  # rigid Entity
-            return {int(actor.per_scene_id)}
-
-        raise TypeError(f"Cannot resolve segmentation id for object of type {type(actor)}")
-
-    def classify_visibility(self, visible_fraction, buckets=None) -> str:
-        """
-        Classify visible_fraction into a named bucket. ``buckets`` is an ordered
-        list of (name, upper_exclusive) bounds (defaults to
-        ``DEFAULT_VISIBILITY_BUCKETS``); visible_fraction == 0 is always
-        ``not_visible``.
-
-        Default taxonomy:
-            not_visible        : frac == 0
-            heavily_occluded   : 0    < frac < 0.25
-            mostly_occluded    : 0.25 <= frac < 0.5
-            partially_occluded : 0.5  <= frac < 0.9
-            fully_visible      : 0.9  <= frac
-        """
-        if buckets is None:
-            buckets = DEFAULT_VISIBILITY_BUCKETS
-        if visible_fraction <= 0.0:
-            return "not_visible"
-        for name, hi in buckets:
-            if visible_fraction < hi:
-                return name
-        return buckets[-1][0]
-
-    def measure_target_visibility(
-        self,
-        target_actor,
-        camera_name="countertop_camera",
-        denominator=None,
-        buckets=None,
-        render=True,
-    ) -> dict:
-        """
-        Measure how visible ``target_actor`` is on ``camera_name`` from the raw
-        actor-segmentation image of the currently built scene.
-
-        Returns a dict with:
-            target_ids          : resolved segmentation id(s) for the target
-            visible_pixel_count : pixels where actor-seg == a target id
-            in_fov              : visible_pixel_count > 0
-            visible_fraction    : visible_pixel_count / denominator (None if no denominator)
-            bucket              : classification (None if no denominator)
-            mask                : boolean [H, W] target mask (for validation/overlay)
-
-        ``render`` re-renders + re-takes pictures before reading; pass False to
-        reuse buffers already produced this frame.
-        """
-        if render:
-            self._update_render()
-            self.cameras.update_picture()
-
-        seg = self.cameras.get_segmentation_raw(level="actor", camera_name=camera_name)
-        if camera_name not in seg:
-            raise ValueError(
-                f"camera {camera_name!r} not available; have {list(seg.keys())}"
-            )
-        seg_img = seg[camera_name]["actor_segmentation_raw"]
-
-        target_ids = self._resolve_target_seg_ids(target_actor)
-        mask = np.isin(seg_img, list(target_ids))
-        visible_pixel_count = int(mask.sum())
-
-        result = {
-            "camera_name": camera_name,
-            "target_ids": sorted(target_ids),
-            "visible_pixel_count": visible_pixel_count,
-            "in_fov": visible_pixel_count > 0,
-            "visible_fraction": None,
-            "bucket": None,
-            "mask": mask,
-        }
-
-        if denominator is not None and denominator > 0:
-            frac = visible_pixel_count / float(denominator)
-            result["visible_fraction"] = frac
-            result["bucket"] = self.classify_visibility(frac, buckets=buckets)
-
-        return result
-
-    def capture_target_pixel_count(self, target_actor, camera_name="countertop_camera", render=True) -> int:
-        """
-        Count the target's pixels for use as the ``full_target_pixel_count``
-        denominator. Phase 0 just provides the capture; callers decide *when* to
-        call it (e.g. pre-clutter / pre-occluder) in later phases.
-        """
-        return self.measure_target_visibility(
-            target_actor, camera_name=camera_name, render=render
-        )["visible_pixel_count"]
 
     def _take_picture(self):  # save data
         if not self.save_data:
