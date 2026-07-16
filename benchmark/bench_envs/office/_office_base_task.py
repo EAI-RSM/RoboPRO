@@ -146,6 +146,7 @@ class Office_base_task(Bench_base_task):
         self.eval_video_path = kwags.get("eval_video_save_dir", None)
 
         self.save_freq = kwags.get("save_freq")
+        self.video_fps = kwags.get("video_fps", 30)
         self.world_pcd = None
 
         self.key_objects = []

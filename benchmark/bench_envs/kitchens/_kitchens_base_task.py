@@ -127,6 +127,7 @@ class KitchenS_base_task(Bench_base_task):
         self.incl_collision = kwags.get("include_collision", False)
 
         self.save_freq = kwags.get("save_freq")
+        self.video_fps = kwags.get("video_fps", 30)
         self.world_pcd = None
 
         self.key_objects = []

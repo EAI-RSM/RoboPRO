@@ -8,6 +8,7 @@ episode_num: 3            # held-out episodes per task (lower for a faster eval)
 use_seed: false
 start_seed: 100000         # training used seeds 0..7 -> 100000+ guarantees held-out
 save_freq: 15
+video_fps: 30
 embodiment: [aloha-agilex]
 language_num: 100
 domain_randomization:

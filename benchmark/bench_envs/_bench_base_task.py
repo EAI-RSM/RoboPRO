@@ -849,10 +849,7 @@ class Bench_base_task(Base_Task):
         """Snapshot poses of all static objects before scene.step() for cumulative displacement tracking."""
         if not hasattr(self, 'static_object_ids'):
             return
-        for entity in self.scene.get_all_actors():
-            actor_id = entity.per_scene_id
-            if actor_id not in self.static_object_ids:
-                continue
+        for actor_id, entity in self._static_id_to_entity.items():
             p = entity.get_pose()
             snapshot = (np.array(p.p, dtype=np.float64), np.array(p.q, dtype=np.float64))
             self.static_object_pose_prev[actor_id] = snapshot

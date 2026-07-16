@@ -266,6 +266,7 @@ class Base_Task(gym.Env):
         self.eval_video_path = kwags.get("eval_video_save_dir", None)
 
         self.save_freq = kwags.get("save_freq")
+        self.video_fps = kwags.get("video_fps", 30)
         self.world_pcd = None
 
         self.size_dict = list()
@@ -1255,7 +1256,7 @@ class Base_Task(gym.Env):
         # print('Merging pkl to hdf5: ', cache_path, ' -> ', target_file_path)
 
         os.makedirs(f"{self.save_dir}/data", exist_ok=True)
-        process_folder_to_hdf5_video(cache_path, target_file_path, target_video_path)
+        process_folder_to_hdf5_video(cache_path, target_file_path, target_video_path, fps=self.video_fps)
 
     def remove_data_cache(self):
         folder_path = self.folder_path["cache"]

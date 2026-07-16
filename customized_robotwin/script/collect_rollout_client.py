@@ -246,6 +246,9 @@ def collect_rollouts(TASK_ENV, args, model, usr_args, collect_num, instruction_t
         roll["need_plan"] = False
         roll["save_data"] = True
         roll["render_freq"] = 0
+        # policy commands land at ~10 Hz (vs. CuRobo's save_freq-substep cadence);
+        # encode the merged episode mp4 to match unless the task_config overrides it.
+        roll.setdefault("video_fps", 10)
         print(f"\033[34m[rollout] episode {ep_idx} (seed={seed}) — {policy_name}\033[0m")
         try:
             TASK_ENV.setup_demo(now_ep_num=ep_idx, seed=seed, is_test=fixed_seed, **roll)

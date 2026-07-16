@@ -19,6 +19,7 @@ episode_num: 100             # episodes to KEEP per task (default 1 = quick revi
 use_seed: false            # true = replay seeds from <save_dir>/seed.txt instead of searching
                            #        (matched pairs: copy seed.txt from a finished twin run first)
 save_freq: 15
+video_fps: 30
 embodiment: [aloha-agilex]
 language_num: 100
 domain_randomization:
