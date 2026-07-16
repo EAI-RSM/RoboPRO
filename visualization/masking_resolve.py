@@ -460,6 +460,33 @@ def resolve_bin(st, task, bid, pose, amin, amax, id_map, visible, has_articulati
 
 # ---- top level ----------------------------------------------------------------
 
+def role_target_ids(roles, id_map):
+    """IDs the task SANCTIONS as manipulable, from scene_info's role_names (target /
+    destination / intended-contact objects). Used to reject rigid clutter that merely
+    got physically nudged -- e.g. a plant shoved by an opening drawer -- from being
+    mislabeled a target. Returns None when the episode carries no usable role info, so
+    the caller falls back to motion-only detection and nothing is filtered."""
+    if not roles:
+        return None
+    names = set()
+    for key in ("target_object_names", "destination_object_names", "intended_contact_names"):
+        for n in (roles.get(key) or []):
+            tok = _norm(n)
+            if tok:
+                names.add(tok)
+    if not names:
+        return None
+    allowed = set()
+    for key in ("target_id", "destination_id"):
+        v = roles.get(key)
+        if isinstance(v, (int, np.integer)):
+            allowed.add(int(v))
+    for i, nm in id_map.items():
+        if _norm(nm.split("/")[-1]) in names or _norm(nm) in names:
+            allowed.add(int(i))
+    return allowed
+
+
 def resolve_episode(run_dir, ep, task=None, verbose=True):
     task = task or task_from_run_dir(run_dir)
     h5 = os.path.join(run_dir, "data", f"episode{ep}.hdf5")
@@ -472,6 +499,19 @@ def resolve_episode(run_dir, ep, task=None, verbose=True):
         ee_l = f["endpose/left_endpose"][:, :3] if "endpose/left_endpose" in f else None
         ee_r = f["endpose/right_endpose"][:, :3] if "endpose/right_endpose" in f else None
     stages, col_id = segment_stages(bid, pose, quat, id_map, ee_l, ee_r)
+    # role-aware target filter: keep articulation links (drawers/doors) and any object the
+    # task sanctions in role_names; drop rigid clutter that only got nudged (e.g. a plant
+    # shoved by an opening drawer) so it can never be mislabeled a target. Purely
+    # subtractive -- bin resolution below is untouched -- and a no-op when roles are absent.
+    allowed = role_target_ids(roles, id_map)
+    if allowed is not None:
+        kept = [st for st in stages
+                if ("/" in st["target_name"] and not st["target_name"].startswith("robot"))
+                or int(st["target_id"]) in allowed]
+        if kept:                                    # never filter down to nothing
+            stages = kept
+            for idx, st in enumerate(stages):       # renumber after filtering
+                st["stage"] = idx
     art_links = sorted({n for i, n in id_map.items()
                         if "/" in n and not n.startswith("robot") and "__jointframe__" not in n})
     has_articulation = len(art_links) > 0

@@ -153,11 +153,19 @@ def _render_local_aabb(components):
 
 
 def _local_aabb(components):
-    """Local-frame box for an oriented box: collision geometry if present (physical
-    grasp surface), else the visual mesh bounds. Searches ALL components because the
-    body that reports the world AABB may be a render body with no collision shapes."""
+    """Local-frame box for an oriented box: the UNION of collision geometry and visual
+    mesh bounds, so the box wraps the WHOLE object even when the collision proxy is a
+    partial stub (e.g. only a cup's base or a fan's foot -- walls/blades are visual-only).
+    Searches ALL components because the body that reports the world AABB may be a render
+    body with no collision shapes. Falls back to whichever source is present alone."""
     components = list(components)
-    return _collision_local_aabb(components) or _render_local_aabb(components)
+    col = _collision_local_aabb(components)
+    ren = _render_local_aabb(components)
+    if col is None:
+        return ren
+    if ren is None:
+        return col
+    return (np.minimum(col[0], ren[0]), np.maximum(col[1], ren[1]))
 
 
 def _obb_fields(pos, quat, la, world_aabb):

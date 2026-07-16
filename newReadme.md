@@ -34,6 +34,10 @@ cd customized_robotwin
 pip install -r script/requirements.txt
 pip install setuptools==69.5.1
 
+# On ARM / aarch64 (GB10 / DGX Spark): PyPI ships no aarch64 wheel for sapien==3.0.0b1,
+# so the line above can't resolve sapien. Build it from source FIRST following
+# docs/setup_sapien_aarch64.md, then re-run the requirements install. (x86_64: skip this.)
+
 CC=gcc-11 CXX=g++-11 CUDAHOSTCXX=g++-11 MAX_JOBS=8 \
   pip install "git+https://github.com/facebookresearch/pytorch3d.git@stable" --no-build-isolation
 

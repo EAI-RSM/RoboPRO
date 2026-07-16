@@ -1871,11 +1871,19 @@ class Bench_base_task(Base_Task):
         right_gripper = np.array(right_gripper)
 
         now_left_id, now_right_id = 0, 0
-        # Frame capture for POLICY-ROLLOUT data collection: when save_data is on
-        # (never in eval), record frames at the same save_freq cadence as the
-        # CuRobo collector's take_dense_action, through the same _take_picture ->
-        # pkl -> hdf5 pipeline, so rollout datasets are format-identical.
+        # Frame capture for POLICY-ROLLOUT data collection (save_data on; never in
+        # eval-client mode). Default: ONE frame per policy command, captured before
+        # execution — so hdf5 rows align 1:1 with policy commands and next-frame
+        # actions keep the training-time step scale (fine-tunable data). Contact/
+        # collision events still accumulate across the whole command and flush into
+        # its frame at the next capture, so no events are lost — labels are just
+        # per-command instead of per-0.06s. Set ROLLOUT_DENSE_RECORD=1 to restore
+        # the save_freq-substep cadence (frame-parity with take_dense_action, for
+        # per-timestep-label datasets mixing rollout + CuRobo frames).
         _rec = bool(getattr(self, "save_data", False)) and getattr(self, "save_freq", None)
+        _dense = os.environ.get("ROLLOUT_DENSE_RECORD", "0") == "1"
+        if _rec and not _dense:
+            self._take_picture()  # state[t]: pre-execution state of command t
         _ctrl_i = 0
 
         # ========== Control Loop ==========
@@ -1911,7 +1919,7 @@ class Bench_base_task(Base_Task):
             # picture BEFORE check_collisions — same substep/frame boundary as
             # take_dense_action, so policy-rollout labels line up with CuRobo
             # data at the frame level (a boundary event lands on the same frame)
-            if _rec and _ctrl_i % self.save_freq == 0:
+            if _rec and _dense and _ctrl_i % self.save_freq == 0:
                 self._take_picture()
             _ctrl_i += 1
 

@@ -165,6 +165,30 @@ def eval_function_decorator(policy_name, model_name):
 
 # ── Episode collection (env-pipeline recording, CuRobo-identical output) ────
 
+
+def _get_camera_wh(camera_type):
+    """W,H for the raw video stream (task_config/_camera_config.yml)."""
+    import yaml as _yaml
+    from pathlib import Path as _Path
+    cfg = _Path(__file__).resolve().parents[1] / "task_config" / "_camera_config.yml"
+    with open(cfg, "r", encoding="utf-8") as f:
+        c = _yaml.load(f.read(), Loader=_yaml.FullLoader)[camera_type]
+    return c["w"], c["h"]
+
+
+def _finish_cmd_video(proc):
+    if proc is None:
+        return
+    try:
+        proc.stdin.close()
+        proc.wait(timeout=60)
+    except Exception:
+        try:
+            proc.kill()
+        except Exception:
+            pass
+
+
 def collect_rollouts(TASK_ENV, args, model, usr_args, collect_num, instruction_type):
     run_dir = Path(args["save_path"])            # already <save_path>/<task>/<config>
     (run_dir / "data").mkdir(parents=True, exist_ok=True)
@@ -226,7 +250,26 @@ def collect_rollouts(TASK_ENV, args, model, usr_args, collect_num, instruction_t
                 perturbed_instruction = TASK_ENV._maybe_apply_language_perturbation()
             if not fixed_seed and intended_names and hasattr(TASK_ENV, "_intended_contact_names"):
                 TASK_ENV._intended_contact_names |= intended_names
-            TASK_ENV.eval_video_path = None  # video comes from merge_pkl_to_hdf5_video
+            # dense video still comes from merge_pkl_to_hdf5_video; additionally
+            # stream an old-style 1-frame-per-COMMAND mp4 (real-speed-looking,
+            # like the eval client) unless COLLECT_CMD_VIDEO=0. take_action
+            # writes the frames (demo/countertop/head preference).
+            TASK_ENV.eval_video_path = None
+            _cmd_video = None
+            if os.environ.get("COLLECT_CMD_VIDEO", "1") != "0":
+                import subprocess as _sp
+                _vdir = run_dir / "video"
+                _vdir.mkdir(parents=True, exist_ok=True)
+                _w, _h = _get_camera_wh(args["camera"]["head_camera_type"])
+                _cmd_video = _sp.Popen(
+                    ["ffmpeg", "-y", "-loglevel", "error", "-f", "rawvideo",
+                     "-pixel_format", "rgb24", "-video_size", f"{_w}x{_h}",
+                     "-framerate", "10", "-i", "-", "-pix_fmt", "yuv420p",
+                     "-vcodec", "libx264", "-crf", "23",
+                     str(_vdir / f"episode{ep_idx}_cmd.mp4")],
+                    stdin=_sp.PIPE)
+                TASK_ENV._set_eval_video_ffmpeg(_cmd_video)
+                TASK_ENV.eval_video_path = str(_vdir)
 
             # t=0 snapshot + scene geometry (replay + offline proximity inputs)
             if hasattr(TASK_ENV, "capture_init_state"):
@@ -298,6 +341,7 @@ def collect_rollouts(TASK_ENV, args, model, usr_args, collect_num, instruction_t
             has_frames = cache_dir.is_dir() and any(
                 fn.endswith(".pkl") for fn in os.listdir(cache_dir))
 
+            _finish_cmd_video(_cmd_video); _cmd_video = None
             TASK_ENV.close_env(clear_cache=True)
             if has_frames:
                 TASK_ENV.merge_pkl_to_hdf5_video()
@@ -332,10 +376,12 @@ def collect_rollouts(TASK_ENV, args, model, usr_args, collect_num, instruction_t
             ep_idx += 1
             seed += 1
         except UnStableError:
+            _finish_cmd_video(locals().get('_cmd_video'))
             TASK_ENV.close_env(); seed += 1
         except (BrokenPipeError, ConnectionError) as e:
             # dead policy server — retrying seeds is pointless; abort loudly
             print(f"\033[91m[rollout] model server connection lost: {e} — aborting\033[0m")
+            _finish_cmd_video(locals().get('_cmd_video'))
             for fn in (TASK_ENV.remove_data_cache, TASK_ENV.close_env):
                 try:
                     fn()
@@ -344,6 +390,7 @@ def collect_rollouts(TASK_ENV, args, model, usr_args, collect_num, instruction_t
             raise SystemExit(3)
         except Exception:
             traceback.print_exc()
+            _finish_cmd_video(locals().get('_cmd_video'))
             for fn in (TASK_ENV.remove_data_cache, TASK_ENV.close_env):
                 try:
                     fn()

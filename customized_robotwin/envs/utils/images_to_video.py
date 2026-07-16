@@ -6,7 +6,7 @@ import pickle
 import pdb
 
 
-def images_to_video(imgs: np.ndarray, out_path: str, fps: float = 30.0, is_rgb: bool = True) -> None:
+def images_to_video(imgs: np.ndarray, out_path: str, fps: float = 10.0, is_rgb: bool = True) -> None:
     if (not isinstance(imgs, np.ndarray) or imgs.ndim != 4 or imgs.shape[3] not in (3, 4)):
         raise ValueError("imgs must be a numpy.ndarray of shape (N, H, W, C), with C equal to 3 or 4.")
     os.makedirs(os.path.dirname(out_path), exist_ok=True)

@@ -14,7 +14,7 @@
 # ============================================================================
 
 render_freq: 0
-episode_num: 3             # episodes to KEEP per task (default 1 = quick review/smoke;
+episode_num: 10             # episodes to KEEP per task (default 1 = quick review/smoke;
                            # scale up e.g. 200 for training). seed-search banks this many.
 use_seed: false            # true = replay seeds from <save_dir>/seed.txt instead of searching
                            #        (matched pairs: copy seed.txt from a finished twin run first)
