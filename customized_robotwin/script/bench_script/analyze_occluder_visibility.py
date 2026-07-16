@@ -30,6 +30,7 @@ USAGE (from the benchmark folder):
 import os
 import json
 import argparse
+import collections
 from copy import deepcopy
 from pathlib import Path
 
@@ -47,7 +48,7 @@ os.environ.setdefault("ROBOTWIN_BENCH_TASK", "bench")
 robotwin_root = Path(os.environ["ROBOTWIN_ROOT"])
 os.chdir(robotwin_root)
 
-from envs.utils import rand_pose, create_actor, create_box, ArmTag
+from envs.utils import rand_pose, create_actor, create_box, ArmTag, cal_quat_dis
 from envs._GLOBAL_CONFIGS import GRASP_DIRECTION_DIC
 from visualize_task_scene import get_env_class
 # reuse the Phase 1 harness verbatim
@@ -130,6 +131,10 @@ OBJECT_RETENTION_ROTATION_TOLERANCE = 0.2
 # might otherwise have corrected.
 OBJECT_PLACEMENT_XY_TOLERANCE = 0.018
 OBJECT_PLACEMENT_Z_TOLERANCE = 0.03
+# Contact handling uses the task's exact per-axis success threshold. Once the
+# object has settled, a gripper-relative retention check is no longer meaningful;
+# release only when the task's own XY predicate already passes.
+CONTACT_RELEASE_XY_TOLERANCE = 0.02
 # Gripper-relative drift (meters) beyond OBJECT_RETENTION_TOLERANCE that's
 # still treated as ambiguous-possible-contact rather than an outright loss,
 # for place_actor's descent specifically: the object settling onto the pad/
@@ -291,6 +296,11 @@ LANDING_SEARCH_MAX_Z_DISTANCE = float(os.environ.get("LANDING_SEARCH_MAX_Z_DISTA
 # to pick a genuinely different contact point on retry (via exclude_cp_ids)
 # instead of ending the episode after the first missed grasp.
 GRASP_VERIFY_MAX_CANDIDATES = 3
+# Replay attached-object trajectories more slowly without changing their
+# planned geometric path. A factor of 2 inserts one interpolated control point
+# between each pair and scales commanded velocity accordingly.
+ATTACHED_TRAJECTORY_SLOWDOWN = max(
+    1, int(os.environ.get("ATTACHED_TRAJECTORY_SLOWDOWN", "2")))
 # Slice length (meters) for place_actor's deterministic descent (see
 # _plan_pose_with_descent_slices). place_actor's moves are short, mostly-
 # straight-line final approaches with KNOWN structure (fixed target
@@ -481,6 +491,7 @@ def make_occluder_task():
             self.rollout_candidate_info = None
             self._last_fail_reason = None
             self._grasp_baseline_transform = None
+            self._slow_attached_replay = False
             # Richer diagnostics read by run() into records.jsonl alongside the
             # single-value failure/candidate fields above: per-attempt grasp
             # history (which contact points were tried and why each failed, not
@@ -521,6 +532,7 @@ def make_occluder_task():
             candidate_plan = None
             cp_id = None
             grasp_succeeded = False
+            retry_reset_pose = list(self.get_arm_pose(arm_tag))
             for grasp_attempt in range(1, GRASP_VERIFY_MAX_CANDIDATES + 1):
                 candidate_plan = self._select_pick_place_candidate(arm_tag, exclude_cp_ids=tried_cp_ids)
                 cp_id = candidate_plan["contact_point_id"]
@@ -580,13 +592,14 @@ def make_occluder_task():
                         self.plan_success = False
                         self._last_fail_reason = f"grasp_missed(object_z_rise={object_rise:.3f}m)"
                 checkpoint("grasp_verify")
-                self.rollout_grasp_attempts.append({
+                attempt_record = {
                     "attempt": grasp_attempt,
                     "contact_point_id": cp_id,
                     "success": self.plan_success,
                     "failed_stage": self.rollout_failure_stage,
                     "fail_reason": self.rollout_failure_reason,
-                })
+                }
+                self.rollout_grasp_attempts.append(attempt_record)
                 if self.plan_success:
                     grasp_succeeded = True
                     break
@@ -598,10 +611,8 @@ def make_occluder_task():
                     self.rollout_failure_stage = None
                     self.rollout_failure_reason = None
                     self._last_fail_reason = None
-                    # _grasp_via_cached_trajectories closed the gripper AND
-                    # disabled the table for the failed attempt (right after
-                    # its own pre_grasp leg, before its final grasp approach)
-                    # and never reverses either. The table must go back to
+                    # The failed attempt closed the gripper; restore both the
+                    # gripper and table state before selecting another contact point. The table must go back to
                     # ENABLED here, not stay disabled: _grasp_via_cached_
                     # trajectories' own waypoint_move/pre_grasp leg expects to
                     # plan WITH table collision active (that's why it only
@@ -611,6 +622,19 @@ def make_occluder_task():
                     # through the table.
                     self.move(self.open_gripper(arm_tag))
                     self.enable_table(enable=True)
+                    # Candidate plans are generated from the live arm state. A
+                    # missed grasp leaves the arm at its lifted endpoint, so
+                    # selecting the next candidate there made every retry solve
+                    # a different, frequently colliding problem. Return to the
+                    # common pre-attempt pose before selecting another contact.
+                    self._plan_and_replay_pose(arm_tag, retry_reset_pose)
+                    attempt_record["reset_success"] = bool(self.plan_success)
+                    if not self.plan_success:
+                        reset_reason = self._last_fail_reason or "unknown"
+                        attempt_record["reset_fail_reason"] = reset_reason
+                        self._last_fail_reason = f"grasp_retry_reset_failed:{reset_reason}"
+                        checkpoint("grasp_retry_reset")
+                        break
                 else:
                     break
             if not grasp_succeeded:
@@ -631,6 +655,7 @@ def make_occluder_task():
             # gripper right now, while we still trust the grasp (grasp_verify just
             # passed). Every subsequent replay step compares against this.
             self._grasp_baseline_transform = self._gripper_relative_object_transform(arm_tag)
+            self._slow_attached_replay = True
             self.enable_table(enable=True)
             checkpoint("enable_table")
 
@@ -883,7 +908,7 @@ def make_occluder_task():
             check_ik = self.robot.left_check_ik_batch if str(arm_tag) == "left" else self.robot.right_check_ik_batch
             fallback = None
             fallback_depth = -1
-            failure_breakdown = {}
+            failure_breakdown = collections.Counter()
             escape_poses = self._post_grasp_escape_poses(arm_tag, attempts=LOCAL_WAYPOINT_ATTEMPTS)
 
             # gaps first, fallback_gaps ONLY if NOTHING in gaps ever verified reachable
@@ -893,30 +918,34 @@ def make_occluder_task():
             for gap_values in (gaps, fallback_gaps):
                 any_reachable_x = False
                 for quat_choice in quat_options:
-                    for gap in gap_values:
-                        x = self._box_side_x(arm_tag, gap=gap)
-                        # Cheap prefilter (no trajopt): beside_box's height (lift_z) and
-                        # y (tgt_y) don't depend on clearance_z/escape_idx, so checking
-                        # reachability once per (gap, quat) here skips the ENTIRE cz x
-                        # escape_idx loop (up to 30 full trajopt chains) for a gap whose
-                        # target could never succeed regardless of how it's reached.
-                        if not bool(check_ik([[x, tgt_y, lift_z, *quat_choice]], relax_orientation=True)[0]):
-                            failure_breakdown[("placement:beside_box", "IK_prefilter_unreachable")] = (
-                                failure_breakdown.get(("placement:beside_box", "IK_prefilter_unreachable"), 0) + 1)
+                    # Cheap prefilter (no trajopt): beside_box's height (lift_z) and y
+                    # (tgt_y) don't depend on clearance_z/escape_idx, so checking every
+                    # gap's reachability in one batched IK call here skips the ENTIRE cz
+                    # x escape_idx loop (up to 30 full trajopt chains per gap) for a gap
+                    # whose target could never succeed regardless of how it's reached.
+                    gap_list = list(gap_values)
+                    x_list = [self._box_side_x(arm_tag, gap=gap) for gap in gap_list]
+                    beside_box_ok = check_ik([[x, tgt_y, lift_z, *quat_choice] for x in x_list],
+                                              relax_orientation=True)
+                    for gap, x, reachable in zip(gap_list, x_list, beside_box_ok):
+                        if not bool(reachable):
+                            failure_breakdown[("placement:beside_box", "IK_prefilter_unreachable")] += 1
                             if log_move:
                                 print(f"[placement-plan] gap={gap:.2f} x_side={x:.3f} quat={quat_choice} "
                                       f"skipped: beside_box IK-unreachable (prefilter)")
                             continue
                         any_reachable_x = True
-                        for cz in list(clearance_options) + list(clearance_fallback):
-                            # Same idea as the beside_box prefilter above, one level
-                            # deeper: lift_above_box shares this (x, tgt_y) and only
-                            # varies in z (clearance) -- skip a clearance value here
-                            # (cheaply) rather than discovering it's dead only after
-                            # the full escape_idx loop of trajopt chains.
-                            if not bool(check_ik([[x, tgt_y, cz, *quat_choice]], relax_orientation=True)[0]):
-                                failure_breakdown[("placement:lift_above_box", "IK_prefilter_unreachable")] = (
-                                    failure_breakdown.get(("placement:lift_above_box", "IK_prefilter_unreachable"), 0) + 1)
+                        # Same idea as the beside_box prefilter above, one level deeper:
+                        # lift_above_box shares this (x, tgt_y) and only varies in z
+                        # (clearance) -- batch-check every clearance value here rather
+                        # than discovering it's dead only after the full escape_idx loop
+                        # of trajopt chains.
+                        cz_list = list(clearance_options) + list(clearance_fallback)
+                        lift_above_box_ok = check_ik([[x, tgt_y, cz, *quat_choice] for cz in cz_list],
+                                                      relax_orientation=True)
+                        for cz, cz_reachable in zip(cz_list, lift_above_box_ok):
+                            if not bool(cz_reachable):
+                                failure_breakdown[("placement:lift_above_box", "IK_prefilter_unreachable")] += 1
                                 if log_move:
                                     print(f"[placement-plan] gap={gap:.2f} x_side={x:.3f} clearance_z={cz:.2f} "
                                           f"quat={quat_choice} skipped: lift_above_box IK-unreachable (prefilter)")
@@ -960,7 +989,7 @@ def make_occluder_task():
                                         "fail_reason": fail_reason,
                                     }
                                     fallback_depth = depth
-                                failure_breakdown[(failed_stage, fail_reason)] = failure_breakdown.get((failed_stage, fail_reason), 0) + 1
+                                failure_breakdown[(failed_stage, fail_reason)] += 1
                                 if log_move:
                                     print(f"[placement-plan] x_side={x:.3f} clearance_z={cz:.2f} "
                                           f"escape={escape_idx} quat={quat_choice} failed at "
@@ -1048,12 +1077,40 @@ def make_occluder_task():
                 ranked.append((score, i))
             ranked.sort(reverse=True)
             ids = [i for _, i in ranked[:limit]]
-            if not ids:
-                fallback = self._pick_side_grasp_id(actor, arm_tag)
-                ids = [] if fallback is None else [fallback]
             if os.environ.get("ROBOTWIN_LOG_MOVE", "") == "1":
                 print(f"[grasp_id] arm={arm_tag} candidates={ids}")
             return ids
+
+        def _evaluate_descent_metrics(self, metrics, max_joint_endpoint_displacement=DESCENT_MAX_JOINT_ENDPOINT_DISPLACEMENT,
+                                      max_joint_path_length=DESCENT_MAX_JOINT_PATH_LENGTH):
+            """Gate a planned trajectory's path-safety metrics (from
+            _trajectory_path_metrics) against the descent-slice thresholds shared by
+            _plan_pose_with_descent_slices and _local_landing_search_and_place --
+            the latter passes joint_scale-adjusted endpoint/path-length caps since
+            its candidates cover a longer segment than a nominal descent slice.
+
+            Returns (accepted, sort_key, reject_reason): sort_key is
+            (path_length, joint_path_length, max_joint_range) for ranking accepted
+            candidates by shortest-path-first, or (0.0, 0.0, 0.0) when there's
+            nothing to measure (degenerate <2-waypoint plan, trusted as-is).
+            reject_reason is None when accepted."""
+            if metrics is None:
+                return True, (0.0, 0.0, 0.0), None
+            if (metrics["max_perp_deviation"] <= DESCENT_MAX_PATH_DEVIATION
+                    and metrics["path_length_ratio"] <= DESCENT_MAX_PATH_LENGTH_RATIO
+                    and metrics["joint_travel_ratio"] <= DESCENT_MAX_JOINT_TRAVEL_RATIO
+                    and metrics["max_joint_range"] <= DESCENT_MAX_JOINT_RANGE
+                    and metrics["joint_direct_dist"] <= max_joint_endpoint_displacement
+                    and metrics["joint_path_length"] <= max_joint_path_length):
+                return True, (metrics["path_length"], metrics["joint_path_length"], metrics["max_joint_range"]), None
+            reject_reason = (
+                f"path_filter_rejected(dev={metrics['max_perp_deviation']:.3f},"
+                f"len_ratio={metrics['path_length_ratio']:.2f},"
+                f"joint_ratio={metrics['joint_travel_ratio']:.2f},"
+                f"max_joint_range={metrics['max_joint_range']:.3f},"
+                f"joint_dist={metrics['joint_direct_dist']:.3f}(max={max_joint_endpoint_displacement:.3f}),"
+                f"joint_path={metrics['joint_path_length']:.3f}(max={max_joint_path_length:.3f}))")
+            return False, None, reject_reason
 
         def _pick_side_grasp_id(self, actor, arm_tag):
             ranked = self._rank_side_grasp_ids(actor, arm_tag, limit=1)
@@ -1072,6 +1129,33 @@ def make_occluder_task():
             p = g[:3, 3] + R @ np.array([-0.12 - pre_dis, 0.0, 0.0])
             q = t3d.quaternions.mat2quat(R)
             return list(p) + list(q)
+
+        def _time_stretch_trajectory(self, result, factor):
+            """Densify a planned joint path while preserving its geometry."""
+            factor = max(1, int(factor))
+            positions = np.asarray(result.get("position"))
+            if factor == 1 or positions.ndim < 2 or len(positions) < 2:
+                return result
+
+            stretched = deepcopy(result)
+            sample = np.linspace(0.0, len(positions) - 1,
+                                 (len(positions) - 1) * factor + 1)
+            lo = np.floor(sample).astype(int)
+            hi = np.minimum(lo + 1, len(positions) - 1)
+            alpha = (sample - lo).reshape((-1,) + (1,) * (positions.ndim - 1))
+            for key, derivative_order in (("position", 0), ("velocity", 1),
+                                          ("acceleration", 2), ("jerk", 3)):
+                values = result.get(key)
+                if values is None:
+                    continue
+                values = np.asarray(values)
+                if values.ndim == 0 or len(values) != len(positions):
+                    continue
+                blended = values[lo] * (1.0 - alpha) + values[hi] * alpha
+                if derivative_order:
+                    blended = blended / (factor ** derivative_order)
+                stretched[key] = blended.astype(values.dtype, copy=False)
+            return stretched
 
         def _replay_planned_move(self, arm_tag, cached_result):
             """Execute an ALREADY-PLANNED trajectory (position/velocity arrays from a
@@ -1102,14 +1186,20 @@ def make_occluder_task():
                 else:
                     cached_result = deepcopy(self.left_joint_path[self.left_cnt])
                     self.left_cnt += 1
-                control_seq = {"left_arm": cached_result, "left_gripper": None, "right_arm": None, "right_gripper": None}
+                replay_result = self._time_stretch_trajectory(
+                    cached_result, ATTACHED_TRAJECTORY_SLOWDOWN
+                    if self._slow_attached_replay else 1)
+                control_seq = {"left_arm": replay_result, "left_gripper": None, "right_arm": None, "right_gripper": None}
             else:
                 if self.need_plan:
                     self.right_joint_path.append(deepcopy(cached_result))
                 else:
                     cached_result = deepcopy(self.right_joint_path[self.right_cnt])
                     self.right_cnt += 1
-                control_seq = {"left_arm": None, "left_gripper": None, "right_arm": cached_result, "right_gripper": None}
+                replay_result = self._time_stretch_trajectory(
+                    cached_result, ATTACHED_TRAJECTORY_SLOWDOWN
+                    if self._slow_attached_replay else 1)
+                control_seq = {"left_arm": None, "left_gripper": None, "right_arm": replay_result, "right_gripper": None}
             self.take_dense_action(control_seq)
 
         def _gripper_relative_object_transform(self, arm_tag):
@@ -1164,6 +1254,13 @@ def make_occluder_task():
             target_z = float(self.des_obj_pose[2])
             return abs(obj_z - target_z) <= height_tolerance
 
+        def _placement_xy_error(self):
+            """Signed target-minus-object XY error in world coordinates."""
+            obj_pos = np.asarray(self.target_obj.get_pose().p, dtype=float)
+            target = np.asarray(self.des_obj_pose, dtype=float)
+            return target[:2] - obj_pos[:2]
+
+
         def _object_retained(self, arm_tag, tolerance=OBJECT_RETENTION_TOLERANCE,
                              rotation_tolerance=OBJECT_RETENTION_ROTATION_TOLERANCE, context=None,
                              return_drift=False):
@@ -1187,8 +1284,7 @@ def make_occluder_task():
             baseline_pos, baseline_quat = self._grasp_baseline_transform
             current_pos, current_quat = self._gripper_relative_object_transform(arm_tag)
             pos_drift = float(np.linalg.norm(current_pos - baseline_pos))
-            rot_dot = float(np.clip(abs(np.dot(baseline_quat, current_quat)), -1.0, 1.0))
-            rot_drift = float(2.0 * np.arccos(rot_dot))
+            rot_drift = float(cal_quat_dis(baseline_quat, current_quat) * np.pi)
             retained = pos_drift <= tolerance and rot_drift <= rotation_tolerance
             self.rollout_retention_checks.append({
                 "context": context, "pos_drift": pos_drift, "rot_drift": rot_drift, "retained": retained,
@@ -1380,29 +1476,11 @@ def make_occluder_task():
                         continue
                     metrics = self._trajectory_path_metrics(arm_tag, candidate)
                     attempt_record["path_metrics"] = metrics
-                    if metrics is None:
-                        # Nothing to measure (degenerate <2-waypoint plan) --
-                        # trust it, there's no path to have gone wrong.
-                        accepted.append((0.0, 0.0, 0.0, candidate, attempt, attempt_record))
-                        attempt_record["accepted"] = True
-                    elif (metrics["max_perp_deviation"] <= DESCENT_MAX_PATH_DEVIATION
-                            and metrics["path_length_ratio"] <= DESCENT_MAX_PATH_LENGTH_RATIO
-                            and metrics["joint_travel_ratio"] <= DESCENT_MAX_JOINT_TRAVEL_RATIO
-                            and metrics["max_joint_range"] <= DESCENT_MAX_JOINT_RANGE
-                            and metrics["joint_direct_dist"] <= DESCENT_MAX_JOINT_ENDPOINT_DISPLACEMENT
-                            and metrics["joint_path_length"] <= DESCENT_MAX_JOINT_PATH_LENGTH):
-                        accepted.append((metrics["path_length"], metrics["joint_path_length"],
-                                        metrics["max_joint_range"], candidate, attempt, attempt_record))
-                        attempt_record["accepted"] = True
+                    is_accepted, sort_key, last_reason = self._evaluate_descent_metrics(metrics)
+                    attempt_record["accepted"] = is_accepted
+                    if is_accepted:
+                        accepted.append(sort_key + (candidate, attempt, attempt_record))
                     else:
-                        last_reason = (
-                            f"path_filter_rejected(dev={metrics['max_perp_deviation']:.3f},"
-                            f"len_ratio={metrics['path_length_ratio']:.2f},"
-                            f"joint_ratio={metrics['joint_travel_ratio']:.2f},"
-                            f"max_joint_range={metrics['max_joint_range']:.3f},"
-                            f"joint_dist={metrics['joint_direct_dist']:.3f},"
-                            f"joint_path={metrics['joint_path_length']:.3f})")
-                        attempt_record["accepted"] = False
                         attempt_record["reject_reason"] = last_reason
                         if log_move:
                             print(f"[descent-slice] {stage_label} slice {i}/{num_slices} attempt "
@@ -1447,6 +1525,18 @@ def make_occluder_task():
                 retained, pos_drift, rot_drift = self._object_retained(
                     arm_tag, context=f"{stage_label}:slice{i}", return_drift=True)
                 if not retained:
+                    xy_error = self._placement_xy_error()
+                    supported_contact = (
+                        pos_drift <= DESCENT_CONTACT_DRIFT_TOLERANCE
+                        and self._object_near_support_height())
+                    if (supported_contact
+                            and np.all(np.abs(xy_error) < CONTACT_RELEASE_XY_TOLERANCE)):
+                        self.rollout_descent_slices.append({
+                            "stage": f"{stage_label}:contact-release",
+                            "dx": float(xy_error[0]), "dy": float(xy_error[1]),
+                            "correction_needed": False,
+                        })
+                        return True, None, qpos0, True
                     # Ambiguous-contact requires ALL of: bounded position
                     # drift, bounded ROTATION drift (a rotation-only loss --
                     # object tipped/rotated loose without much translating --
@@ -1614,29 +1704,14 @@ def make_occluder_task():
                         max_joint_endpoint_displacement = DESCENT_MAX_JOINT_ENDPOINT_DISPLACEMENT * joint_scale
                         max_joint_path_length = DESCENT_MAX_JOINT_PATH_LENGTH * joint_scale
                         record["joint_scale"] = joint_scale
-                        if metrics is None:
-                            tier_accepted.append((0.0, 0.0, 0.0, candidate_result, height, dx, dy, record))
-                            record["accepted"] = True
-                            height_accepted += 1
-                        elif (metrics["max_perp_deviation"] <= DESCENT_MAX_PATH_DEVIATION
-                                and metrics["path_length_ratio"] <= DESCENT_MAX_PATH_LENGTH_RATIO
-                                and metrics["joint_travel_ratio"] <= DESCENT_MAX_JOINT_TRAVEL_RATIO
-                                and metrics["max_joint_range"] <= DESCENT_MAX_JOINT_RANGE
-                                and metrics["joint_direct_dist"] <= max_joint_endpoint_displacement
-                                and metrics["joint_path_length"] <= max_joint_path_length):
-                            tier_accepted.append((metrics["path_length"], metrics["joint_path_length"],
-                                                  metrics["max_joint_range"], candidate_result, height, dx, dy, record))
-                            record["accepted"] = True
+                        is_accepted, sort_key, reject_reason = self._evaluate_descent_metrics(
+                            metrics, max_joint_endpoint_displacement, max_joint_path_length)
+                        record["accepted"] = is_accepted
+                        if is_accepted:
+                            tier_accepted.append(sort_key + (candidate_result, height, dx, dy, record))
                             height_accepted += 1
                         else:
-                            record["accepted"] = False
-                            record["reject_reason"] = (
-                                f"path_filter_rejected(dev={metrics['max_perp_deviation']:.3f},"
-                                f"len_ratio={metrics['path_length_ratio']:.2f},"
-                                f"joint_ratio={metrics['joint_travel_ratio']:.2f},"
-                                f"max_joint_range={metrics['max_joint_range']:.3f},"
-                                f"joint_dist={metrics['joint_direct_dist']:.3f}(max={max_joint_endpoint_displacement:.3f}),"
-                                f"joint_path={metrics['joint_path_length']:.3f}(max={max_joint_path_length:.3f}))")
+                            record["reject_reason"] = reject_reason
                         self.rollout_descent_slices.append(record)
                         if height_accepted >= LANDING_MIN_ACCEPTED_TO_STOP:
                             break
@@ -1773,15 +1848,12 @@ def make_occluder_task():
             self._replay_planned_sequence(arm_tag, trajectories)
 
         def _grasp_via_cached_trajectories(self, arm_tag, candidate_plan, gripper_pos=0.0):
-            """Replay the dry-run-verified pre_grasp/grasp trajectories (see
-            _plan_grasp_side) instead of calling grasp_actor_from_table, which
-            independently re-derives and re-plans the grasp via choose_grasp_pose --
-            exactly the re-plan-diverges-from-verified-plan failure mode already
-            fixed for the waypoint, recurring one step later. Table is disabled
-            between the two moves, matching grasp_actor_from_table's own sequencing
-            (drop the table right after clearing pre_grasp, before the final
-            approach). Falls back to the live re-plan path if no cached trajectory
-            exists (e.g. a fallback candidate that never got this far)."""
+            """Replay the dry-run-verified pre-grasp and grasp trajectories.
+
+            Matching the legacy execution path, disable the table after reaching
+            pre-grasp and before replaying the final cached approach. Fall back to
+            live planning only when the candidate has no cached trajectories.
+            """
             pre_traj = candidate_plan.get("pre_grasp_trajectory")
             grasp_traj = candidate_plan.get("grasp_trajectory")
             if pre_traj is None or grasp_traj is None:
@@ -2371,6 +2443,7 @@ def run(args):
                                                      dr_measure(cd), out_dir, ep_counter)
                         success = bool(rollout_result["success"])
                         rec["rollout_success"] = success
+                        rec["attached_trajectory_slowdown"] = ATTACHED_TRAJECTORY_SLOWDOWN
                         rec["rollout_ep"] = ep_counter
                         artifact_info = rollout_result.get("artifact_info") or {}
                         rec["rollout_bucket"] = artifact_info.get("bucket", "success" if success else "fail")
