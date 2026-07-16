@@ -478,6 +478,9 @@ class Robot:
         use_attach=False,
         last_qpos=None,
         relax_orientation=False,
+        approach_offset=0.05,
+        tstep_fraction=0.8,
+        near_contact=False,
     ):
         if constraint_pose is not None:
             constraint_pose = self.get_constraint_pose(constraint_pose, arm_tag="left")
@@ -497,6 +500,9 @@ class Robot:
                 "approach_axis": approach_axis,
                 "arms_tag": "left",
                 "relax_orientation": relax_orientation,
+                "approach_offset": approach_offset,
+                "tstep_fraction": tstep_fraction,
+                "near_contact": near_contact,
             })
             return self.left_conn.recv()
         else:
@@ -507,6 +513,9 @@ class Robot:
                 approach_axis=approach_axis,
                 arms_tag="left",
                 relax_orientation=relax_orientation,
+                approach_offset=approach_offset,
+                tstep_fraction=tstep_fraction,
+                near_contact=near_contact,
             )
 
     def right_plan_path(
@@ -518,6 +527,9 @@ class Robot:
         use_attach=False,
         last_qpos=None,
         relax_orientation=False,
+        approach_offset=0.05,
+        tstep_fraction=0.8,
+        near_contact=False,
     ):
         if constraint_pose is not None:
             constraint_pose = self.get_constraint_pose(constraint_pose, arm_tag="right")
@@ -536,6 +548,9 @@ class Robot:
                 "approach_axis": approach_axis,
                 "arms_tag": "right",
                 "relax_orientation": relax_orientation,
+                "approach_offset": approach_offset,
+                "tstep_fraction": tstep_fraction,
+                "near_contact": near_contact,
             })
             return self.right_conn.recv()
         else:
@@ -546,6 +561,9 @@ class Robot:
                 approach_axis=approach_axis,
                 arms_tag="right",
                 relax_orientation=relax_orientation,
+                approach_offset=approach_offset,
+                tstep_fraction=tstep_fraction,
+                near_contact=near_contact,
             )
 
     # The data of gripper has been normalized
@@ -781,6 +799,9 @@ def planner_process_worker(conn, args):
                     approach_axis=msg.get("approach_axis", None),
                     arms_tag=msg["arms_tag"],
                     relax_orientation=msg.get("relax_orientation", False),
+                    approach_offset=msg.get("approach_offset", 0.05),
+                    tstep_fraction=msg.get("tstep_fraction", 0.8),
+                    near_contact=msg.get("near_contact", False),
                 )
                 conn.send(result)
 
