@@ -30,6 +30,161 @@ from ._GLOBAL_CONFIGS import *
 
 from typing import Optional, Literal
 
+
+# --- oriented-box helpers ---------------------------------------------------
+# actor_bbox / link_bbox store an ORIENTED box (center, half-size, quaternion)
+# aligned to each body's own pose -- a tight, grasp-relevant box, unlike an
+# axis-aligned box which inflates when the object is rotated. The box size comes
+# from the body's local-frame extents, read straight off the physx collision
+# shapes (visual mesh as fallback); combined with the per-frame pose in
+# _obb_fields. Bodies with no boxable geometry fall back to the world AABB.
+def _obb_box_corners(mn, mx):
+    mn, mx = np.asarray(mn, float), np.asarray(mx, float)
+    return np.array([[mn[0] if sx < 0 else mx[0],
+                      mn[1] if sy < 0 else mx[1],
+                      mn[2] if sz < 0 else mx[2]]
+                     for sx in (-1, 1) for sy in (-1, 1) for sz in (-1, 1)], float)
+
+
+def _shape_local_corners(sh):
+    """8 corners (shape frame) of one collision shape's local AABB, or None."""
+    hs = getattr(sh, "half_size", None)                 # box
+    if hs is not None:
+        h = np.asarray(hs, float)
+        return _obb_box_corners(-h, h)
+    verts = getattr(sh, "vertices", None)               # convex / triangle mesh
+    if verts is not None:
+        v = np.asarray(verts, float)
+        if v.size == 0:
+            return None
+        sc = getattr(sh, "scale", None)
+        if sc is not None:
+            v = v * np.asarray(sc, float)
+        return _obb_box_corners(v.min(0), v.max(0))
+    r = getattr(sh, "radius", None)
+    if r is not None:
+        r = float(r)
+        hl = getattr(sh, "half_length", None)           # capsule (x axis) vs sphere
+        if hl is not None:
+            return _obb_box_corners([-(hl + r), -r, -r], [hl + r, r, r])
+        return _obb_box_corners([-r, -r, -r], [r, r, r])
+    return None                                          # plane / unknown -> skip
+
+
+def _pose_matrix(pose):
+    try:
+        return np.asarray(pose.to_transformation_matrix(), float)
+    except Exception:
+        T = np.eye(4)
+        T[:3, :3] = t3d.quaternions.quat2mat(np.asarray(pose.q, float))
+        T[:3, 3] = np.asarray(pose.p, float)
+        return T
+
+
+def _component_local_aabb(comp):
+    """(min, max) of a physx component's collision geometry in ITS OWN frame, or
+    None. Pair with the component's world pose to get an oriented box."""
+    getter = getattr(comp, "get_collision_shapes", None)
+    if getter is None:
+        return None
+    try:
+        shapes = getter()
+    except Exception:
+        return None
+    pts = []
+    for sh in shapes:
+        c = _shape_local_corners(sh)
+        if c is None or len(c) == 0:
+            continue
+        try:
+            T = _pose_matrix(sh.get_local_pose())
+        except Exception:
+            T = np.eye(4)
+        pts.append((np.c_[c, np.ones(len(c))] @ T.T)[:, :3])
+    if not pts:
+        return None
+    P = np.concatenate(pts, 0)
+    return P.min(0), P.max(0)
+
+
+def _union(acc, mn, mx):
+    if acc[0] is None:
+        return [mn.copy(), mx.copy()]
+    return [np.minimum(acc[0], mn), np.maximum(acc[1], mx)]
+
+
+def _collision_local_aabb(components):
+    """Union of collision-geometry local AABBs over the given components."""
+    acc = [None, None]
+    for comp in components:
+        if getattr(comp, "get_collision_shapes", None) is None:
+            continue                       # e.g. a render body -> no collision shapes
+        la = _component_local_aabb(comp)
+        if la is not None:
+            acc = _union(acc, la[0], la[1])
+    return None if acc[0] is None else (acc[0], acc[1])
+
+
+def _render_local_aabb(components):
+    """Fallback: union of VISUAL mesh bounds (render shapes) in the entity frame."""
+    acc = [None, None]
+    for comp in components:
+        shapes = getattr(comp, "render_shapes", None)
+        if not shapes:
+            continue
+        for sh in shapes:
+            try:
+                T = _pose_matrix(sh.get_local_pose())
+                sc = np.asarray(sh.get_scale(), float)
+            except Exception:
+                T, sc = np.eye(4), np.ones(3)
+            for part in (getattr(sh, "parts", None) or []):
+                try:
+                    v = np.asarray(part.get_vertices(), float)
+                except Exception:
+                    continue
+                if v.size == 0:
+                    continue
+                v = v * sc
+                c = _obb_box_corners(v.min(0), v.max(0))
+                w = (np.c_[c, np.ones(len(c))] @ T.T)[:, :3]
+                acc = _union(acc, w.min(0), w.max(0))
+    return None if acc[0] is None else (acc[0], acc[1])
+
+
+def _local_aabb(components):
+    """Local-frame box for an oriented box: the UNION of collision geometry and visual
+    mesh bounds, so the box wraps the WHOLE object even when the collision proxy is a
+    partial stub (e.g. only a cup's base or a fan's foot -- walls/blades are visual-only).
+    Searches ALL components because the body that reports the world AABB may be a render
+    body with no collision shapes. Falls back to whichever source is present alone."""
+    components = list(components)
+    col = _collision_local_aabb(components)
+    ren = _render_local_aabb(components)
+    if col is None:
+        return ren
+    if ren is None:
+        return col
+    return (np.minimum(col[0], ren[0]), np.maximum(col[1], ren[1]))
+
+
+def _obb_fields(pos, quat, la, world_aabb):
+    """Oriented box (center, half, quat) in the WORLD frame from a body's pose + its
+    local-frame AABB. This is what we STORE (the AABB is derivable from it and is not
+    kept). Falls back to the world AABB as an axis-aligned box (identity quat) when the
+    body has no boxable geometry, so every body still gets a valid box."""
+    quat = np.asarray(quat, float)
+    if la:
+        lmn, lmx = np.asarray(la[0], float), np.asarray(la[1], float)
+        R = t3d.quaternions.quat2mat(quat)
+        center = np.asarray(pos, float) + R @ ((lmn + lmx) / 2.0)
+        half = (lmx - lmn) / 2.0
+    else:
+        mn, mx = np.asarray(world_aabb[0], float), np.asarray(world_aabb[1], float)
+        center, half, quat = (mn + mx) / 2.0, (mx - mn) / 2.0, np.array([1.0, 0.0, 0.0, 0.0])
+    return (center.astype(np.float32), half.astype(np.float32), quat.astype(np.float32))
+
+
 current_file_path = os.path.abspath(__file__)
 parent_directory = os.path.dirname(current_file_path)
 
@@ -550,15 +705,193 @@ class Base_Task(gym.Env):
         # pointcloud
         if self.data_type.get("pointcloud", False):
             pkl_dic["pointcloud"] = self.cameras.get_pcd(self.data_type.get("conbine", False))
+        # actor_bbox: per-frame ORIENTED 3D box (center, half-size, quaternion) for every
+        # rigid scene object, aligned to the object's own pose -> grasp-relevant, unlike
+        # an axis-aligned box which inflates when the object is rotated. Built from the
+        # physics pose + the object's local-frame extents (collision geometry, else the
+        # visual mesh). CANNOT be reconstructed from rgb/depth; recorded while the scene
+        # exists. The axis-aligned AABB is derivable from this and is deliberately NOT kept.
+        if self.data_type.get("actor_bbox", False):
+            lcache = getattr(self, "_local_aabb_cache", None)
+            if lcache is None:
+                lcache = self._local_aabb_cache = {}
+            ids, ocen, ohalf, oquat = [], [], [], []
+            for actor in self.scene.get_all_actors():
+                pid = getattr(actor, "per_scene_id", None)
+                if pid is None:
+                    continue
+                aabb = None
+                for comp in getattr(actor, "components", []):
+                    fn = getattr(comp, "get_global_aabb_fast", None)
+                    if fn is not None:
+                        try:
+                            aabb = fn()
+                            break
+                        except Exception:
+                            pass
+                if aabb is None:
+                    continue
+                p = actor.get_pose()
+                la = lcache.get(pid)
+                if la is None:
+                    la = _local_aabb(getattr(actor, "components", []))
+                    lcache[pid] = la if la is not None else False
+                c, h, qq = _obb_fields(p.p, p.q, la, aabb)
+                ids.append(int(pid))
+                ocen.append(c)
+                ohalf.append(h)
+                oquat.append(qq)
+            if ids:
+                pkl_dic["actor_bbox"] = {
+                    "id": np.asarray(ids, np.int32),
+                    "obb_center": np.stack(ocen),   # (T, N, 3) world-frame box center
+                    "obb_half": np.stack(ohalf),    # (T, N, 3) half extents in the box frame
+                    "obb_quat": np.stack(oquat),    # (T, N, 4) orientation, wxyz
+                }
+        # link_bbox: same per-frame ORIENTED box, but for ARTICULATION LINKS (drawer /
+        # cabinet / fridge / microwave doors + interiors) which get_all_actors() misses.
+        # SEPARATE group so actor_bbox stays rigid-only. Lets offline masking resolve
+        # articulated-fixture bins + open/close door targets by the SAME rules as rigid
+        # actors. Columns sorted by per_scene_id for stability.
+        if self.data_type.get("link_bbox", False):
+            lcache = getattr(self, "_local_aabb_cache", None)
+            if lcache is None:
+                lcache = self._local_aabb_cache = {}
+            rows = []
+            for art in self.scene.get_all_articulations():
+                if not art.get_name():
+                    continue  # unnamed articulation = the robot embodiment; skip
+                for link in art.get_links():
+                    name = link.get_name() or ""
+                    if "__jointframe__" in name:
+                        continue  # pseudo joint-frame link, no real geometry
+                    ent = getattr(link, "entity", None)
+                    pid = getattr(ent, "per_scene_id", None) if ent is not None else None
+                    if pid is None:
+                        continue
+                    aabb = None
+                    for obj in (link, ent):
+                        fn = getattr(obj, "get_global_aabb_fast", None)
+                        if fn is not None:
+                            try:
+                                aabb = fn(); break
+                            except Exception:
+                                pass
+                        for comp in getattr(obj, "components", []):
+                            cfn = getattr(comp, "get_global_aabb_fast", None)
+                            if cfn is not None:
+                                try:
+                                    aabb = cfn(); break
+                                except Exception:
+                                    pass
+                        if aabb is not None:
+                            break
+                    if aabb is None:
+                        continue
+                    p = link.get_pose()
+                    la = lcache.get(pid)
+                    if la is None:
+                        comps = [link] + list(getattr(ent, "components", []) or [])
+                        la = _local_aabb(comps)
+                        lcache[pid] = la if la is not None else False
+                    c, h, qq = _obb_fields(p.p, p.q, la, aabb)
+                    rows.append((int(pid), c, h, qq))
+            if rows:
+                rows.sort(key=lambda r: r[0])
+                pkl_dic["link_bbox"] = {
+                    "id": np.asarray([r[0] for r in rows], np.int32),
+                    "obb_center": np.stack([r[1] for r in rows]),
+                    "obb_half": np.stack([r[2] for r in rows]),
+                    "obb_quat": np.stack([r[3] for r in rows]),
+                }
 
         self.now_obs = deepcopy(pkl_dic)
         return pkl_dic
+
+    def get_actor_id_map(self):
+        # per_scene_id -> entity name; decodes the ids stored in actor_segmentation
+        id_map = {}
+        for actor in self.scene.get_all_actors():
+            pid = getattr(actor, "per_scene_id", None)
+            if pid is not None:
+                id_map[int(pid)] = actor.get_name()
+        for art in self.scene.get_all_articulations():
+            art_name = art.get_name() or "robot"  # the embodiment articulation is unnamed
+            for link in art.get_links():
+                ent = getattr(link, "entity", None)
+                pid = getattr(ent, "per_scene_id", None) if ent is not None else None
+                if pid is not None:
+                    id_map[int(pid)] = f"{art_name}/{link.get_name()}"
+        return id_map
+
+    def get_role_names(self):
+        # actor names + exact per_scene_ids the task itself designates (raw facts
+        # from task code, not the method's grounding semantics). The *_id keys
+        # disambiguate objects that share a model name (e.g. target cup vs a
+        # same-type clutter cup); name keys are kept for back-compat.
+        def _scene_id(obj):
+            # Actor wrapper -> .actor (Entity); or a raw entity; return its id.
+            for cand in (getattr(obj, "actor", None), getattr(obj, "entity", None), obj):
+                pid = getattr(cand, "per_scene_id", None)
+                if pid is not None:
+                    try:
+                        return int(pid)
+                    except (TypeError, ValueError):
+                        pass
+            return None
+
+        roles = {}
+        for attr, key in (("target_obj", "target"), ("des_obj", "destination")):
+            obj = getattr(self, attr, None)
+            if obj is not None:
+                try:
+                    roles[key] = obj.get_name()
+                except Exception:
+                    pass
+                sid = _scene_id(obj)
+                if sid is not None:
+                    roles[f"{key}_id"] = sid
+        if hasattr(self, "_get_target_object_names"):
+            try:
+                roles["target_object_names"] = sorted(self._get_target_object_names())
+            except Exception:
+                pass
+        # Full task-role picture for offline tooling (e.g. flag_timeline skips
+        # these when picking which pair member's motion to trace): destination
+        # boxes (des_obj* scan, lazily resolved during check_collisions) and
+        # intended-contact bodies (grasp_actor-marked: grasp targets, drawer /
+        # appliance handles + articulation links). Both are populated by episode
+        # end, when the collectors call this.
+        dests = getattr(self, "destination_object_names", None)
+        if dests:
+            roles["destination_object_names"] = sorted(dests)
+        intended = getattr(self, "_intended_contact_names", None)
+        if intended:
+            roles["intended_contact_names"] = sorted(intended)
+        return roles
 
     def save_camera_rgb(self, save_path, camera_name='head_camera'):
         self._update_render()
         self.cameras.update_picture()
         rgb = self.cameras.get_rgb()
         save_img(save_path, rgb[camera_name]['rgb'])
+
+    def get_object_poses(self):
+        """Poses of every non-robot rigid actor (clutter / target / container),
+        in a deterministic per_scene_id order so the columns are stable across
+        frames. Returns (ids: list[int], poses: float32[N,7]) where each pose is
+        [x, y, z, qw, qx, qy, qz]. Enables recomputing displacement/collision/
+        proximity offline against any definition (id -> name via actor_id_map)."""
+        actors = sorted(
+            (a for a in self.scene.get_all_actors()
+             if getattr(a, "per_scene_id", None) is not None),
+            key=lambda a: a.per_scene_id)
+        ids = [int(a.per_scene_id) for a in actors]
+        if not actors:
+            return ids, np.zeros((0, 7), dtype=np.float32)
+        poses = np.array([[*a.get_pose().p, *a.get_pose().q] for a in actors],
+                         dtype=np.float32)
+        return ids, poses
 
     # =================================== Visibility measurement (issue #28) ===================================
 
@@ -697,6 +1030,32 @@ class Base_Task(gym.Env):
                         os.remove(directory + file)
 
         pkl_dic = self.get_obs()
+        # [data-gen] per-timestep engine flags: any PhysX contact / filtered
+        # collision since the previous saved frame (OR-accumulated over the
+        # save_freq substeps this frame represents; set in check_collisions).
+        # Always present so frame 0 fixes the hdf5 schema; all-zero when
+        # enable_collision_metrics is off or the task has no bench metrics.
+        pkl_dic["contact"] = np.uint8(getattr(self, "_win_contact", False))
+        pkl_dic["collision"] = np.uint8(getattr(self, "_win_collision", False))
+        # which bodies touched / collided in this frame's window ("a|b" labels),
+        # so the boolean flags above are auditable per timestep.
+        pkl_dic["contact_pairs"] = sorted(getattr(self, "_win_contact_pairs", set()))
+        pkl_dic["collision_pairs"] = sorted(getattr(self, "_win_collision_pairs", set()))
+        # max contact impulse (N·s) behind the contact / collision flag this frame
+        pkl_dic["contact_impulse"] = np.float32(getattr(self, "_win_contact_impulse", 0.0))
+        pkl_dic["collision_impulse"] = np.float32(getattr(self, "_win_collision_impulse", 0.0))
+        self._win_contact = False
+        self._win_collision = False
+        if hasattr(self, "_win_contact_pairs"):
+            self._win_contact_pairs = set()
+            self._win_collision_pairs = set()
+            self._win_contact_impulse = 0.0
+            self._win_collision_impulse = 0.0
+        # [data-gen] per-timestep OBJECT POSES (all non-robot actors) so collision/
+        # displacement/proximity can be recomputed offline with any definition
+        # -> /object_poses [T, N, 7]; column order (ids) recorded once in scene_info.
+        if self.data_type.get("object_poses", True):
+            pkl_dic["object_poses"] = self.get_object_poses()[1]
         save_pkl(self.folder_path["cache"] + f"{self.FRAME_IDX}.pkl", pkl_dic)  # use cache
         self.FRAME_IDX += 1
 
@@ -708,12 +1067,184 @@ class Base_Task(gym.Env):
         }
         save_pkl(file_path, traj_data)
 
+    def _traj_root(self):
+        """Directory to READ saved trajectory + init-state from. Defaults to
+        self.save_dir; replay points reads at a source dir via self.traj_src_dir
+        while writing new HDF5 under self.save_dir."""
+        return getattr(self, "traj_src_dir", None) or self.save_dir
+
     def load_tran_data(self, idx):
         assert self.save_dir is not None, "self.save_dir is None"
-        file_path = os.path.join(self.save_dir, "_traj_data", f"episode{idx}.pkl")
+        file_path = os.path.join(self._traj_root(), "_traj_data", f"episode{idx}.pkl")
         with open(file_path, "rb") as f:
             traj_data = pickle.load(f)
         return traj_data
+
+    # ============================ Initial State (record + replay) ============================
+    # The recorded initial state makes a saved trajectory reloadable for faithful
+    # replay: on replay we run the seeded setup only to wire task object handles +
+    # gripper/attach structure that play_once needs, then OVERRIDE every object
+    # pose / articulation & robot qpos from this record (the record is authoritative).
+
+    def _init_state_path(self, idx):
+        return os.path.join(self._traj_root(), "_traj_data", f"episode{idx}_init.json")
+
+    def capture_init_state(self) -> dict:
+        """Snapshot the scene + robot state at episode start (t=0, after setup).
+        Enumerates the live scene directly so it captures every object regardless
+        of which builder created it. Call BEFORE play_once mutates the scene."""
+
+        def _pose_to_list(pose):
+            return [np.asarray(pose.p, dtype=float).tolist(),
+                    np.asarray(pose.q, dtype=float).tolist()]
+
+        actors = []
+        for ent in self.scene.get_all_actors():
+            name = ent.get_name()
+            if name == "" or name == "ground":
+                continue
+            try:
+                actors.append({"name": name, "pose": _pose_to_list(ent.get_pose())})
+            except Exception as e:
+                print(f"[capture_init_state] skip actor {name}: {e}")
+
+        articulations = []
+        for art in self.scene.get_all_articulations():
+            try:
+                pose = art.get_root_pose() if hasattr(art, "get_root_pose") else art.get_pose()
+                qpos = np.asarray(art.get_qpos(), dtype=float).tolist()
+                articulations.append({"name": art.get_name(),
+                                      "root_pose": _pose_to_list(pose),
+                                      "qpos": qpos})
+            except Exception as e:
+                print(f"[capture_init_state] skip articulation {art.get_name()}: {e}")
+
+        robot = {
+            "embodiment_name": getattr(self, "embodiment_name", None),
+            "left_arm": [float(v) for v in self.robot.get_left_arm_jointState()],
+            "right_arm": [float(v) for v in self.robot.get_right_arm_jointState()],
+        }
+        try:
+            robot["left_qpos"] = np.asarray(self.robot.left_entity.get_qpos(), dtype=float).tolist()
+            robot["right_qpos"] = np.asarray(self.robot.right_entity.get_qpos(), dtype=float).tolist()
+        except Exception:
+            robot["left_qpos"] = robot["right_qpos"] = None
+
+        scaffold = {
+            "table_z_bias": float(getattr(self, "table_z_bias", 0.0)),
+            "texture_info": self.info.get("texture_info") if hasattr(self, "info") else None,
+        }
+        meta = {
+            "seed": getattr(self, "seed", None),
+            "task_name": getattr(self, "task_name", None),
+            "task_config": getattr(self, "task_config", None),
+        }
+        return {"actors": actors, "articulations": articulations, "robot": robot,
+                "scaffold": scaffold, "meta": meta}
+
+    @staticmethod
+    def _json_default(o):
+        if isinstance(o, np.generic):
+            return o.item()
+        if isinstance(o, np.ndarray):
+            return o.tolist()
+        raise TypeError(f"Object of type {type(o).__name__} is not JSON serializable")
+
+    def save_init_state(self, idx, state=None):
+        # Must be captured BEFORE play_once mutates the scene. Pass a t=0-captured
+        # `state`; otherwise it is captured now (only correct if nothing has moved).
+        if state is None:
+            state = self.capture_init_state()
+        path = self._init_state_path(idx)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(state, f, ensure_ascii=False, indent=2, default=self._json_default)
+
+    def load_init_state(self, idx):
+        with open(self._init_state_path(idx), "r", encoding="utf-8") as f:
+            return json.load(f)
+
+    def _zero_actor_velocity(self, ent):
+        try:
+            import sapien.physx as _physx
+            comp = ent.find_component_by_type(_physx.PhysxRigidDynamicComponent)
+            if comp is not None:
+                comp.set_linear_velocity([0.0, 0.0, 0.0])
+                comp.set_angular_velocity([0.0, 0.0, 0.0])
+        except Exception:
+            pass
+
+    def restore_init_state(self, state):
+        """Override the freshly-built (seeded) scene with the recorded explicit
+        state. Call AFTER setup_demo. Match live objects to recorded ones by name,
+        preserving duplicate order (the seed reproduces creation order)."""
+        from collections import defaultdict, deque
+
+        actor_recs = defaultdict(deque)
+        for rec in state.get("actors", []):
+            actor_recs[rec["name"]].append(rec)
+        for ent in self.scene.get_all_actors():
+            name = ent.get_name()
+            if name == "" or name == "ground":
+                continue
+            q = actor_recs.get(name)
+            if not q:
+                continue
+            rec = q.popleft()
+            p, qq = rec["pose"]
+            try:
+                ent.set_pose(sapien.Pose(p=p, q=qq))
+                self._zero_actor_velocity(ent)
+            except Exception as e:
+                print(f"[restore_init_state] actor '{name}' set_pose failed: {e}")
+        leftover = sum(len(v) for v in actor_recs.values())
+        if leftover:
+            print(f"\033[93m[restore_init_state] {leftover} recorded actor(s) had no live match\033[0m")
+
+        artic_recs = defaultdict(deque)
+        for rec in state.get("articulations", []):
+            artic_recs[rec["name"]].append(rec)
+        for art in self.scene.get_all_articulations():
+            q = artic_recs.get(art.get_name())
+            if not q:
+                continue
+            rec = q.popleft()
+            p, qq = rec["root_pose"]
+            try:
+                if hasattr(art, "set_root_pose"):
+                    art.set_root_pose(sapien.Pose(p=p, q=qq))
+                else:
+                    art.set_pose(sapien.Pose(p=p, q=qq))
+                if rec.get("qpos") is not None:
+                    qpos = np.asarray(rec["qpos"], dtype=float)
+                    art.set_qpos(qpos)
+                    if hasattr(art, "set_qvel"):
+                        art.set_qvel(np.zeros_like(qpos))
+            except Exception as e:
+                print(f"[restore_init_state] articulation '{art.get_name()}' restore failed: {e}")
+
+        self._restore_robot_state(state.get("robot", {}))
+
+    def _restore_robot_state(self, robot_state):
+        if not robot_state:
+            return
+        try:
+            if robot_state.get("left_qpos") is not None:
+                self.robot.left_entity.set_qpos(np.asarray(robot_state["left_qpos"], dtype=float))
+            if robot_state.get("right_qpos") is not None:
+                self.robot.right_entity.set_qpos(np.asarray(robot_state["right_qpos"], dtype=float))
+            left_arm = robot_state.get("left_arm")
+            right_arm = robot_state.get("right_arm")
+            if left_arm is not None:
+                self.robot.set_arm_joints(np.asarray(left_arm[:-1], dtype=float),
+                                          np.zeros(len(left_arm) - 1), "left")
+                self.robot.set_gripper(float(left_arm[-1]), "left")
+            if right_arm is not None:
+                self.robot.set_arm_joints(np.asarray(right_arm[:-1], dtype=float),
+                                          np.zeros(len(right_arm) - 1), "right")
+                self.robot.set_gripper(float(right_arm[-1]), "right")
+        except Exception as e:
+            print(f"[restore_init_state] robot restore failed: {e}")
 
     def merge_pkl_to_hdf5_video(self):
         if not self.save_data:
@@ -1113,7 +1644,13 @@ class Base_Task(gym.Env):
                 )
                 now_right_id += 1
 
+            # per-substep collision detection (bench tasks with metrics enabled);
+            # same gating as Bench_base_task.take_dense_action / take_action
+            if getattr(self, 'enable_collision_metrics', False) and hasattr(self, 'robot_link_names'):
+                self._snapshot_static_object_poses()
             self.scene.step()
+            if getattr(self, 'enable_collision_metrics', False) and hasattr(self, 'robot_link_names'):
+                self.check_collisions()
             if self.render_freq and i % self.render_freq == 0:
                 self._update_render()
                 self.viewer.render()

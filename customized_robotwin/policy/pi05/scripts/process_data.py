@@ -103,7 +103,9 @@ def data_transform(path, episode_num, save_path):
             if j != left_gripper_all.shape[0] - 1:
                 qpos.append(state)
 
-                camera_high_bits = image_dict["head_camera"][j]
+                # cam_high = OVERHEAD countertop camera (RoboPRO top-cam convention),
+                # matching the inference-side encode_obs mapping in deploy_policy.py.
+                camera_high_bits = image_dict["countertop_camera"][j]
                 camera_high = cv2.imdecode(np.frombuffer(camera_high_bits, np.uint8), cv2.IMREAD_COLOR)
                 camera_high_resized = cv2.resize(camera_high, (640, 480))
                 cam_high.append(camera_high_resized)

@@ -11,9 +11,11 @@ sys.path.append(parent_directory)
 
 
 # Encode observation for the model
+# cam_high = countertop_camera: must match the camera the checkpoint was trained
+# on (the office multimodal set was converted with countertop_camera -> cam_high).
 def encode_obs(observation):
     input_rgb_arr = [
-        observation["observation"]["head_camera"]["rgb"],
+        observation["observation"]["countertop_camera"]["rgb"],
         observation["observation"]["right_camera"]["rgb"],
         observation["observation"]["left_camera"]["rgb"],
     ]

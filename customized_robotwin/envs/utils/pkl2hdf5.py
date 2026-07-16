@@ -1,6 +1,7 @@
 import h5py, pickle
 import numpy as np
 import os
+import json
 import cv2
 from collections.abc import Mapping, Sequence
 import shutil
@@ -35,6 +36,33 @@ def depth_encoding(depths):
     for i in range(len(encode_data)):
         padded_data.append(encode_data[i].ljust(max_len, b"\0"))
     return padded_data, max_len
+
+
+def seg_encoding(segs):
+    # lossless PNG on uint16 label images (~100x smaller than raw arrays)
+    encode_data = []
+    max_len = 0
+    for i in range(len(segs)):
+        seg_uint16 = np.asarray(segs[i]).astype(np.uint16)
+        success, encoded_image = cv2.imencode(".png", seg_uint16)
+        png_data = encoded_image.tobytes()
+        encode_data.append(png_data)
+        max_len = max(max_len, len(png_data))
+    padded_data = []
+    for i in range(len(encode_data)):
+        padded_data.append(encode_data[i].ljust(max_len, b"\0"))
+    return padded_data, max_len
+
+
+def pairs_encoding(frame_lists):
+    # Per-frame variable-length list of "a|b" object-pair labels -> one JSON
+    # byte-string per frame, padded (same scheme as depth/seg encoding).
+    encode_data, max_len = [], 1
+    for fl in frame_lists:
+        b = json.dumps(list(fl)).encode("utf-8")
+        encode_data.append(b)
+        max_len = max(max_len, len(b))
+    return [b.ljust(max_len, b"\0") for b in encode_data], max_len
 
 
 def parse_dict_structure(data):
@@ -84,12 +112,19 @@ def create_hdf5_from_dict(hdf5_group, data_dict):
             subgroup = hdf5_group.create_group(key)
             create_hdf5_from_dict(subgroup, value)
         elif isinstance(value, list):
+            if "pairs" in key:  # ragged per-frame lists — JSON-encode, don't np.array
+                encode_data, max_len = pairs_encoding(value)
+                hdf5_group.create_dataset(key, data=encode_data, dtype=f"S{max_len}")
+                continue
             value = _normalize_array_for_hdf5(value)
             if "rgb" in key:
                 encode_data, max_len = images_encoding(value)
                 hdf5_group.create_dataset(key, data=encode_data, dtype=f"S{max_len}")
             elif "depth" in key:
                 encode_data, max_len = depth_encoding(value)
+                hdf5_group.create_dataset(key, data=encode_data, dtype=f"S{max_len}")
+            elif "segmentation" in key:
+                encode_data, max_len = seg_encoding(value)
                 hdf5_group.create_dataset(key, data=encode_data, dtype=f"S{max_len}")
             else:
                 hdf5_group.create_dataset(key, data=value)
