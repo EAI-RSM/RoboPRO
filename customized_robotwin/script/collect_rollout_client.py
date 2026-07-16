@@ -11,14 +11,18 @@ indistinguishable from a CuRobo run dir except for the hdf5 `generator` attr
 here, stamped success=False — failed policy rollouts are collision-rich data):
 
     <save_path>/<task>/<task_config>/
-        data/episodeN.hdf5      identical schema (obs cams/depth/seg/K/E,
-                                joint_action, endpose, object_poses,
-                                contact/collision + impulse + pairs, attrs)
+        data/episodeN.hdf5      identical schema (obs cams/depth/seg/K/E +
+                                grounding_mask, joint_action, endpose,
+                                object_poses, contact/collision + impulse +
+                                pairs, attrs)
         video/episodeN.mp4      countertop cam, same encoder
         scene/episodeN/         scene.npz + objects.json + scene_hash.txt
         _traj_data/             episodeN_init.json (t=0 state, replay input) +
                                 episodeN.pkl (policy action sequence,
                                 format=policy_actions_v1)
+        masking/episodeN.json   grounding stage timeline (same sidecar the
+                                CuRobo collectors write; requires a config with
+                                data_type.actor_bbox on)
         scene_info.json, seed.txt, instructions/   same sidecars
 
 Use a DEDICATED task_config (e.g. copy office_v2_blind.yml -> office_v2_pi05.yml)
@@ -367,6 +371,17 @@ def collect_rollouts(TASK_ENV, args, model, usr_args, collect_num, instruction_t
                              "left_joint_path": [], "right_joint_path": []}, f)
 
             update_scene_info(run_dir, ep_idx, info)
+            # grounding: masking/episode{idx}.json sidecar + target/bin masks baked into
+            # the HDF5 — the same first-class per-episode output the CuRobo collectors
+            # write, so a policy run dir stays format-identical. Must run AFTER
+            # update_scene_info (the resolver reads role_names/actor_id_map from it).
+            # Best-effort: a resolver failure must not lose an otherwise-good episode.
+            if getattr(cd, "finalize_grounding", None) is not None:
+                try:
+                    cd.finalize_grounding(args["save_path"], ep_idx,
+                                          obj_pad=args.get("table_obj_pad"))
+                except Exception as _me:  # noqa: BLE001
+                    print(f"\033[93m[rollout] grounding failed (episode {ep_idx}): {_me}\033[0m")
             with open(seed_file, "a", encoding="utf-8") as f:
                 f.write(f"{seed} ")
 
