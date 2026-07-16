@@ -65,6 +65,15 @@ try:
 
     class CuroboPlanner:
 
+        @staticmethod
+        def _position_only_pose_cost_metric(tensor_args):
+            """PoseCostMetric that only scores position, zeroing rotation weights --
+            used to relax IK/planning goals to position-only (relax_orientation)."""
+            return PoseCostMetric(
+                reach_partial_pose=True,
+                reach_vec_weight=tensor_args.to_device([0.0, 0.0, 0.0, 1.0, 1.0, 1.0]),
+            )
+
         def __init__(
             self,
             robot_origion_pose,
@@ -293,11 +302,7 @@ try:
                 # above -- no manual reset needed here.
                 if os.environ.get("ROBOTWIN_LOG_MOVE", "") == "1":
                     print("[plan_path] using relax_orientation pose_cost_metric")
-                plan_config.pose_cost_metric = PoseCostMetric(
-                    reach_partial_pose=True,
-                    reach_vec_weight=motion_gen.tensor_args.to_device(
-                        [0.0, 0.0, 0.0, 1.0, 1.0, 1.0]),
-                )
+                plan_config.pose_cost_metric = self._position_only_pose_cost_metric(motion_gen.tensor_args)
 
             result = motion_gen.plan_single(start_joint_states, goal_pose_of_ee, plan_config)
 
@@ -308,39 +313,27 @@ try:
 
             # output
             res_result = dict()
+            # Diagnostic: MotionGen sets position_error/rotation_error/interpolated_plan
+            # UNCONDITIONALLY in _plan_from_solve_state's trajopt/finetune branch, on both
+            # success and failure (e.g. FINETUNE_TRAJOPT_FAIL) -- the optimizer converged to
+            # *something*, just not always within the success tolerance. Surfacing how close
+            # it got (and where it actually ended up) lets a caller judge whether a failed
+            # attempt is still usable as an intermediate waypoint. Not populated for e.g.
+            # IK_FAIL, where trajopt never ran -- guard on None.
+            if result.position_error is not None:
+                res_result["position_error"] = float(result.position_error.reshape(-1)[0].item())
+            if result.rotation_error is not None:
+                res_result["rotation_error"] = float(result.rotation_error.reshape(-1)[0].item())
+            if result.interpolated_plan is not None:
+                res_result["position"] = np.array(result.interpolated_plan.position.to("cpu"))
+                res_result["velocity"] = np.array(result.interpolated_plan.velocity.to("cpu"))
+
             if result.success.item() == False:
                 res_result["status"] = "Fail"
                 res_result["fail_reason"] = str(result.status)
-                # Diagnostic only: MotionGen sets position_error/rotation_error/
-                # interpolated_plan UNCONDITIONALLY in _plan_from_solve_state's
-                # trajopt/finetune branch, even on FINETUNE_TRAJOPT_FAIL -- the
-                # optimizer converged to *something*, just not within the success
-                # tolerance. Surfacing how close it got (and where it actually
-                # ended up) lets a caller judge whether that near-miss is usable as
-                # an intermediate waypoint, instead of discarding a failed attempt
-                # as pure signal-free noise. Not populated for e.g. IK_FAIL, where
-                # trajopt never ran -- guard on None.
-                if result.position_error is not None:
-                    res_result["position_error"] = float(result.position_error.reshape(-1)[0].item())
-                if result.rotation_error is not None:
-                    res_result["rotation_error"] = float(result.rotation_error.reshape(-1)[0].item())
-                if result.interpolated_plan is not None:
-                    res_result["position"] = np.array(result.interpolated_plan.position.to("cpu"))
-                    res_result["velocity"] = np.array(result.interpolated_plan.velocity.to("cpu"))
-                return res_result
             else:
                 res_result["status"] = "Success"
-                res_result["position"] = np.array(result.interpolated_plan.position.to("cpu"))
-                res_result["velocity"] = np.array(result.interpolated_plan.velocity.to("cpu"))
-                # Export position_error/rotation_error on success too, not just
-                # failure -- callers doing per-slice diagnostics (e.g. records.jsonl's
-                # rollout_descent_slices) want these for every slice, not just the
-                # ones that failed.
-                if result.position_error is not None:
-                    res_result["position_error"] = float(result.position_error.reshape(-1)[0].item())
-                if result.rotation_error is not None:
-                    res_result["rotation_error"] = float(result.rotation_error.reshape(-1)[0].item())
-                return res_result
+            return res_result
 
         def plan_batch(
             self,
@@ -490,11 +483,8 @@ try:
             # batch size motion_gen.warmup() already fixed the ik_solver's graph to;
             # solve_single one at a time matches the graph's original (batch=1) shape.
             if relax_orientation:
-                self.motion_gen.ik_solver.update_pose_cost_metric(PoseCostMetric(
-                    reach_partial_pose=True,
-                    reach_vec_weight=self.motion_gen.tensor_args.to_device(
-                        [0.0, 0.0, 0.0, 1.0, 1.0, 1.0]),
-                ))
+                self.motion_gen.ik_solver.update_pose_cost_metric(
+                    self._position_only_pose_cost_metric(self.motion_gen.tensor_args))
             try:
                 results = []
                 for i in range(poses_cuda.shape[0]):
