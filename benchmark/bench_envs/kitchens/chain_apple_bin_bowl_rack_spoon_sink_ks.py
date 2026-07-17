@@ -192,8 +192,9 @@ class chain_apple_bin_bowl_rack_spoon_sink_ks(KitchenS_base_task):
         apple_in_bin = (abs(ap[0] - bin_p[0]) < 0.08
                         and abs(ap[1] - bin_p[1]) < 0.07
                         and ap[2] < bin_p[2] + 0.10)
-        bowl_on_rack = (abs(bp[0] - rack_p[0]) < 0.15
-                        and abs(bp[1] - rack_p[1]) < 0.20)
+        bowl_on_rack = (abs(bp[0] - rack_p[0]) < 0.12
+                        and abs(bp[1] - rack_p[1]) < 0.10          # tightened toward true rack extent
+                        and bp[2] > rack_p[2] - 0.08)              # elevated onto rack, not counter beside it
         spoon_in_sink = (abs(sp[0] - sink_p[0]) < sg["hole_hx"]
                          and abs(sp[1] - sink_p[1]) < sg["hole_hy"]
                          and sp[2] < sink_p[2] + 0.01)
