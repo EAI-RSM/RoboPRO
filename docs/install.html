@@ -67,13 +67,12 @@ vulkaninfo  # smoke test</code></pre>
 
 <section class="install-section">
   <div class="container">
-    <p class="step-num">Step 3 · Conda env</p>
+    <p class="step-num">Step 3 · uv env</p>
     <h2>Create the <code>robopro</code> env.</h2>
-<pre><code>conda create -n robopro python=3.10 -y
-# Block ~/.local/lib site-packages from leaking into the env:
-conda env config vars set -n robopro PYTHONNOUSERSITE=1
-conda activate robopro</code></pre>
-    <p>The <code>PYTHONNOUSERSITE</code> step matters: without it, a prior <code>~/.local/lib/python3.10/site-packages/sapien</code> (or torch) will be picked up ahead of the conda env's copy and break imports.</p>
+<pre><code>uv venv --python 3.10
+source .venv/bin/activate
+export PYTHONNOUSERSITE=1</code></pre>
+    <p>The <code>PYTHONNOUSERSITE</code> step matters: without it, a prior <code>~/.local/lib/python3.10/site-packages/sapien</code> (or torch) can be picked up ahead of the project's environment and break imports.</p>
   </div>
 </section>
 
@@ -81,12 +80,8 @@ conda activate robopro</code></pre>
   <div class="container">
     <p class="step-num">Step 4 · Python deps</p>
     <h2>Install RoboTwin deps + CuRobo.</h2>
-<pre><code>cd customized_robotwin
-pip install -r script/requirements.txt
-pip install setuptools==69.5.1
-pip install "git+https://github.com/facebookresearch/pytorch3d.git@stable" --no-build-isolation
-bash script/_install.sh</code></pre>
-    <p><code>script/_install.sh</code> patches <code>sapien/wrapper/urdf_loader.py</code> (utf-8 encoding) and <code>mplib/planner.py</code> (drops a too-strict collision check), then clones CuRobo v0.7.8 into <code>envs/curobo/</code> and pip-installs it editable. It re-pins <code>warp-lang==1.12.0</code> and <code>setuptools==69.5.1</code> at the end. A <code>scikit-image vs scipy</code> version warning is harmless &mdash; the simulator needs <code>scipy==1.10.1</code>.</p>
+<pre><code>bash scripts/install/bootstrap_uv.sh</code></pre>
+    <p><code>bootstrap_uv.sh</code> creates <code>.venv</code>, syncs the root <code>pyproject.toml</code>, patches <code>sapien/wrapper/urdf_loader.py</code> (utf-8 encoding) and <code>mplib/planner.py</code> (drops a too-strict collision check), then clones CuRobo v0.7.8 into <code>customized_robotwin/envs/curobo/</code> and installs it editable. It re-pins <code>warp-lang==1.12.0</code> and <code>setuptools==69.5.1</code> at the end. A <code>scikit-image vs scipy</code> version warning is harmless &mdash; the simulator needs <code>scipy==1.10.1</code>.</p>
   </div>
 </section>
 
@@ -94,17 +89,14 @@ bash script/_install.sh</code></pre>
   <div class="container">
     <p class="step-num">Step 5 · Assets</p>
     <h2>Fetch the asset bundle (~15&nbsp;GB).</h2>
-<pre><code>cd ..
-python scripts/install/download_assets.py</code></pre>
+<pre><code>python scripts/install/download_assets.py</code></pre>
     <p>Pulls from <a href="https://huggingface.co/datasets/Hoshipu/RoboPRO_assets">Hoshipu/RoboPRO_assets</a> into <code>benchmark/assets/</code> (objects, embodiments, background_texture, backgrounds). The bundle already includes <code>aloha-agilex/.../meshes/box2_Link.dae</code> (~206&nbsp;MB) &mdash; no separate fetch needed.</p>
     <p>The shipped <code>task_config/_embodiment_config.yml</code> uses upstream-relative paths (<code>./assets/embodiments/...</code>). RoboPRO keeps assets under <code>benchmark/assets/</code>, so add a one-line symlink so the upstream paths resolve:</p>
 <pre><code>ln -sfn ../benchmark/assets customized_robotwin/assets</code></pre>
     <p>Generate the local-path curobo configs from the shipped templates, and patch them so CuRobo can attach grasped objects (the shipped configs lack the <code>attached_object</code> link entries):</p>
 <pre><code>ASSETS_PATH="$(pwd)/benchmark"
 cd benchmark/assets/embodiments/aloha-agilex
-for side in left right; do
-  sed "s|\${ASSETS_PATH}|$ASSETS_PATH|g" curobo_${side}_tmp.yml &gt; curobo_${side}.yml
-done
+ASSETS_PATH="$ASSETS_PATH" python -c 'from pathlib import Path; import os; assets_path = os.environ["ASSETS_PATH"]; [Path(f"curobo_{side}.yml").write_text(Path(f"curobo_{side}_tmp.yml").read_text(encoding="utf-8").replace("${ASSETS_PATH}", assets_path), encoding="utf-8") for side in ("left", "right")]'
 cd -
 python scripts/install/patch_aloha_curobo.py</code></pre>
   </div>

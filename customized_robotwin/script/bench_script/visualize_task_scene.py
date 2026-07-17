@@ -63,6 +63,7 @@ import argparse
 import importlib
 import time
 import yaml
+import json
 from pathlib import Path
 import numpy as np
 
@@ -78,6 +79,85 @@ robotwin_root = Path(os.environ["ROBOTWIN_ROOT"])
 os.chdir(robotwin_root)  # Change to customized_robotwin for proper path resolution
 
 from envs import CONFIGS_PATH  # from customized_robotwin
+
+
+def _to_jsonable(value):
+    if isinstance(value, dict):
+        return {str(k): _to_jsonable(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_to_jsonable(v) for v in value]
+    if isinstance(value, Path):
+        return str(value)
+    if isinstance(value, np.generic):
+        return value.item()
+    return value
+
+
+def _build_object_hypotheses(scene_info):
+    hypotheses = []
+
+    for key, value in (scene_info.get("info") or {}).items():
+        if len(key) == 3 and key.startswith("{") and key.endswith("}") and key[1].islower():
+            hypotheses.append({
+                "source": "task_info",
+                "placeholder": key,
+                "entity_type": "arm",
+                "value": value,
+            })
+        else:
+            hypotheses.append({
+                "source": "task_info",
+                "placeholder": key,
+                "entity_type": "object",
+                "asset_ref": value,
+            })
+
+    for idx, clutter_obj in enumerate(scene_info.get("cluttered_table_info") or []):
+        hypotheses.append({
+            "source": "cluttered_table_info",
+            "entity_type": "distractor",
+            "hypothesis_index": idx,
+            "object_type": clutter_obj.get("object_type"),
+            "object_index": clutter_obj.get("object_index"),
+        })
+
+    return hypotheses
+
+
+def _write_rollout_scene_info(env, task_name, task_config, seed, success):
+    save_dir = Path(env.save_dir)
+    save_dir.mkdir(parents=True, exist_ok=True)
+    scene_info_path = save_dir / "scene_info.json"
+
+    episode_id = f"{env.__class__.__name__}_{env.ep_num}"
+    scene_info = _to_jsonable(getattr(env, "info", {}) or {})
+    collision_info = {}
+    if hasattr(env, "get_collision_metrics"):
+        collision_info = _to_jsonable(env.get_collision_metrics())
+
+    scene_info["collision_info"] = collision_info
+    scene_info["object_hypotheses"] = _build_object_hypotheses(scene_info)
+    scene_info["metadata"] = {
+        "task_name": task_name,
+        "task_config": task_config,
+        "seed": seed,
+        "success": bool(success),
+        "episode_id": episode_id,
+        "data_file": f"data/episode_{episode_id}.hdf5",
+        "video_file": f"video/episode_{episode_id}.mp4",
+    }
+
+    if scene_info_path.exists():
+        with open(scene_info_path, "r", encoding="utf-8") as f:
+            scene_db = json.load(f)
+    else:
+        scene_db = {}
+
+    scene_db[f"episode_{episode_id}"] = scene_info
+    with open(scene_info_path, "w", encoding="utf-8") as f:
+        json.dump(scene_db, f, ensure_ascii=False, indent=2)
+
+    print(f"Saved scene info to {scene_info_path} [episode_{episode_id}]")
 
 
 def sync_viewer_to_scene_camera(env, camera_name: str) -> bool:
@@ -308,6 +388,8 @@ def main():
             )
         env.play_once()
         if env.save_data:
+            rollout_success = env.check_success()
+            _write_rollout_scene_info(env, task_name, task_config, cfg["seed"], rollout_success)
             env.ep_num = f"_{env.__class__.__name__}_{env.ep_num}"
             env.close_env(clear_cache=True)
             env.merge_pkl_to_hdf5_video()

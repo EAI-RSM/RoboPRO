@@ -439,7 +439,11 @@ class Bench_base_task(Base_Task):
             return
 
         success_count = 0
-        max_try = 50
+        # allow_duplicate_clutter: place the same (object, model id) repeatedly and
+        # give a much larger retry budget so `obstacle_count` is actually reached
+        # (needed when the pool has few distinct ids, e.g. handcrafted clutter).
+        allow_dup = getattr(self, "allow_duplicate_clutter", False)
+        max_try = (obstacle_count * 20) if allow_dup else 50
         trys = 0
 
         # Track which specific model ids have been placed per object name
@@ -496,7 +500,7 @@ class Bench_base_task(Base_Task):
             rand_idx = np.random.randint(len(ids_for_obj))
             obj_idx = ids_for_obj[rand_idx]
 
-            if obj_idx in placed_objects.get(obj_name, []):
+            if (not allow_dup) and obj_idx in placed_objects.get(obj_name, []):
                 trys += 1
                 continue
 
@@ -845,10 +849,7 @@ class Bench_base_task(Base_Task):
         """Snapshot poses of all static objects before scene.step() for cumulative displacement tracking."""
         if not hasattr(self, 'static_object_ids'):
             return
-        for entity in self.scene.get_all_actors():
-            actor_id = entity.per_scene_id
-            if actor_id not in self.static_object_ids:
-                continue
+        for actor_id, entity in self._static_id_to_entity.items():
             p = entity.get_pose()
             snapshot = (np.array(p.p, dtype=np.float64), np.array(p.q, dtype=np.float64))
             self.static_object_pose_prev[actor_id] = snapshot

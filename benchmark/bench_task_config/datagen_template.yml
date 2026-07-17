@@ -19,6 +19,9 @@ episode_num: 1             # episodes to KEEP per task (default 1 = quick review
 use_seed: false            # true = replay seeds from <save_dir>/seed.txt instead of searching
                            #        (matched pairs: copy seed.txt from a finished twin run first)
 save_freq: 15
+video_fps: 30               # playback rate for the saved episode mp4 (expert/CuRobo demos
+                           # default to 30; policy-rollout collection configs should set 10
+                           # to match the pi05 command rate)
 embodiment: [aloha-agilex]
 language_num: 100
 domain_randomization:

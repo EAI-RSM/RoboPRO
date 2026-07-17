@@ -4,6 +4,7 @@ render_freq: 0
 episode_num: 1
 use_seed: false
 save_freq: 15
+video_fps: 30
 embodiment: [aloha-agilex]
 language_num: 100
 domain_randomization:

@@ -3,6 +3,7 @@ import mplib
 import numpy as np
 import pdb
 import traceback
+import os
 import numpy as np
 import toppra as ta
 from mplib.sapien_utils import SapienPlanner, SapienPlanningWorld
@@ -31,7 +32,47 @@ try:
     from curobo.util import logger
     logger.setup_logger(level="error", logger_name="curobo")
 
+    # Keep defaults moderate enough for 16 GB class GPUs, and allow per-run overrides.
+    CUROBO_TRAJOPT_SEEDS = int(os.environ.get("CUROBO_TRAJOPT_SEEDS", "16"))
+    CUROBO_BATCH_GRAPH_SEEDS = int(os.environ.get("CUROBO_BATCH_GRAPH_SEEDS", "1"))
+    CUROBO_MAX_ATTEMPTS = int(os.environ.get("CUROBO_MAX_ATTEMPTS", "24"))
+    CUROBO_BATCH_WARMUP = int(os.environ.get("CUROBO_BATCH_WARMUP", "0"))
+    # Finetune-stage knobs, separate from the main trajopt seeds/attempts above --
+    # MotionGenPlanConfig defaults (finetune_attempts=5, finetune_dt_scale=0.85) are
+    # CuRobo's own; None here means "use CuRobo's default", not "disable". A tighter
+    # initial dt_scale forces a more aggressive (less time-slack) trajectory, which can
+    # fail to converge smoothly near an obstacle; CuRobo's own docs note each retry
+    # loosens dt_scale automatically, so more attempts and/or a looser starting scale
+    # gives finetune more room on hard cases like a close final descent.
+    CUROBO_FINETUNE_ATTEMPTS = (int(os.environ["CUROBO_FINETUNE_ATTEMPTS"])
+                                if os.environ.get("CUROBO_FINETUNE_ATTEMPTS") else None)
+    CUROBO_FINETUNE_DT_SCALE = (float(os.environ["CUROBO_FINETUNE_DT_SCALE"])
+                                if os.environ.get("CUROBO_FINETUNE_DT_SCALE") else None)
+    # attach_external_objects_to_robot's own default is 0.001; this codebase hardcoded
+    # 0.005 (5x larger) at both call sites below. That's a 5mm phantom padding added to
+    # EVERY surface-sampled sphere of the held object's collision approximation -- for a
+    # "place onto a surface" motion that needs the gripper+object to get close to the
+    # table, that padding alone can make CuRobo reject an approach that has no real
+    # physical collision. Matches CuRobo's own default unless overridden.
+    CUROBO_ATTACH_SPHERE_RADIUS = float(os.environ.get("CUROBO_ATTACH_SPHERE_RADIUS", "0.001"))
+    CUROBO_NEAR_CONTACT_TRAJOPT_SEEDS = int(os.environ.get("CUROBO_NEAR_CONTACT_TRAJOPT_SEEDS", "4"))
+    CUROBO_NEAR_CONTACT_MAX_ATTEMPTS = int(os.environ.get("CUROBO_NEAR_CONTACT_MAX_ATTEMPTS", "8"))
+    CUROBO_NEAR_CONTACT_FINETUNE_ATTEMPTS = int(os.environ.get("CUROBO_NEAR_CONTACT_FINETUNE_ATTEMPTS", "8"))
+    CUROBO_NEAR_CONTACT_FINETUNE_DT_SCALE = float(os.environ.get("CUROBO_NEAR_CONTACT_FINETUNE_DT_SCALE", "1.0"))
+    CUROBO_NEAR_CONTACT_COLLISION_ACTIVATION = float(os.environ.get("CUROBO_NEAR_CONTACT_COLLISION_ACTIVATION", "0.005"))
+    CUROBO_NEAR_CONTACT_POSITION_THRESHOLD = float(os.environ.get("CUROBO_NEAR_CONTACT_POSITION_THRESHOLD", "0.01"))
+    CUROBO_NEAR_CONTACT_INTERPOLATION_DT = float(os.environ.get("CUROBO_NEAR_CONTACT_INTERPOLATION_DT", "0.01"))
+
     class CuroboPlanner:
+
+        @staticmethod
+        def _position_only_pose_cost_metric(tensor_args):
+            """PoseCostMetric that only scores position, zeroing rotation weights --
+            used to relax IK/planning goals to position-only (relax_orientation)."""
+            return PoseCostMetric(
+                reach_partial_pose=True,
+                reach_vec_weight=tensor_args.to_device([0.0, 0.0, 0.0, 1.0, 1.0, 1.0]),
+            )
 
         def __init__(
             self,
@@ -81,31 +122,99 @@ try:
                 self.yml_path,
                 world_config,
                 interpolation_dt=1 / 250,
-                num_trajopt_seeds=8,
+                num_trajopt_seeds=CUROBO_TRAJOPT_SEEDS,
                 collision_cache=collision_cache,
             )
 
             self.motion_gen = MotionGen(motion_gen_config)
             self.motion_gen.warmup()
-            
-            motion_gen_config = MotionGenConfig.load_from_robot_config(
+            self.motion_gen_near_contact = None
+
+            # Batch planning is memory-hungry. Defer its construction until a caller
+            # actually needs plan_batch() so ordinary single-goal planning stays lighter.
+            self._motion_gen_batch_config = MotionGenConfig.load_from_robot_config(
                 self.yml_path,
                 world_config,
                 interpolation_dt=1 / 250,
-                num_trajopt_seeds=8,
-                num_graph_seeds=1,
+                num_trajopt_seeds=CUROBO_TRAJOPT_SEEDS,
+                num_graph_seeds=CUROBO_BATCH_GRAPH_SEEDS,
                 collision_cache=collision_cache,
             )
-            self.motion_gen_batch = MotionGen(motion_gen_config)
-            self.motion_gen_batch.warmup(batch=CONFIGS.ROTATE_NUM)
+            self.motion_gen_batch = None
+            # Snapshot of world/attachment state applied to self.motion_gen so far.
+            # motion_gen_batch is created lazily (on first plan_batch/enable_obstacle
+            # call), which can happen well after update_world()/attach_object() calls
+            # that only reached self.motion_gen (via _active_motion_gens()) because
+            # motion_gen_batch didn't exist yet. Replay them below so the batch
+            # instance doesn't start from the near-empty __init__-time world.
+            self._last_world_config = None
+            self._attached_objects = []
+            if CUROBO_BATCH_WARMUP:
+                self._ensure_motion_gen_batch()
+
+        def _ensure_motion_gen_batch(self):
+            if self.motion_gen_batch is None:
+                self.motion_gen_batch = MotionGen(self._motion_gen_batch_config)
+                self.motion_gen_batch.warmup(batch=CONFIGS.ROTATE_NUM)
+                if self._last_world_config is not None:
+                    self.motion_gen_batch.clear_world_cache()
+                    self.motion_gen_batch.update_world(self._last_world_config)
+                for obstacle, joint_states in self._attached_objects:
+                    self.motion_gen_batch.attach_external_objects_to_robot(
+                        joint_state=joint_states,
+                        external_objects=[obstacle],
+                        link_name="attached_object",
+                        surface_sphere_radius=CUROBO_ATTACH_SPHERE_RADIUS,
+                        voxelize_method="ray",
+                    )
+            return self.motion_gen_batch
+
+        def _active_motion_gens(self):
+            gens = [self.motion_gen]
+            if self.motion_gen_batch is not None:
+                gens.append(self.motion_gen_batch)
+            if self.motion_gen_near_contact is not None:
+                gens.append(self.motion_gen_near_contact)
+            return gens
+
+        def _ensure_near_contact_motion_gen(self):
+            if self.motion_gen_near_contact is None:
+                config = MotionGenConfig.load_from_robot_config(
+                    self.yml_path, {"cuboid": {}, "mesh": {}},
+                    interpolation_dt=CUROBO_NEAR_CONTACT_INTERPOLATION_DT,
+                    num_trajopt_seeds=CUROBO_NEAR_CONTACT_TRAJOPT_SEEDS,
+                    collision_cache={"mesh": 1, "obb": 1},
+                    collision_activation_distance=CUROBO_NEAR_CONTACT_COLLISION_ACTIVATION,
+                    position_threshold=CUROBO_NEAR_CONTACT_POSITION_THRESHOLD,
+                    use_cuda_graph=False,
+                )
+                self.motion_gen_near_contact = MotionGen(config)
+                self.motion_gen_near_contact.warmup()
+                if self._last_world_config is not None:
+                    self.motion_gen_near_contact.clear_world_cache()
+                    self.motion_gen_near_contact.update_world(self._last_world_config)
+                for obstacle, joint_states in self._attached_objects:
+                    ok = self.motion_gen_near_contact.attach_external_objects_to_robot(
+                        joint_state=joint_states, external_objects=[obstacle],
+                        link_name="attached_object",
+                        surface_sphere_radius=CUROBO_ATTACH_SPHERE_RADIUS,
+                        voxelize_method="ray",
+                    )
+                    assert ok
+            return self.motion_gen_near_contact
 
         def plan_path(
             self,
             curr_joint_pos,
             target_gripper_pose,
             constraint_pose=None,
+            approach_axis=None,
             arms_tag=None,
-        ):  
+            relax_orientation=False,
+            approach_offset=0.05,
+            tstep_fraction=0.8,
+            near_contact=False,
+        ):
             world_base_pose = np.concatenate([
                 np.array(self.robot_origion_pose.p),
                 np.array(self.robot_origion_pose.q),
@@ -137,35 +246,98 @@ try:
             joint_angles = [curr_joint_pos[index] for index in joint_indices]
             joint_angles = [round(angle, 5) for angle in joint_angles]  # avoid the precision problem
             start_joint_states = JointState.from_position(
-                torch.tensor(joint_angles).cuda().reshape(1, -1),
+                torch.tensor(joint_angles, dtype=torch.float32).cuda().reshape(1, -1),
                 joint_names=self.active_joints_name,
             )
             # plan
-            plan_config = MotionGenPlanConfig(max_attempts=10)
-            if constraint_pose is not None:
+            motion_gen = self._ensure_near_contact_motion_gen() if near_contact else self.motion_gen
+            if near_contact:
+                plan_config = MotionGenPlanConfig(
+                    max_attempts=CUROBO_NEAR_CONTACT_MAX_ATTEMPTS,
+                    finetune_attempts=CUROBO_NEAR_CONTACT_FINETUNE_ATTEMPTS,
+                    finetune_dt_scale=CUROBO_NEAR_CONTACT_FINETUNE_DT_SCALE,
+                )
+            else:
+                _finetune_kwargs = {}
+                if CUROBO_FINETUNE_ATTEMPTS is not None:
+                    _finetune_kwargs["finetune_attempts"] = CUROBO_FINETUNE_ATTEMPTS
+                if CUROBO_FINETUNE_DT_SCALE is not None:
+                    _finetune_kwargs["finetune_dt_scale"] = CUROBO_FINETUNE_DT_SCALE
+                plan_config = MotionGenPlanConfig(max_attempts=CUROBO_MAX_ATTEMPTS, **_finetune_kwargs)
+            if approach_axis is not None:
+                # create_grasp_approach_metric (unlike the plain hold_partial_pose
+                # metric below) sets offset_tstep_fraction >= 0, which makes CuRobo
+                # skip its start-vs-goal orientation match check -- the same check
+                # that made the plain constraint_pose path below reject approaches
+                # where start/goal orientation differ (INVALID_PARTIAL_POSE_COST_
+                # METRIC, why DROP_GRASP_ORIENTATION_CONSTRAINT exists). It blends a
+                # straight-line approach along one axis into only the last
+                # tstep_fraction of the trajectory, instead of constraining the
+                # whole path, and CuRobo auto-resets it after this plan_single call.
+                if os.environ.get("ROBOTWIN_LOG_MOVE", "") == "1":
+                    print(f"[plan_path] using approach_axis={approach_axis} "
+                          f"approach_offset={approach_offset} tstep_fraction={tstep_fraction} "
+                          f"pose_cost_metric")
+                plan_config.pose_cost_metric = PoseCostMetric.create_grasp_approach_metric(
+                    offset_position=approach_offset, linear_axis=approach_axis,
+                    tstep_fraction=tstep_fraction,
+                    tensor_args=motion_gen.tensor_args,
+                )
+            elif constraint_pose is not None:
                 pose_cost_metric = PoseCostMetric(
                     hold_partial_pose=True,
-                    hold_vec_weight=self.motion_gen.tensor_args.to_device(constraint_pose),
+                    hold_vec_weight=motion_gen.tensor_args.to_device(constraint_pose),
                 )
                 plan_config.pose_cost_metric = pose_cost_metric
+            elif relax_orientation:
+                # Position-only goal: for transit-only moves (carrying an already-
+                # grasped object around/over an obstacle) the held object's exact
+                # orientation en route doesn't matter -- check_success() only checks
+                # final x/y position. A check_ik_batch(relax_orientation=True) sweep
+                # confirmed this opens up real, currently-dead combos at the
+                # lift_above_box stage (e.g. seed 8/9: several gap x clearance_z
+                # combos flip from IK-infeasible to feasible once orientation is
+                # freed). MotionGen resets pose_cost_metric automatically at the end
+                # of _plan_attempts, same as the approach_axis/constraint_pose cases
+                # above -- no manual reset needed here.
+                if os.environ.get("ROBOTWIN_LOG_MOVE", "") == "1":
+                    print("[plan_path] using relax_orientation pose_cost_metric")
+                plan_config.pose_cost_metric = self._position_only_pose_cost_metric(motion_gen.tensor_args)
 
-            result = self.motion_gen.plan_single(start_joint_states, goal_pose_of_ee, plan_config)
+            result = motion_gen.plan_single(start_joint_states, goal_pose_of_ee, plan_config)
 
             # ------------------------------------------
-            if result.success.item() == False:
+            if result.success.item() == False and os.environ.get("ROBOTWIN_LOG_MOVE", "") == "1":
+                # A failed plan is EXPECTED and frequent during the reachability
+                # planner's candidate search (it probes many infeasible poses on
+                # purpose), so this floods the console. The reason is still returned
+                # below in fail_reason; only print it when diagnostics are requested.
                 print("[Error]: CuroboPlanner plan_path failed:", result.status)
             # ------------------------------------------
 
             # output
             res_result = dict()
-            if result.success.item() == False:
-                res_result["status"] = "Fail"
-                return res_result
-            else:
-                res_result["status"] = "Success"
+            # Diagnostic: MotionGen sets position_error/rotation_error/interpolated_plan
+            # UNCONDITIONALLY in _plan_from_solve_state's trajopt/finetune branch, on both
+            # success and failure (e.g. FINETUNE_TRAJOPT_FAIL) -- the optimizer converged to
+            # *something*, just not always within the success tolerance. Surfacing how close
+            # it got (and where it actually ended up) lets a caller judge whether a failed
+            # attempt is still usable as an intermediate waypoint. Not populated for e.g.
+            # IK_FAIL, where trajopt never ran -- guard on None.
+            if result.position_error is not None:
+                res_result["position_error"] = float(result.position_error.reshape(-1)[0].item())
+            if result.rotation_error is not None:
+                res_result["rotation_error"] = float(result.rotation_error.reshape(-1)[0].item())
+            if result.interpolated_plan is not None:
                 res_result["position"] = np.array(result.interpolated_plan.position.to("cpu"))
                 res_result["velocity"] = np.array(result.interpolated_plan.velocity.to("cpu"))
-                return res_result
+
+            if result.success.item() == False:
+                res_result["status"] = "Fail"
+                res_result["fail_reason"] = str(result.status)
+            else:
+                res_result["status"] = "Success"
+            return res_result
 
         def plan_batch(
             self,
@@ -231,7 +403,12 @@ try:
             joint_angles_cuda = torch.cat([joint_angles_cuda] * num_poses, dim=0)
             start_joint_states = JointState.from_position(joint_angles_cuda, joint_names=self.active_joints_name)
             # plan
-            plan_config = MotionGenPlanConfig(max_attempts=10)
+            _finetune_kwargs = {}
+            if CUROBO_FINETUNE_ATTEMPTS is not None:
+                _finetune_kwargs["finetune_attempts"] = CUROBO_FINETUNE_ATTEMPTS
+            if CUROBO_FINETUNE_DT_SCALE is not None:
+                _finetune_kwargs["finetune_dt_scale"] = CUROBO_FINETUNE_DT_SCALE
+            plan_config = MotionGenPlanConfig(max_attempts=CUROBO_MAX_ATTEMPTS, **_finetune_kwargs)
             if constraint_pose is not None:
                 pose_cost_metric = PoseCostMetric(
                     hold_partial_pose=True,
@@ -240,7 +417,8 @@ try:
                 plan_config.pose_cost_metric = pose_cost_metric
 
             try:
-                result = self.motion_gen_batch.plan_batch(start_joint_states, goal_pose_of_ee, plan_config)
+                motion_gen_batch = self._ensure_motion_gen_batch()
+                result = motion_gen_batch.plan_batch(start_joint_states, goal_pose_of_ee, plan_config)
             except Exception as e:
                 return {"status": ["Failure" for i in range(10)]}
 
@@ -257,6 +435,70 @@ try:
             res_result["position"] = np.array(result.interpolated_plan.position.to("cpu"))
             res_result["velocity"] = np.array(result.interpolated_plan.velocity.to("cpu"))
             return res_result
+
+        def check_ik_batch(self, target_gripper_pose_list, arms_tag=None, relax_orientation=False):
+            """Diagnostic only: batched collision-aware IK feasibility check (no
+            trajectory optimization), much cheaper than plan_batch. Used to map out
+            the arm's real reachable envelope directly rather than inferring it from
+            full-motion-plan failures. Returns a bool numpy array, one per pose,
+            True if a collision-free IK solution exists for that pose.
+
+            relax_orientation=True: position-only IK (via PoseCostMetric.
+            reach_partial_pose with rotation weights zeroed) -- for probing whether
+            a position that fails strict full-pose IK is reachable under ANY
+            orientation. Reuses this method's own (already-correct) world/base
+            frame transform instead of a separate reimplementation, after an
+            earlier standalone prototype script got the transform wrong (missing
+            the gripper->endlink conversion) and produced misleading results."""
+            world_base_pose = np.concatenate([
+                np.array(self.robot_origion_pose.p),
+                np.array(self.robot_origion_pose.q),
+            ])
+            poses_list = []
+            for target_gripper_pose in target_gripper_pose_list:
+                world_target_pose = np.concatenate([np.array(target_gripper_pose.p), np.array(target_gripper_pose.q)])
+                base_target_pose_p, base_target_pose_q = self._trans_from_world_to_base(world_base_pose, world_target_pose)
+
+                if not ("aloha-agilex" in self.yml_path):
+                    base_target_pose_p[0] += self.frame_bias[0]
+                    base_target_pose_p[1] += self.frame_bias[1]
+                    base_target_pose_p[2] += self.frame_bias[2]
+                else:  # patch for aloha-agilex
+                    T_target = t3d.affines.compose(base_target_pose_p, t3d.quaternions.quat2mat(base_target_pose_q), [1, 1, 1])
+                    T_bias = t3d.affines.compose(self.frame_bias, np.eye(3), [1, 1, 1])
+
+                    if arms_tag == "left":
+                        rot = t3d.axangles.axangle2mat([0, 0, 1], -0.02)
+                    elif arms_tag == "right":
+                        rot = t3d.axangles.axangle2mat([0, 0, 1], -0.01)
+                    else:
+                        raise ValueError(f"Invalid arms_tag: {arms_tag}")
+
+                    T_rot = t3d.affines.compose([0, 0, 0], rot, [1, 1, 1])
+                    T_new = T_rot @ T_bias @ T_target
+                    base_target_pose_p = T_new[:3, 3]
+                    base_target_pose_q = t3d.quaternions.mat2quat(T_new[:3, :3])
+
+                base_target_pose_list = list(base_target_pose_p) + list(base_target_pose_q)
+                poses_list.append(base_target_pose_list)
+
+            poses_cuda = torch.tensor(poses_list, dtype=torch.float32).cuda()
+            # solve_batch trips a CUDA-graph batch-size mismatch against whatever
+            # batch size motion_gen.warmup() already fixed the ik_solver's graph to;
+            # solve_single one at a time matches the graph's original (batch=1) shape.
+            if relax_orientation:
+                self.motion_gen.ik_solver.update_pose_cost_metric(
+                    self._position_only_pose_cost_metric(self.motion_gen.tensor_args))
+            try:
+                results = []
+                for i in range(poses_cuda.shape[0]):
+                    goal_pose = CuroboPose(poses_cuda[i:i + 1, :3], poses_cuda[i:i + 1, 3:])
+                    ik_result = self.motion_gen.ik_solver.solve_single(goal_pose)
+                    results.append(bool(ik_result.success.reshape(-1)[0].item()))
+            finally:
+                if relax_orientation:
+                    self.motion_gen.ik_solver.update_pose_cost_metric(PoseCostMetric.reset_metric())
+            return np.array(results, dtype=bool)
 
         def plan_grippers(self, now_val, target_val):
             num_step = 200
@@ -289,8 +531,9 @@ try:
 
             collision_dict = self.collision_dict_world_to_arm_base(collision_dict, arms_tag)
             world_config = WorldConfig.from_dict(collision_dict)
+            self._last_world_config = world_config
 
-            for gen in [self.motion_gen, self.motion_gen_batch]:
+            for gen in self._active_motion_gens():
                 gen.clear_world_cache()
                 gen.update_world(world_config)
             
@@ -466,12 +709,11 @@ try:
             return scene
 
         def enable_obstacle(self, enable: bool, mesh_names: list[str] = [], obb_names: list[str] = []):
-            for name in mesh_names:
-                self.motion_gen.world_coll_checker.enable_mesh(enable,name=name)
-                self.motion_gen_batch.world_coll_checker.enable_mesh(enable,name=name)
-            for name in obb_names:
-                self.motion_gen.world_coll_checker.enable_obb(enable, name=name)
-                self.motion_gen_batch.world_coll_checker.enable_obb(enable, name=name)
+            for gen in self._active_motion_gens():
+                for name in mesh_names:
+                    gen.world_coll_checker.enable_mesh(enable, name=name)
+                for name in obb_names:
+                    gen.world_coll_checker.enable_obb(enable, name=name)
 
         def attach_object(self, object: dict, curr_joint_pos: list, arms_tag: str):
             """
@@ -497,24 +739,26 @@ try:
             joint_angles = [curr_joint_pos[index] for index in joint_indices]
             joint_angles = [round(angle, 5) for angle in joint_angles]
             joint_states = JointState.from_position(
-                torch.tensor(joint_angles).cuda().reshape(1, -1),
+                torch.tensor(joint_angles, dtype=torch.float32).cuda().reshape(1, -1),
                 joint_names=self.active_joints_name,
             )
             # -----------------------------------------------
 
-            for mg in [self.motion_gen, self.motion_gen_batch]:
+            for mg in self._active_motion_gens():
                 ok = mg.attach_external_objects_to_robot(
                     joint_state=joint_states,
                     external_objects=[obstacle],
                     link_name="attached_object",
-                    surface_sphere_radius=0.005,  # start here; decrease for tighter fit
+                    surface_sphere_radius=CUROBO_ATTACH_SPHERE_RADIUS,
                     voxelize_method="ray",
                 )
                 assert ok
-        
+            self._attached_objects.append((obstacle, joint_states))
+
         def detach_object(self):
-            for mg in [self.motion_gen, self.motion_gen_batch]:
+            for mg in self._active_motion_gens():
                 mg.detach_object_from_robot(link_name="attached_object",)
+            self._attached_objects = []
 
         def visualize_attached_objects(self, curr_joint_pos: list):
             world_model = self.motion_gen.world_coll_checker.world_model
@@ -531,7 +775,7 @@ try:
             joint_angles = [round(angle, 5) for angle in joint_angles]
             # -----------------------------------------------
             joint_states = JointState.from_position(
-                torch.tensor(joint_angles).cuda().reshape(1, -1),
+                torch.tensor(joint_angles, dtype=torch.float32).cuda().reshape(1, -1),
                 joint_names=self.active_joints_name,
             )
 

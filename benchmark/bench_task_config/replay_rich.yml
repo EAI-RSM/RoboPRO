@@ -38,3 +38,4 @@ out_subdir: replay
 # Capture cadence (physics substeps between saved frames). Match the collection's
 # save_freq to keep frame alignment, or lower it for denser replay data.
 save_freq: 15
+video_fps: 30

@@ -304,6 +304,7 @@ class Kitchen_base_large(Bench_base_task):
         self.incl_collision = kwags.get("include_collision", False)
         self.jitter_basket = kwags.get("jitter_basket", True)
         self.save_freq = kwags.get("save_freq")
+        self.video_fps = kwags.get("video_fps", 30)
         self.world_pcd = None
 
         # table: main countertop; shelf0/1: pantry rack shelves; fridge/cabinet: internal storage volumes

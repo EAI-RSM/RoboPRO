@@ -188,6 +188,16 @@ def _obb_fields(pos, quat, la, world_aabb):
 current_file_path = os.path.abspath(__file__)
 parent_directory = os.path.dirname(current_file_path)
 
+# Visibility buckets as ordered (name, upper-exclusive bound on visible_fraction).
+# `not_visible` is the special case visible_fraction == 0 (handled separately).
+# Tunable; pass a custom list to classify_visibility / measure_target_visibility.
+DEFAULT_VISIBILITY_BUCKETS = [
+    ("heavily_occluded", 0.20),    # 0    < frac < 0.20
+    ("mostly_occluded", 0.5),      # 0.20 <= frac < 0.5
+    ("partially_occluded", 0.9),   # 0.5  <= frac < 0.9
+    ("fully_visible", float("inf")),  # 0.9 <= frac
+]
+
 
 class Base_Task(gym.Env):
 
@@ -256,6 +266,7 @@ class Base_Task(gym.Env):
         self.eval_video_path = kwags.get("eval_video_save_dir", None)
 
         self.save_freq = kwags.get("save_freq")
+        self.video_fps = kwags.get("video_fps", 30)
         self.world_pcd = None
 
         self.size_dict = list()
@@ -680,6 +691,18 @@ class Base_Task(gym.Env):
             pkl_dic["joint_action"]["right_arm"] = right_jointstate[:-1]
             pkl_dic["joint_action"]["right_gripper"] = right_jointstate[-1]
             pkl_dic["joint_action"]["vector"] = np.array(left_jointstate + right_jointstate)
+        # object state
+        if self.data_type.get("object_state", self.save_data):
+            pkl_dic["object_state"] = {
+                "name": [],
+                "position": [],
+                "quaternion": [],
+            }
+            for actor in self.scene.get_all_actors():
+                pose = actor.get_pose()
+                pkl_dic["object_state"]["name"].append(actor.get_name())
+                pkl_dic["object_state"]["position"].append(np.asarray(pose.p, dtype=np.float32))
+                pkl_dic["object_state"]["quaternion"].append(np.asarray(pose.q, dtype=np.float32))
         # pointcloud
         if self.data_type.get("pointcloud", False):
             pkl_dic["pointcloud"] = self.cameras.get_pcd(self.data_type.get("conbine", False))
@@ -870,6 +893,127 @@ class Base_Task(gym.Env):
         poses = np.array([[*a.get_pose().p, *a.get_pose().q] for a in actors],
                          dtype=np.float32)
         return ids, poses
+
+    # =================================== Visibility measurement (issue #28) ===================================
+
+    def _resolve_target_seg_ids(self, target_actor) -> set:
+        """
+        Map a target to the integer actor-level segmentation id(s) it occupies in
+        the raw segmentation image (channel 1 == entity ``per_scene_id``).
+
+        Accepts either a raw SAPIEN ``Entity`` / articulation, or one of this
+        codebase's ``Actor`` / ``ArticulationActor`` wrappers (``.actor`` holds
+        the underlying object). A rigid object is a single entity -> one id; an
+        articulation spans several link entities -> a set of ids.
+        """
+        actor = getattr(target_actor, "actor", target_actor)
+
+        if hasattr(actor, "get_links"):  # PhysxArticulation: one entity per link
+            ids = set()
+            for link in actor.get_links():
+                entity = getattr(link, "entity", None)
+                if entity is None and hasattr(link, "get_entity"):
+                    entity = link.get_entity()
+                ids.add(int(entity.per_scene_id))
+            return ids
+
+        if hasattr(actor, "per_scene_id"):  # rigid Entity
+            return {int(actor.per_scene_id)}
+
+        raise TypeError(f"Cannot resolve segmentation id for object of type {type(actor)}")
+
+    def classify_visibility(self, visible_fraction, buckets=None) -> str:
+        """
+        Classify visible_fraction into a named bucket. ``buckets`` is an ordered
+        list of (name, upper_exclusive) bounds (defaults to
+        ``DEFAULT_VISIBILITY_BUCKETS``); visible_fraction == 0 is always
+        ``not_visible``.
+
+        Default taxonomy:
+            not_visible        : frac == 0
+            heavily_occluded   : 0    < frac < 0.20
+            mostly_occluded    : 0.20 <= frac < 0.5
+            partially_occluded : 0.5  <= frac < 0.9
+            fully_visible      : 0.9  <= frac
+        """
+        if buckets is None:
+            buckets = DEFAULT_VISIBILITY_BUCKETS
+        if visible_fraction <= 0.0:
+            return "not_visible"
+        for name, hi in buckets:
+            if visible_fraction < hi:
+                return name
+        return buckets[-1][0]
+
+    def measure_target_visibility(
+        self,
+        target_actor,
+        camera_name="countertop_camera",
+        denominator=None,
+        buckets=None,
+        render=True,
+    ) -> dict:
+        """
+        Measure how visible ``target_actor`` is on ``camera_name`` from the raw
+        actor-segmentation image of the currently built scene.
+
+        Returns a dict with:
+            target_ids          : resolved segmentation id(s) for the target
+            visible_pixel_count : pixels where actor-seg == a target id
+            in_fov              : visible_pixel_count > 0
+            visible_fraction    : visible_pixel_count / denominator (None if no denominator)
+            bucket              : classification (None if no denominator)
+            mask                : boolean [H, W] target mask (for validation/overlay)
+
+        ``render`` re-renders + re-takes pictures before reading; pass False to
+        reuse buffers already produced this frame.
+        """
+        if render:
+            self._update_render()
+            if getattr(self, "measurement_only", False):
+                # only the camera we read needs rendering (saves rendering the
+                # other ~4 static cameras + wrist cameras every measurement)
+                self.cameras.update_picture(camera_names=[camera_name])
+            else:
+                self.cameras.update_picture()
+
+        seg = self.cameras.get_segmentation_raw(level="actor", camera_name=camera_name)
+        if camera_name not in seg:
+            raise ValueError(
+                f"camera {camera_name!r} not available; have {list(seg.keys())}"
+            )
+        seg_img = seg[camera_name]["actor_segmentation_raw"]
+
+        target_ids = self._resolve_target_seg_ids(target_actor)
+        mask = np.isin(seg_img, list(target_ids))
+        visible_pixel_count = int(mask.sum())
+
+        result = {
+            "camera_name": camera_name,
+            "target_ids": sorted(target_ids),
+            "visible_pixel_count": visible_pixel_count,
+            "in_fov": visible_pixel_count > 0,
+            "visible_fraction": None,
+            "bucket": None,
+            "mask": mask,
+        }
+
+        if denominator is not None and denominator > 0:
+            frac = visible_pixel_count / float(denominator)
+            result["visible_fraction"] = frac
+            result["bucket"] = self.classify_visibility(frac, buckets=buckets)
+
+        return result
+
+    def capture_target_pixel_count(self, target_actor, camera_name="countertop_camera", render=True) -> int:
+        """
+        Count the target's pixels for use as the ``full_target_pixel_count``
+        denominator. Phase 0 just provides the capture; callers decide *when* to
+        call it (e.g. pre-clutter / pre-occluder) in later phases.
+        """
+        return self.measure_target_visibility(
+            target_actor, camera_name=camera_name, render=render
+        )["visible_pixel_count"]
 
     def _take_picture(self):  # save data
         if not self.save_data:
@@ -1112,7 +1256,7 @@ class Base_Task(gym.Env):
         # print('Merging pkl to hdf5: ', cache_path, ' -> ', target_file_path)
 
         os.makedirs(f"{self.save_dir}/data", exist_ok=True)
-        process_folder_to_hdf5_video(cache_path, target_file_path, target_video_path)
+        process_folder_to_hdf5_video(cache_path, target_file_path, target_video_path, fps=self.video_fps)
 
     def remove_data_cache(self):
         folder_path = self.folder_path["cache"]
@@ -1344,6 +1488,7 @@ class Base_Task(gym.Env):
         self,
         pose,
         constraint_pose=None,
+        approach_axis=None,
         use_point_cloud=False,
         use_attach=False,
         save_freq=-1,
@@ -1361,7 +1506,7 @@ class Base_Task(gym.Env):
             pose = pose.p.tolist() + pose.q.tolist()
 
         if self.need_plan:
-            left_result = self.robot.left_plan_path(pose, constraint_pose=constraint_pose)
+            left_result = self.robot.left_plan_path(pose, constraint_pose=constraint_pose, approach_axis=approach_axis)
             self.left_joint_path.append(deepcopy(left_result))
         else:
             left_result = deepcopy(self.left_joint_path[self.left_cnt])
@@ -1380,6 +1525,7 @@ class Base_Task(gym.Env):
         self,
         pose,
         constraint_pose=None,
+        approach_axis=None,
         use_point_cloud=False,
         use_attach=False,
         save_freq=-1,
@@ -1397,7 +1543,7 @@ class Base_Task(gym.Env):
             pose = pose.p.tolist() + pose.q.tolist()
 
         if self.need_plan:
-            right_result = self.robot.right_plan_path(pose, constraint_pose=constraint_pose)
+            right_result = self.robot.right_plan_path(pose, constraint_pose=constraint_pose, approach_axis=approach_axis)
             self.right_joint_path.append(deepcopy(right_result))
         else:
             right_result = deepcopy(self.right_joint_path[self.right_cnt])
@@ -1582,6 +1728,7 @@ class Base_Task(gym.Env):
                         control_seq["left_arm"] = self.left_move_to_pose(
                             pose=left.target_pose,
                             constraint_pose=left.args.get("constraint_pose"),
+                            approach_axis=left.args.get("approach_axis"),
                         )
                     else:  # left.action == 'gripper'
                         control_seq["left_gripper"] = self.set_gripper(left_pos=left.target_gripper_pos, set_tag="left")
@@ -1593,6 +1740,7 @@ class Base_Task(gym.Env):
                         control_seq["right_arm"] = self.right_move_to_pose(
                             pose=right.target_pose,
                             constraint_pose=right.args.get("constraint_pose"),
+                            approach_axis=right.args.get("approach_axis"),
                         )
                     else:  # right.action == 'gripper'
                         control_seq["right_gripper"] = self.set_gripper(right_pos=right.target_gripper_pos,
@@ -1638,10 +1786,15 @@ class Base_Task(gym.Env):
             print(dir(contact))
             print(contact.bodies[0].entity.name, contact.bodies[1].entity.name)
 
-    def choose_best_pose(self, res_pose, center_pose, arm_tag: ArmTag = None):
+    def choose_best_pose(self, res_pose, center_pose, arm_tag: ArmTag = None, last_qpos=None):
         """
         Choose the best pose from the list of target poses.
         - target_lst: List of target poses.
+        - last_qpos: optional hypothetical starting joint state to plan from, instead
+          of the robot's actual live qpos. Lets a caller ask "would this grasp be
+          reachable AFTER some move that hasn't actually happened yet" (e.g. a
+          candidate-search dry run querying reachability from a not-yet-executed
+          waypoint), while normal callers omit it and get the real live-state check.
         """
         if not self.plan_success:
             return [-1, -1, -1, -1, -1, -1, -1]
@@ -1651,7 +1804,7 @@ class Base_Task(gym.Env):
             plan_multi_pose = self.robot.right_plan_multi_path
         target_lst = self.robot.create_target_pose_list(res_pose, center_pose, arm_tag)
         pose_num = len(target_lst)
-        traj_lst = plan_multi_pose(target_lst)
+        traj_lst = plan_multi_pose(target_lst, last_qpos=last_qpos)
         now_pose = None
         now_step = -1
         for i in range(pose_num):
@@ -1659,6 +1812,7 @@ class Base_Task(gym.Env):
                 continue
             if now_pose is None or len(traj_lst["position"][i]) < now_step:
                 now_pose = target_lst[i]
+                now_step = len(traj_lst["position"][i])
         return now_pose
 
     # test grasp pose of all contact points
@@ -1672,6 +1826,7 @@ class Base_Task(gym.Env):
         arm_tag: ArmTag,
         contact_point_id: int = 0,
         pre_dis: float = 0.0,
+        last_qpos=None,
     ) -> list:
         """
         Obtain the grasp pose through the marked grasp point.
@@ -1679,6 +1834,8 @@ class Base_Task(gym.Env):
         - arm_tag: The arm to be used, either "left" or "right".
         - pre_dis: The distance in front of the grasp point.
         - contact_point_id: The index of the grasp point.
+        - last_qpos: optional hypothetical starting joint state, forwarded to
+          choose_best_pose (see its docstring). Omit for the normal live-state check.
         """
         if not self.plan_success:
             return [-1, -1, -1, -1, -1, -1, -1]
@@ -1693,7 +1850,8 @@ class Base_Task(gym.Env):
                                global_contact_pose_matrix_q @ np.array([-0.12 - pre_dis, 0, 0]).T)
         global_grasp_pose_q = t3d.quaternions.mat2quat(global_contact_pose_matrix_q)
         res_pose = list(global_grasp_pose_p) + list(global_grasp_pose_q)
-        res_pose = self.choose_best_pose(res_pose, actor.get_contact_point(contact_point_id, "list"), arm_tag)
+        res_pose = self.choose_best_pose(res_pose, actor.get_contact_point(contact_point_id, "list"), arm_tag,
+                                          last_qpos=last_qpos)
         return res_pose
 
     def _default_choose_grasp_pose(self, actor: Actor, arm_tag: ArmTag, pre_dis: float) -> list:
