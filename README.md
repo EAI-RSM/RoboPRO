@@ -52,6 +52,10 @@ bash script/_install.sh              # patches sapien urdf_loader + mplib planne
 cd ..
 ```
 
+> **aarch64 (GB10 / DGX Spark):** PyPI has no aarch64 wheel for `sapien==3.0.0b1`, so `requirements.txt` will fail to resolve it. Build the SAPIEN wheel from source first — see [docs/setup_sapien_aarch64.md](docs/setup_sapien_aarch64.md) — then re-run the requirements install (pip will treat sapien as satisfied).
+
+> ⚠️ **SAPIEN version matters:** the benchmark is pinned to `sapien==3.0.0b1`. A different SAPIEN version can change physics and rendering behavior, which shifts evaluation results — success rates from mismatched versions are not comparable. Verify with `python -c "import sapien; print(sapien.__version__)"` before collecting data or running evals.
+
 `script/_install.sh` also clones CuRobo v0.7.8 into `envs/curobo/` and pip-installs it editable, then re-pins `warp-lang==1.12.0` and `setuptools==69.5.1`. If you keep `scipy==1.10.1` from `requirements.txt`, `scikit-image` will print a version-conflict warning — harmless.
 
 #### Option B. uv workflow
@@ -141,6 +145,15 @@ Episodes land in `customized_robotwin/data/<task_name>/<task_config>/`.
 
 Eval rolls a trained checkpoint out against a `(task, config)` pair and writes a per-rollout success log. Two modes depending on whether your policy fits in the same Python env as the simulator.
 
+**Pretrained checkpoints:**
+
+| Policy | Weights |
+|---|---|
+| pi05 | [mzxuan/robopro_jax_30000](https://huggingface.co/mzxuan/robopro_jax_30000/tree/main) |
+| X-VLA | [mzxuan/x-vla-robopro-100k](https://huggingface.co/mzxuan/x-vla-robopro-100k) |
+
+For pi05, symlink the downloaded `jax_30000/` dir to `policy/pi05/checkpoints/<train_config_name>/<model_name>/30000/`.
+
 **Args (shared by both modes):**
 
 | Arg | Meaning |
@@ -225,6 +238,9 @@ Drop-in YAMLs under `benchmark/bench_task_config/`:
 | `bench_demo_vision_blur.yml` | Blur only |
 | `bench_demo_vision_shake.yml` | Pixel shake only |
 | `bench_demo_object.yml` | Target texture swap + unseen obstacles + background_plus |
+| `bench_compositional_object_d{6,10,15}.yml` | OOD obstacles + OOD targets |
+| `bench_compositional_object_vision_d{6,10,15}.yml` | OOD objects + vision (lighting, blur, pixel shake) |
+| `bench_compositional_full_d{6,10,15}.yml` | All axes: OOD objects + vision + background randomization |
 
 See the YAMLs in `benchmark/bench_task_config/` for parameter-level details, and `docs/videos/` (`vision*.mp4`, `language.mp4`, `object.mp4`) for sample outputs.
 
@@ -246,6 +262,18 @@ Full list in `benchmark/bench_envs/`.
 3. Add a description template under `benchmark/bench_description/task_instructions/`.
 
 Naming tip: never reuse an existing RoboTwin task name. Start from an analogous sibling task (`kitchenl/`, `office/`, `study/`) — copying a proven recipe is faster than inventing from scratch.
+
+## Troubleshooting
+
+Common setup problems and where their fixes live:
+
+| Symptom | Fix |
+|---|---|
+| `pip install -r script/requirements.txt` can't find a `sapien==3.0.0b1` wheel (aarch64 / ARM machines) | Build SAPIEN from source: [docs/setup_sapien_aarch64.md](docs/setup_sapien_aarch64.md) |
+| Eval success rates differ unexpectedly from reported numbers | Check `sapien.__version__` — must be `3.0.0b1`; other versions change physics/rendering and skew results (Installation step 2) |
+| `ModuleNotFoundError: pkg_resources` when importing sapien | `pip install setuptools==69.5.1` (Installation step 2) |
+| CuRobo fails to attach grasped objects during planning | The shipped curobo configs lack the `attached_object` link entries — run `python scripts/install/patch_aloha_curobo.py` (Installation step 3) |
+| CuRobo keeps stale collision meshes across episodes | Apply the `clear_cache` patch to `world_mesh.py` (Installation step 4) |
 
 ## License
 

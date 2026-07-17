@@ -75,3 +75,11 @@ presentation_material/
 
 tmp/
 usecase_roadmap.tex
+
+# Validation outputs (generated, not tracked)
+scripts/validation/results/
+docs/objaverse_preview/
+docs/references/
+
+# Reference materials (paper LaTeX + external links, not tracked)
+references/

@@ -1,6 +1,7 @@
 import h5py, pickle
 import numpy as np
 import os
+import json
 import cv2
 from collections.abc import Mapping, Sequence
 import shutil
@@ -37,6 +38,33 @@ def depth_encoding(depths):
     return padded_data, max_len
 
 
+def seg_encoding(segs):
+    # lossless PNG on uint16 label images (~100x smaller than raw arrays)
+    encode_data = []
+    max_len = 0
+    for i in range(len(segs)):
+        seg_uint16 = np.asarray(segs[i]).astype(np.uint16)
+        success, encoded_image = cv2.imencode(".png", seg_uint16)
+        png_data = encoded_image.tobytes()
+        encode_data.append(png_data)
+        max_len = max(max_len, len(png_data))
+    padded_data = []
+    for i in range(len(encode_data)):
+        padded_data.append(encode_data[i].ljust(max_len, b"\0"))
+    return padded_data, max_len
+
+
+def pairs_encoding(frame_lists):
+    # Per-frame variable-length list of "a|b" object-pair labels -> one JSON
+    # byte-string per frame, padded (same scheme as depth/seg encoding).
+    encode_data, max_len = [], 1
+    for fl in frame_lists:
+        b = json.dumps(list(fl)).encode("utf-8")
+        encode_data.append(b)
+        max_len = max(max_len, len(b))
+    return [b.ljust(max_len, b"\0") for b in encode_data], max_len
+
+
 def parse_dict_structure(data):
     if isinstance(data, dict):
         parsed = {}
@@ -69,18 +97,34 @@ def load_pkl_file(pkl_path):
     return data
 
 
+def _normalize_array_for_hdf5(value):
+    arr = np.array(value)
+    if arr.dtype.kind in {"U", "O"}:
+        encoded = [str(v).encode("utf-8") for v in value]
+        max_len = max((len(v) for v in encoded), default=1)
+        return np.array(encoded, dtype=f"S{max_len}")
+    return arr
+
+
 def create_hdf5_from_dict(hdf5_group, data_dict):
     for key, value in data_dict.items():
         if isinstance(value, dict):
             subgroup = hdf5_group.create_group(key)
             create_hdf5_from_dict(subgroup, value)
         elif isinstance(value, list):
-            value = np.array(value)
+            if "pairs" in key:  # ragged per-frame lists — JSON-encode, don't np.array
+                encode_data, max_len = pairs_encoding(value)
+                hdf5_group.create_dataset(key, data=encode_data, dtype=f"S{max_len}")
+                continue
+            value = _normalize_array_for_hdf5(value)
             if "rgb" in key:
                 encode_data, max_len = images_encoding(value)
                 hdf5_group.create_dataset(key, data=encode_data, dtype=f"S{max_len}")
             elif "depth" in key:
                 encode_data, max_len = depth_encoding(value)
+                hdf5_group.create_dataset(key, data=encode_data, dtype=f"S{max_len}")
+            elif "segmentation" in key:
+                encode_data, max_len = seg_encoding(value)
                 hdf5_group.create_dataset(key, data=encode_data, dtype=f"S{max_len}")
             else:
                 hdf5_group.create_dataset(key, data=value)
@@ -102,20 +146,20 @@ def _get_video_camera_key(data_list):
     raise KeyError("No suitable camera (countertop_camera, demo_camera, head_camera, front_camera) found in observation")
 
 
-def pkl_files_to_hdf5_and_video(pkl_files, hdf5_path, video_path):
+def pkl_files_to_hdf5_and_video(pkl_files, hdf5_path, video_path, fps=30.0):
     data_list = parse_dict_structure(load_pkl_file(pkl_files[0]))
     for pkl_file_path in pkl_files:
         pkl_file = load_pkl_file(pkl_file_path)
         append_data_to_structure(data_list, pkl_file)
 
     cam_key = _get_video_camera_key(data_list)
-    images_to_video(np.array(data_list["observation"][cam_key]["rgb"]), out_path=video_path)
+    images_to_video(np.array(data_list["observation"][cam_key]["rgb"]), out_path=video_path, fps=fps)
 
     with h5py.File(hdf5_path, "w") as f:
         create_hdf5_from_dict(f, data_list)
 
 
-def process_folder_to_video(folder_path, video_path):
+def process_folder_to_video(folder_path, video_path, fps=30.0):
     """Create only MP4 video from pkl cache, without HDF5."""
     pkl_files = []
     for fname in os.listdir(folder_path):
@@ -144,10 +188,11 @@ def process_folder_to_video(folder_path, video_path):
     images_to_video(
         np.array(data_list["observation"][cam_key]["rgb"]),
         out_path=video_path,
+        fps=fps,
     )
 
 
-def process_folder_to_hdf5_video(folder_path, hdf5_path, video_path):
+def process_folder_to_hdf5_video(folder_path, hdf5_path, video_path, fps=30.0):
     pkl_files = []
     for fname in os.listdir(folder_path):
         if fname.endswith(".pkl") and fname[:-4].isdigit():
@@ -166,4 +211,4 @@ def process_folder_to_hdf5_video(folder_path, hdf5_path, video_path):
             raise ValueError(f"Missing file {expected}.pkl")
         expected += 1
 
-    pkl_files_to_hdf5_and_video(pkl_files, hdf5_path, video_path)
+    pkl_files_to_hdf5_and_video(pkl_files, hdf5_path, video_path, fps=fps)

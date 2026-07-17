@@ -271,14 +271,16 @@ class Camera:
         world_cam_mat44[:3, 3] = world_cam_pos
         self.world_camera2.entity.set_pose(sapien.Pose(world_cam_mat44))
 
-    def update_picture(self):
-        # camera
-        if self.collect_wrist_camera:
+    def update_picture(self, camera_names=None):
+        # camera  (camera_names: optional -> render only those static cameras and
+        # skip the wrist cameras; None -> render all, the data-collection path)
+        if self.collect_wrist_camera and camera_names is None:
             self.left_camera.take_picture()
             self.right_camera.take_picture()
 
-        for camera in self.static_camera_list:
-            camera.take_picture()
+        for camera, name in zip(self.static_camera_list, self.static_camera_name):
+            if camera_names is None or name in camera_names:
+                camera.take_picture()
 
         # ================================= sensor camera =================================
         # self.head_sensor.take_picture()
@@ -321,8 +323,8 @@ class Camera:
         # print(res)
         return res
 
-    def get_rgb(self) -> dict:
-        rgba = self.get_rgba()
+    def get_rgb(self, camera_names=None) -> dict:
+        rgba = self.get_rgba(camera_names=camera_names)
         rgb = {}
         for camera_name, camera_data in rgba.items():
             rgb[camera_name] = {}
@@ -330,7 +332,10 @@ class Camera:
         return rgb
     
     # Get Camera RGBA
-    def get_rgba(self) -> dict:
+    def get_rgba(self, camera_names=None) -> dict:
+        # camera_names restricts to named static cameras (and skips the wrist
+        # cameras), matching update_picture() so we never read an unrendered
+        # camera. None => all cameras (unchanged data-collection path).
 
         def _get_rgba(camera):
             camera_rgba = camera.get_picture("Color")
@@ -345,13 +350,15 @@ class Camera:
 
         res = {}
 
-        if self.collect_wrist_camera:
+        if self.collect_wrist_camera and camera_names is None:
             res["left_camera"] = {}
             res["right_camera"] = {}
             res["left_camera"]["rgba"] = _get_rgba(self.left_camera)
             res["right_camera"]["rgba"] = _get_rgba(self.right_camera)
 
         for camera, camera_name in zip(self.static_camera_list, self.static_camera_name):
+            if camera_names is not None and camera_name not in camera_names:
+                continue
             if camera_name == "head_camera":
                 if self.collect_head_camera:
                     res[camera_name] = {}
@@ -380,13 +387,13 @@ class Camera:
         def _get_segmentation(camera, level="mesh"):
             # visual_id is the unique id of each visual shape
             seg_labels = camera.get_picture("Segmentation")  # [H, W, 4]
-            colormap = sorted(set(ImageColor.colormap.values()))
-            color_palette = np.array([ImageColor.getrgb(color) for color in colormap], dtype=np.uint8)
+            # store raw integer ids (uint16) so objects stay identifiable;
+            # actor ids match Entity.per_scene_id (see Base_Task.get_actor_id_map),
+            # colorize at visualization time instead
             if level == "mesh":
-                label0_image = seg_labels[..., 0].astype(np.uint8)  # mesh-level
+                return seg_labels[..., 0].astype(np.uint16)  # mesh-level
             elif level == "actor":
-                label0_image = seg_labels[..., 1].astype(np.uint8)  # actor-level
-            return color_palette[label0_image]
+                return seg_labels[..., 1].astype(np.uint16)  # actor-level
 
         res = {
             # 'left_camera':{},
@@ -407,6 +414,59 @@ class Camera:
             else:
                 res[camera_name] = {}
                 res[camera_name][f"{level}_segmentation"] = _get_segmentation(camera, level=level)
+        return res
+
+    # Get raw (un-colorized, un-truncated) Camera Segmentation labels
+    def get_segmentation_raw(self, level="actor", camera_name=None) -> dict:
+        """
+        Return the raw integer segmentation label image for each camera, WITHOUT
+        the visualization color-palette mapping and WITHOUT the uint8 truncation
+        that ``get_segmentation`` applies.
+
+        The SAPIEN "Segmentation" render target is [H, W, 4]; channel 0 is the
+        mesh/visual-shape level and channel 1 is the actor/entity level
+        (``per_scene_id``). We keep the labels as int32 so a specific actor's id
+        (which can exceed 255 once many actors are present) survives intact and
+        can be compared exactly to build that actor's mask.
+
+        Args:
+            level: "actor" -> channel 1, "mesh" -> channel 0.
+            camera_name: if given, only that camera's label image is read and
+                returned (cheaper for single-camera measurement, e.g. the
+                countertop camera); otherwise all collected cameras are returned.
+
+        Returns:
+            {camera_name: {f"{level}_segmentation_raw": np.ndarray[H, W] int32}}
+        """
+        if level == "mesh":
+            channel = 0
+        elif level == "actor":
+            channel = 1
+        else:
+            raise ValueError(f"Unsupported segmentation level: {level!r}")
+
+        def _get_segmentation_raw(camera):
+            seg_labels = camera.get_picture("Segmentation")  # [H, W, 4]
+            return np.asarray(seg_labels[..., channel]).astype(np.int32)
+
+        res = {}
+
+        if self.collect_wrist_camera:
+            for cam, name in (
+                (self.left_camera, "left_camera"),
+                (self.right_camera, "right_camera"),
+            ):
+                if camera_name is not None and name != camera_name:
+                    continue
+                res[name] = {f"{level}_segmentation_raw": _get_segmentation_raw(cam)}
+
+        for camera, name in zip(self.static_camera_list, self.static_camera_name):
+            if camera_name is not None and name != camera_name:
+                continue
+            if name == "head_camera" and not self.collect_head_camera:
+                continue
+            res[name] = {f"{level}_segmentation_raw": _get_segmentation_raw(camera)}
+
         return res
 
     # Get Camera Depth

@@ -351,6 +351,8 @@ def main(usr_args):
 
     save_dir = Path(f"eval_result/{task_name}/{policy_name}/{task_config}/{ckpt_setting}/{current_time}")
     save_dir.mkdir(parents=True, exist_ok=True)
+    episode_log_path = os.path.join(save_dir, "_episodes.jsonl")
+    print(f"Per-episode stats will be appended to {episode_log_path}")
 
     if args["eval_video_log"]:
         video_save_dir = save_dir
@@ -404,7 +406,8 @@ def main(usr_args):
                                    test_num=test_num,
                                    video_size=video_size,
                                    instruction_type=instruction_type,
-                                   policy_conda_env=policy_conda_env)
+                                   policy_conda_env=policy_conda_env,
+                                   episode_log_path=episode_log_path)
     suc_nums.append(suc_num)
 
     topk_success_rate = sorted(suc_nums, reverse=True)[:topk]
@@ -428,13 +431,22 @@ def eval_policy(task_name,
                 test_num=100,
                 video_size=None,
                 instruction_type=None,
-                policy_conda_env=None):
+                policy_conda_env=None,
+                episode_log_path=None):
     print(f"\033[34mTask Name: {args['task_name']}\033[0m")
     print(f"\033[34mPolicy Name: {args['policy_name']}\033[0m")
 
     expert_check = True
     TASK_ENV.suc = 0
     TASK_ENV.test_num = 0
+
+    # Per-episode stats are appended to episode_log_path after every episode.
+    # Collision metrics are enabled on the policy rollout only — never on the
+    # expert pre-check, because enable_collision_metrics also switches
+    # update_world to exclude clutter obstacles from the planner, which would
+    # change which seeds pass the expert check.
+    collision_metrics_enabled = os.environ.get("EVAL_COLLISION_METRICS", "1") != "0"
+    collision_metrics_active = False
 
     now_id = 0
     succ_seed = 0
@@ -491,7 +503,32 @@ def eval_policy(task_name,
 
         args["render_freq"] = render_freq
 
-        TASK_ENV.setup_demo(now_ep_num=now_id, seed=now_seed, is_test=True, **args)
+        if collision_metrics_enabled:
+            try:
+                TASK_ENV.setup_demo(now_ep_num=now_id, seed=now_seed, is_test=True,
+                                    **{**args, "enable_collision_metrics": True})
+            except NotImplementedError:
+                # Task class lacks _get_target_object_names(); run without
+                # collision metrics for the rest of the eval.
+                print(f"\033[93m[collision-metrics] {args['task_name']} does not define "
+                      f"_get_target_object_names(); collision column will be null\033[0m")
+                collision_metrics_enabled = False
+                try:
+                    TASK_ENV.close_env()
+                except Exception:
+                    pass
+                TASK_ENV.setup_demo(now_ep_num=now_id, seed=now_seed, is_test=True, **args)
+        else:
+            TASK_ENV.setup_demo(now_ep_num=now_id, seed=now_seed, is_test=True, **args)
+
+        # Active only when the env actually built its tracking sets (bench
+        # envs with the flag supported; legacy envs/ tasks silently skip).
+        collision_metrics_active = (
+            collision_metrics_enabled
+            and getattr(TASK_ENV, "enable_collision_metrics", False)
+            and hasattr(TASK_ENV, "get_collision_metrics")
+            and hasattr(TASK_ENV, "robot_link_names")
+        )
 
         lang_perturb = args.get("domain_randomization", {}).get("language_perturbation", {})
         if lang_perturb.get("enabled", False) and lang_perturb.get("instruction_bank"):
@@ -546,7 +583,11 @@ def eval_policy(task_name,
             TASK_ENV._set_eval_video_ffmpeg(ffmpeg)
 
         succ = False
-        model.call(func_name='reset_model')
+        # Use the proxy (not .call directly) so the client-side
+        # observation_window mirror resets to None — otherwise set_language
+        # is skipped from episode 2 onward and the server raises
+        # "Prompt is required" on the first get_action.
+        model.reset_model()
         while TASK_ENV.take_action_cnt < TASK_ENV.step_lim:
             observation = TASK_ENV.get_obs()
             eval_func(TASK_ENV, model, observation)
@@ -562,6 +603,25 @@ def eval_policy(task_name,
             print("\033[92mSuccess!\033[0m")
         else:
             print("\033[91mFail!\033[0m")
+
+        if episode_log_path is not None:
+            record = {
+                "episode": TASK_ENV.test_num,
+                "seed": now_seed,
+                "success": bool(succ),
+            }
+            if collision_metrics_active:
+                col = TASK_ENV.get_collision_metrics()
+                record["collision"] = bool(col["is_collision"])
+                record["hard_success"] = bool(succ) and not col["is_collision"]
+                record["collision_count"] = int(col["total_collision_count"])
+                record["collision_names"] = (col["robot_to_furniture_names"]
+                                             + col["robot_to_static_object_names"]
+                                             + col["target_to_static_object_names"])
+            else:
+                record["collision"] = None
+            with open(episode_log_path, "a") as f:
+                f.write(json.dumps(record) + "\n")
 
         now_id += 1
         TASK_ENV.close_env(clear_cache=((succ_seed + 1) % clear_cache_freq == 0))

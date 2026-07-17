@@ -552,6 +552,34 @@ _CONFIGS = [
     ###
     ### finetune config for robotwin
     ###
+    # vanilla CFM baseline trained on office_multimodal_15task (action_diversity_training
+    # branch, spatial-h200) — registered here for local eval/serving of that checkpoint.
+    TrainConfig(
+        name="pi05_robopro_cfm",
+        model=pi0_config.Pi0Config(pi05=True),
+        data=LeRobotAlohaDataConfig(
+            repo_id="local/office_multimodal_15task",
+            repack_transforms=_transforms.Group(inputs=[
+                _transforms.RepackTransform({
+                    "images": {
+                        "cam_high": "observation.images.cam_high",
+                        "cam_left_wrist": "observation.images.cam_left_wrist",
+                        "cam_right_wrist": "observation.images.cam_right_wrist",
+                    },
+                    "state": "observation.state",
+                    "actions": "action",
+                    "prompt": "prompt",
+                })
+            ]),
+            base_config=DataConfig(
+                prompt_from_task=True,
+            ),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+        num_train_steps=20_000,
+        batch_size=64,
+        fsdp_devices=1,
+    ),
     # pi05_base by full
     TrainConfig(
         name="pi05_aloha_full_base",
