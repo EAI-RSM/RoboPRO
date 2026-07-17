@@ -278,9 +278,17 @@ class move_can_from_cabinet_to_basket(Kitchen_base_large):
             "{a}": str(arm_tag),
         }
     def _is_can_inside_basket(self) -> bool:
+        """True only when the can lies inside the basket's 3D bounding volume.
+
+        Previously this compared XY only, so a can merely hovering above the basket
+        (e.g. still held by the gripper on approach) satisfied it. Including Z means
+        the can must actually have descended into the basket.
+        """
         box_bb = get_actor_boundingbox(self.basket_right.actor)
-        return np.all((box_bb[0][:2] <= self.can.get_pose().p[:2])  & 
-                       (self.can.get_pose().p[:2] <= box_bb[1][:2]))
+        can_p = np.asarray(self.can.get_pose().p, dtype=float)
+        lo = np.asarray(box_bb[0], dtype=float)
+        hi = np.asarray(box_bb[1], dtype=float)
+        return bool(np.all((lo <= can_p) & (can_p <= hi)))
 
     def play_once(self):
         if self.scene_id == 1:
@@ -292,8 +300,11 @@ class move_can_from_cabinet_to_basket(Kitchen_base_large):
             self.put_can_in_basket_left()
 
     def check_success(self):
-    
-        return not self._is_can_inside_cabinet() and self._is_can_inside_basket \
+        # NOTE: `self._is_can_inside_basket` (no call) used to be passed here as a bound
+        # method object, which is always truthy -- the basket check never ran. The task
+        # therefore scored success for any run that merely got the can out of the cabinet
+        # and closed the door, even with the can left on the table.
+        return not self._is_can_inside_cabinet() and self._is_can_inside_basket() \
                and self.is_cabinet_closed(threshold=0.02) \
                and self.robot.is_right_gripper_open() \
                and self.robot.is_left_gripper_open()
