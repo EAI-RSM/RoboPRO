@@ -15,12 +15,13 @@ USAGE (from the benchmark folder):
     source set_env.sh
     export ROBOTWIN_BENCH_TASK=bench
     python script/bench_script/analyze_occluder_visibility.py \
-        --seed-start 0 --num-seeds 50 --offsets 0.10 --bins 20 \
+        --seed-start 0 --num-seeds 50 --occluding-object-distance 10,10 --bins 20 \
         --out-dir ../scripts/validation/results/phase2_occluder
 
-    # narrow-region sweep (a few offsets) to see how distance affects occlusion:
+    # narrow-region range (each seed draws a random offset within it) to see how
+    # distance affects occlusion:
     python script/bench_script/analyze_occluder_visibility.py \
-        --num-seeds 40 --offsets 0.07,0.10,0.13 \
+        --num-seeds 40 --occluding-object-distance 7,13 \
         --out-dir ../scripts/validation/results/phase2_occluder
 
     # re-plot only:
@@ -2352,14 +2353,18 @@ def run(args):
     if args.save_images:
         img_dir.mkdir(parents=True, exist_ok=True)
     jsonl_path = out_dir / "records.jsonl"
-    offsets = [float(o) for o in args.offsets.split(",")]
+    dist_lo_cm, dist_hi_cm = (float(x) for x in args.occluding_object_distance.split(","))
+    if dist_lo_cm > dist_hi_cm:
+        dist_lo_cm, dist_hi_cm = dist_hi_cm, dist_lo_cm
+    dist_range_label = args.occluding_object_distance
     clutter_densities = [int(d) for d in args.clutter_densities.split(",")]
     seeds = list(range(args.seed_start, args.seed_start + args.num_seeds))
     rollout = getattr(args, "rollout", False)
     ep_counter = 0   # unique episode id per rollout (-> video/episode{N}.mp4)
 
     env = make_occluder_task()()
-    print(f"seeds={seeds[0]}..{seeds[-1]} ({len(seeds)})  offsets={offsets}  "
+    print(f"seeds={seeds[0]}..{seeds[-1]} ({len(seeds)})  "
+          f"occluding_object_distance={dist_lo_cm}-{dist_hi_cm}cm (per-seed random draw)  "
           f"clutter_densities={clutter_densities}  rollout={rollout}  camera={CAMERA}")
     print(f"writing -> {jsonl_path}\n")
 
@@ -2391,85 +2396,89 @@ def run(args):
                 print(f"[seed {seed}] full_target_px=0 on clean scene; skipping seed.")
                 continue
 
-            for off in offsets:
-                # per-build coin flip: drop the occluder with prob no_occluder_prob
-                # (keyed on seed+offset so the decision is shared across densities)
-                show = bool(np.random.default_rng(int(seed) * 1000 + int(round(off * 100))).random()
-                            >= args.no_occluder_prob)
-                # Reject scenes where the occluder (at target_x, target_y - off) would land
-                # too close to / on the destination pad, blocking the target's placement.
-                if show:
-                    occ_xy = np.array([clean_pose[0], clean_pose[1] - off])
-                    pad_dist = float(np.linalg.norm(occ_xy - np.array(PAD_XY)))
-                    if pad_dist < OCC_PAD_MIN_DIST:
-                        print(f"[seed {seed}] occluder@off={off} is {pad_dist:.3f}m from pad "
-                              f"(< {OCC_PAD_MIN_DIST:.3f}m); rejecting this build.")
-                        continue
-                env.spawn_occluder = show
-                env.occluder_offset = off
-                for cd in clutter_densities:
-                    try:
-                        env.setup_demo(**build_cfg("put_mouse_on_pad", args.base_config, seed,
-                                                   dr_measure(cd)))
-                        target = _resolve_target(env)
-                        pose_ok = bool(np.allclose(np.array(target.actor.get_pose().p), clean_pose, atol=1e-4))
-                        res = env.measure_target_visibility(target, camera_name=CAMERA, denominator=full_px)
-                        if args.save_images:
-                            tag = "occ" if show else "noocc"
-                            save_overlay(
-                                env, res["mask"],
-                                img_dir / f"seed{seed:04d}_off{off:.2f}_cd{cd:02d}_{tag}.png",
-                                f"seed {seed} off={off:.2f} {tag} clut={cd}  "
-                                f"vis_px={res['visible_pixel_count']} full={full_px} "
-                                f"frac={res['visible_fraction']:.3f} {res['bucket']} pose_match={pose_ok}",
-                            )
-                    except Exception as e:
-                        print(f"[seed {seed} off{off:.2f} cd{cd}] build failed ({type(e).__name__}: {e}); skipping")
-                        safe_close()
-                        continue
+            # One occluder distance per seed, drawn uniformly from the configured cm
+            # range and converted to meters -- keyed on seed alone (not seed+offset,
+            # since offset is no longer an externally chosen sweep value) so the draw
+            # is still reproducible across reruns of the same seed range.
+            off = float(np.random.default_rng(int(seed)).uniform(dist_lo_cm, dist_hi_cm)) / 100.0
+            # per-build coin flip: drop the occluder with prob no_occluder_prob
+            show = bool(np.random.default_rng(int(seed) * 1000 + int(round(off * 100))).random()
+                        >= args.no_occluder_prob)
+            # Reject scenes where the occluder (at target_x, target_y - off) would land
+            # too close to / on the destination pad, blocking the target's placement.
+            if show:
+                occ_xy = np.array([clean_pose[0], clean_pose[1] - off])
+                pad_dist = float(np.linalg.norm(occ_xy - np.array(PAD_XY)))
+                if pad_dist < OCC_PAD_MIN_DIST:
+                    print(f"[seed {seed}] occluder@off={off} is {pad_dist:.3f}m from pad "
+                          f"(< {OCC_PAD_MIN_DIST:.3f}m); rejecting this build.")
+                    continue
+            env.spawn_occluder = show
+            env.occluder_offset = off
+            for cd in clutter_densities:
+                try:
+                    env.setup_demo(**build_cfg("put_mouse_on_pad", args.base_config, seed,
+                                               dr_measure(cd)))
+                    target = _resolve_target(env)
+                    pose_ok = bool(np.allclose(np.array(target.actor.get_pose().p), clean_pose, atol=1e-4))
+                    res = env.measure_target_visibility(target, camera_name=CAMERA, denominator=full_px)
+                    if args.save_images:
+                        tag = "occ" if show else "noocc"
+                        save_overlay(
+                            env, res["mask"],
+                            img_dir / f"seed{seed:04d}_off{off:.2f}_cd{cd:02d}_{tag}.png",
+                            f"seed {seed} off={off:.2f} {tag} clut={cd}  "
+                            f"vis_px={res['visible_pixel_count']} full={full_px} "
+                            f"frac={res['visible_fraction']:.3f} {res['bucket']} pose_match={pose_ok}",
+                        )
+                except Exception as e:
+                    print(f"[seed {seed} off{off:.2f} cd{cd}] build failed ({type(e).__name__}: {e}); skipping")
                     safe_close()
+                    continue
+                safe_close()
 
-                    rec = {"seed": int(seed), "offset": float(off), "full_px": int(full_px),
-                           "visible_px": int(res["visible_pixel_count"]),
-                           "visible_fraction": float(res["visible_fraction"]),
-                           "bucket": res["bucket"], "in_fov": bool(res["in_fov"]),
-                           "pose_match": pose_ok, "occluder_shown": show,
-                           "clutter_density": int(cd)}
-                    # --- expert curobo rollout on the same scene (video + success) ---
-                    # env.spawn_occluder / occluder_offset persist, so the rollout
-                    # build reproduces the same occluder placement as the measurement.
-                    if rollout:
-                        rollout_result = run_rollout(env, "put_mouse_on_pad", args.base_config, seed,
-                                                     dr_measure(cd), out_dir, ep_counter)
-                        success = bool(rollout_result["success"])
-                        rec["rollout_success"] = success
-                        rec["attached_trajectory_slowdown"] = ATTACHED_TRAJECTORY_SLOWDOWN
-                        rec["rollout_ep"] = ep_counter
-                        artifact_info = rollout_result.get("artifact_info") or {}
-                        rec["rollout_bucket"] = artifact_info.get("bucket", "success" if success else "fail")
-                        rec["rollout_video"] = artifact_info.get(
-                            "video_relpath", f"{rec['rollout_bucket']}/video/episode{ep_counter}.mp4"
-                        )
-                        rec["rollout_data"] = artifact_info.get(
-                            "hdf5_relpath", f"{rec['rollout_bucket']}/data/episode{ep_counter}.hdf5"
-                        )
-                        # Structured failure/candidate metadata set by play_once (see
-                        # its checkpoint()/_select_pick_place_candidate) -- survives
-                        # run_rollout's internal close_env() since it's just plain
-                        # attributes on the (reused) env object. None on success.
-                        rec["rollout_failure_stage"] = getattr(env, "rollout_failure_stage", None)
-                        rec["rollout_failure_reason"] = getattr(env, "rollout_failure_reason", None)
-                        rec["rollout_candidate_info"] = getattr(env, "rollout_candidate_info", None)
-                        rec["rollout_grasp_attempts"] = getattr(env, "rollout_grasp_attempts", None)
-                        rec["rollout_retention_checks"] = getattr(env, "rollout_retention_checks", None)
-                        rec["rollout_descent_slices"] = getattr(env, "rollout_descent_slices", None)
-                        print(f"    seed {seed} off={off:.2f} cd={cd} {res['bucket']}: "
-                              f"rollout {'SUCCESS' if success else 'FAIL'} -> "
-                              f"{rec['rollout_bucket']}/episode{ep_counter}")
-                        ep_counter += 1
-                    fout.write(json.dumps(rec) + "\n")
-                    fout.flush()
-            print(f"[{si+1}/{len(seeds)}] seed {seed}: full_px={full_px} done")
+                rec = {"seed": int(seed), "offset": float(off),
+                       "occ_distance_range_cm": dist_range_label, "full_px": int(full_px),
+                       "visible_px": int(res["visible_pixel_count"]),
+                       "visible_fraction": float(res["visible_fraction"]),
+                       "bucket": res["bucket"], "in_fov": bool(res["in_fov"]),
+                       "pose_match": pose_ok, "occluder_shown": show,
+                       "clutter_density": int(cd)}
+                # --- expert curobo rollout on the same scene (video + success) ---
+                # env.spawn_occluder / occluder_offset persist, so the rollout
+                # build reproduces the same occluder placement as the measurement.
+                if rollout:
+                    rollout_result = run_rollout(env, "put_mouse_on_pad", args.base_config, seed,
+                                                 dr_measure(cd), out_dir, ep_counter)
+                    success = bool(rollout_result["success"])
+                    rec["rollout_success"] = success
+                    rec["attached_trajectory_slowdown"] = ATTACHED_TRAJECTORY_SLOWDOWN
+                    rec["rollout_ep"] = ep_counter
+                    artifact_info = rollout_result.get("artifact_info") or {}
+                    rec["rollout_bucket"] = artifact_info.get("bucket", "success" if success else "fail")
+                    rec["rollout_video"] = artifact_info.get(
+                        "video_relpath", f"{rec['rollout_bucket']}/video/episode{ep_counter}.mp4"
+                    )
+                    rec["rollout_data"] = artifact_info.get(
+                        "hdf5_relpath", f"{rec['rollout_bucket']}/data/episode{ep_counter}.hdf5"
+                    )
+                    # Structured failure/candidate metadata set by play_once (see
+                    # its checkpoint()/_select_pick_place_candidate) -- survives
+                    # run_rollout's internal close_env() since it's just plain
+                    # attributes on the (reused) env object. None on success.
+                    rec["rollout_failure_stage"] = getattr(env, "rollout_failure_stage", None)
+                    rec["rollout_failure_reason"] = getattr(env, "rollout_failure_reason", None)
+                    rec["rollout_candidate_info"] = getattr(env, "rollout_candidate_info", None)
+                    rec["rollout_grasp_attempts"] = getattr(env, "rollout_grasp_attempts", None)
+                    rec["rollout_retention_checks"] = getattr(env, "rollout_retention_checks", None)
+                    rec["rollout_descent_slices"] = getattr(env, "rollout_descent_slices", None)
+                    print(f"    seed {seed} off={off:.2f} cd={cd} {res['bucket']}: "
+                          f"rollout {'SUCCESS' if success else 'FAIL'} -> "
+                          f"{rec['rollout_bucket']}/episode{ep_counter}")
+                    ep_counter += 1
+                fout.write(json.dumps(rec) + "\n")
+                fout.flush()
+            print(f"[{si+1}/{len(seeds)}] seed {seed}: off={off:.3f}m full_px={full_px} done")
 
     safe_close()
     print(f"\nsweep complete -> {jsonl_path}")
@@ -2480,12 +2489,21 @@ def main():
     ap.add_argument("--base-config", default="bench_demo_office_clean")
     ap.add_argument("--seed-start", type=int, default=0)
     ap.add_argument("--num-seeds", type=int, default=50)
-    ap.add_argument("--offsets", default="0.2", help="occluder offset(s) in m in front of the target")
+    ap.add_argument("--occluding-object-distance", default="20,20",
+                    help="occluder distance range 'lo,hi' in CM in front of the target; each "
+                         "seed independently draws a random offset uniformly from [lo, hi] "
+                         "(pass e.g. 20,20 for a single fixed distance)")
     ap.add_argument("--clutter-densities", default="0",
                     help="table clutter density/densities to sweep in the measurement scene, "
                          "comma-separated (0=off). e.g. 0,8,15")
-    ap.add_argument("--group-by", default="offset", choices=["offset", "clutter_density"],
-                    help="analysis grouping variable for the bucket/histogram figures")
+    ap.add_argument("--group-by", default="occ_distance_range_cm",
+                    choices=["occ_distance_range_cm", "offset", "clutter_density"],
+                    help="analysis grouping variable for the bucket/histogram figures. "
+                         "occ_distance_range_cm (default) groups by the configured "
+                         "--occluding-object-distance range as a whole -- appropriate "
+                         "since each seed now draws its own offset from within that "
+                         "range, so per-exact-offset grouping ('offset') no longer "
+                         "yields meaningful per-group sample sizes.")
     ap.add_argument("--no-occluder-prob", type=float, default=0.2,
                     help="probability the milk-box occluder is NOT spawned for a build (default 0.2)")
     ap.add_argument("--bins", type=int, default=20)
@@ -2500,7 +2518,8 @@ def main():
 
     if not args.plot_only:
         run(args)
-    group_label = {"offset": "occluder offset (m)",
+    group_label = {"occ_distance_range_cm": "occluder distance range (cm)",
+                   "offset": "occluder offset (m)",
                    "clutter_density": "table clutter density"}[args.group_by]
     out_dir = effective_out_dir(args)
     analyze_kwargs = dict(group_key=args.group_by, group_label=group_label,
