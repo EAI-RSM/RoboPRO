@@ -88,12 +88,30 @@ def now_iso() -> str:
 
 
 # ------------------------------------------------------------------ scene building
+def _ensure_robotwin_paths(candidate_policy: str = "pi05") -> None:
+    """Put the RoboTwin harness dirs on sys.path + run ``setup_paths`` (bench envs).
+
+    Must run before ``import collect_data`` / importing a policy module; mirrors the
+    reference scripts (``sys.path.append("./script")`` etc. + ``setup_paths()``).
+    Assumes the process cwd is ``customized_robotwin`` (as run_search is invoked).
+    """
+    for p in ("./", "./script", "./policy", "./description/utils", f"./policy/{candidate_policy}"):
+        if p not in sys.path:
+            sys.path.append(p)
+    try:
+        from script.bench_script.setup_paths import setup_paths
+        setup_paths()
+    except Exception:  # noqa: BLE001 - setup_paths is best-effort / bench-only
+        pass
+
+
 def build_scene(task_name: str, task_config: str, seed: int):
     """Build + set up a deterministic test scene. Returns ``(task, args)``.
 
     Mirrors the reference scripts: ``need_plan`` on, ``save_data`` off,
     ``render_freq`` 0, collision metrics on (so the fitness clutter proxy works).
     """
+    _ensure_robotwin_paths()
     import collect_data as cd  # deferred: pulls in sapien/envs
     task, args = cd.build_task_and_args(task_name, task_config)
     args.update(need_plan=True, save_data=False, render_freq=0)
@@ -105,9 +123,7 @@ def build_scene(task_name: str, task_config: str, seed: int):
 def load_candidate(candidate_policy: str, usr_args: Dict[str, Any]):
     """Import the policy module and load its model. Returns ``(model, encode_obs)``."""
     import importlib
-    for p in ("./", "./policy", f"./policy/{candidate_policy}"):
-        if p not in sys.path:
-            sys.path.append(p)
+    _ensure_robotwin_paths(candidate_policy)
     mod = importlib.import_module(candidate_policy)
     return mod.get_model(usr_args), mod.encode_obs
 
@@ -176,7 +192,7 @@ def run(args: argparse.Namespace) -> str:
         usr_args = yaml.safe_load(f) or {}
     usr_args.update(task_name=args.task, task_config=args.task_config, seed=args.seed,
                     policy_name=args.candidate_policy)
-    chunk = int(usr_args.get("pi0_step", args.chunk))
+    chunk = int(usr_args.get("pi0_step") or 50)
 
     # 1) build the search scene + capture the root/provenance
     task, task_args = build_scene(args.task, args.task_config, args.seed)
@@ -184,6 +200,13 @@ def run(args: argparse.Namespace) -> str:
 
     # 2) load candidate policy + build the search components
     model, encode_obs = load_candidate(args.candidate_policy, usr_args)
+    # the policy model needs its language set before inference (pi05 embeds the
+    # instruction in the observation window); prefer --instruction, else the task's.
+    instruction = args.instruction
+    if not instruction and hasattr(task, "get_instruction"):
+        instruction = task.get_instruction()
+    if hasattr(model, "set_language") and instruction:
+        model.set_language(instruction)
     candidates = PolicyCandidates(model, encode_obs, mode=args.candidate_mode,
                                   chunk=chunk, noise_seed=args.noise_seed)
     fitness = fit_mod.build_fitness(args.fitness, use_dist_tiebreak=not args.no_dist_tiebreak)
@@ -261,6 +284,8 @@ def parse_args(argv=None) -> argparse.Namespace:
     p.add_argument("--policy_config", required=True, help="path to the policy's deploy_policy.yml")
     p.add_argument("--candidate_mode", default="modes", choices=["modes", "noise"],
                    help="draw candidates by latent mode z (WTA) or by noise sampling")
+    p.add_argument("--instruction", default=None,
+                   help="language instruction for the candidate policy (else the task's)")
     p.add_argument("--strategy", default="beam", choices=sorted(search_mod.STRATEGY_REGISTRY))
     p.add_argument("--width", type=int, default=3, help="beam width B")
     p.add_argument("--k", type=int, default=6, help="candidates per node K")
