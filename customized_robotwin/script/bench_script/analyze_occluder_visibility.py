@@ -598,7 +598,7 @@ def make_occluder_task():
                 occ_half = _occluder_footprint_half_extents()
 
                 placement_ok = False
-                for _ in range(_MAX_PLACEMENT_ATTEMPTS):
+                for attempt in range(_MAX_PLACEMENT_ATTEMPTS):
                     tx, ty = float(target_pose.p[0]), float(target_pose.p[1])
                     target_yaw = _yaw_from_quat(target_pose.q)
                     # sample the occluder's yaw/z the normal way; x/y are placeholders,
@@ -613,8 +613,13 @@ def make_occluder_task():
                     if pad_dist >= OCC_PAD_MIN_DIST:
                         placement_ok = True
                         break
-                    target_pose = rand_pose(xlim=list(self.target_xlim), ylim=list(self.target_ylim),
-                                            qpos=[0.5, 0.5, 0.5, 0.5], rotate_rand=True, rotate_lim=[0, 3.14, 0])
+                    # Only resample if another attempt will actually consume the new
+                    # draw -- on the last attempt, redrawing target_pose here would
+                    # leave it inconsistent with the (dist, probe_pose) computed above
+                    # for the failed check, since nothing re-validates this final draw.
+                    if attempt < _MAX_PLACEMENT_ATTEMPTS - 1:
+                        target_pose = rand_pose(xlim=list(self.target_xlim), ylim=list(self.target_ylim),
+                                                qpos=[0.5, 0.5, 0.5, 0.5], rotate_rand=True, rotate_lim=[0, 3.14, 0])
                 self.occluder_pad_clearance_ok = placement_ok
 
             # scale from the task yaml if present, else None -> model's own scale
