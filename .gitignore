@@ -75,6 +75,7 @@ presentation_material/
 
 tmp/
 usecase_roadmap.tex
+related_works.tex
 
 # Validation outputs (generated, not tracked)
 scripts/validation/results/

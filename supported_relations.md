@@ -26,8 +26,7 @@ the codebase for scene, belief, and safety reasoning.
     unsafe contact risk under a candidate motion or action.
 11. `collides_with`: the source and destination entities are in a verified
     collision under execution, replay, or simulation.
-12. `visible_to`: the source entity is visible to the destination robot or
-    end-effector viewpoint abstraction.
+12. `visible_to`: the source entity is visible to the destination camera.
 13. `part_of`: the source entity is a structural part of the destination
     entity.
 
@@ -51,6 +50,23 @@ relation. It is normalized into the canonical support semantics:
    storage aliases and should not appear in the exported graph ontology.
 
 ## Benchmark Export Note
+
+Schema version `1.4.0` directly exports the following additional relations:
+
+1. `in[T,N,N]` and its exact inverse `contains[T,N,N]`. Containment is a
+   privileged geometric label: the source object's 3-D center must lie inside
+   the AABB envelope of a catalog entity classified as a container. The
+   `containment_valid` and `contains_valid` masks distinguish non-container
+   pairs from evaluated negative relations.
+2. `visible_to[T,N,C]`, indexed by `visible_to_camera_names[C]`, is derived
+   from the actor segmentation image already captured at that timestep.
+   `visible_pixel_count` preserves the evidence and `visible_to_valid`
+   distinguishes an evaluated zero-pixel result from unavailable segmentation.
+3. `reachable_by[T,N,E]`, indexed by `reachable_by_effector_names[E]`, is a
+   collision-aware, position-only batched IK query at the entity origin.
+   `reachable_by_valid` distinguishes an IK-negative result from a solver or
+   entity for which the query was unavailable. It is a pose reachability label,
+   not a guarantee that a task-specific grasp or full trajectory is feasible.
 
 Some benchmark-support exports also include auxiliary contact-derived signals
 that are useful for debugging and reconstruction but are not part of the

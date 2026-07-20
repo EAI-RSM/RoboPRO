@@ -203,7 +203,7 @@ DEFAULT_VISIBILITY_BUCKETS = [
 
 class Base_Task(gym.Env):
     BENCHMARK_SCHEMA_NAME = "robopro_benchmark_support"
-    BENCHMARK_SCHEMA_VERSION = "1.3.0"
+    BENCHMARK_SCHEMA_VERSION = "1.4.0"
     BENCHMARK_EXPORTER_NAME = "robopro_benchmark_export"
     BENCHMARK_ROBOT_OBJECT_ID = -1
     BENCHMARK_LEFT_EE_OBJECT_ID = -2
@@ -228,21 +228,29 @@ class Base_Task(gym.Env):
     )
     BENCHMARK_IMPLEMENTED_RELATION_NAMES = (
         "on",
+        "in",
         "supports",
+        "contains",
         "held_by",
         "near",
+        "reachable_by",
         "collides_with",
+        "visible_to",
         "part_of",
     )
     BENCHMARK_IMPLEMENTED_BINARY_RELATION_NAMES = (
         "on",
+        "in",
         "supports",
+        "contains",
         "near",
         "collides_with",
         "part_of",
     )
     BENCHMARK_IMPLEMENTED_BIPARTITE_RELATION_NAMES = (
         "held_by",
+        "reachable_by",
+        "visible_to",
     )
     BENCHMARK_AUXILIARY_RELATION_STATE_NAMES = (
         "raw_contact",
@@ -521,6 +529,46 @@ class Base_Task(gym.Env):
             }
             catalog.append(entry)
 
+        for articulation in self.scene.get_all_articulations():
+            name = articulation.get_name()
+            if not name:  # unnamed articulations are robot embodiments
+                continue
+            links = list(articulation.get_links())
+            if not links:
+                continue
+            root_entity = getattr(links[0], "entity", None)
+            object_id = getattr(root_entity, "per_scene_id", None)
+            if object_id is None or object_id in seen_ids:
+                continue
+            seen_ids.add(object_id)
+            is_target = name in target_names
+            is_furniture = self._is_furniture_name(name) or self._is_benchmark_container_entry(
+                {"name": name}
+            )
+            catalog.append({
+                "object_id": int(object_id),
+                "name": name,
+                "entity_kind": "articulation",
+                "role": "target" if is_target else ("furniture" if is_furniture else "other"),
+                "semantic_label": name,
+                "asset_ref": asset_ref_lookup.get(name),
+                "is_target": bool(is_target),
+                "is_distractor": False,
+                "is_furniture": bool(is_furniture),
+                "is_robot": False,
+                "is_articulated": True,
+                "is_movable": False,
+                "provenance": "privileged",
+                "metadata": {
+                    "segmentation_ids": sorted(
+                        int(link.entity.per_scene_id)
+                        for link in links
+                        if getattr(link, "entity", None) is not None
+                        and getattr(link.entity, "per_scene_id", None) is not None
+                    )
+                },
+            })
+
         catalog.extend(self._build_benchmark_structural_object_entries())
 
         catalog.sort(key=lambda item: item["object_id"])
@@ -624,6 +672,13 @@ class Base_Task(gym.Env):
             object_id = getattr(entity, "per_scene_id", None)
             if object_id is not None:
                 actor_by_id[int(object_id)] = entity
+        for articulation in self.scene.get_all_articulations():
+            if not articulation.get_name() or not articulation.get_links():
+                continue
+            root_entity = getattr(articulation.get_links()[0], "entity", None)
+            object_id = getattr(root_entity, "per_scene_id", None)
+            if object_id is not None:
+                actor_by_id[int(object_id)] = articulation
 
         object_ids = []
         pose_world = []
@@ -650,7 +705,11 @@ class Base_Task(gym.Env):
                 pose_world.append(np.zeros(7, dtype=np.float32))
                 continue
 
-            pose = entity.get_pose()
+            pose = self._get_benchmark_entity_pose(entity)
+            if pose is None:
+                is_present.append(False)
+                pose_world.append(np.zeros(7, dtype=np.float32))
+                continue
             pose_world.append(
                 np.array(
                     [
@@ -733,6 +792,21 @@ class Base_Task(gym.Env):
         }
 
     def _get_benchmark_entity_aabb(self, entity):
+        if hasattr(entity, "get_links"):
+            link_aabbs = []
+            for link in entity.get_links():
+                link_entity = getattr(link, "entity", None)
+                if link_entity is None:
+                    continue
+                try:
+                    link_aabbs.append(self._get_benchmark_entity_aabb(link_entity))
+                except Exception:
+                    continue
+            if link_aabbs:
+                return (
+                    np.min(np.stack([bounds[0] for bounds in link_aabbs]), axis=0),
+                    np.max(np.stack([bounds[1] for bounds in link_aabbs]), axis=0),
+                )
         actor = getattr(entity, "actor", entity)
         all_points = []
 
@@ -786,6 +860,18 @@ class Base_Task(gym.Env):
         return center - fallback_half_extent, center + fallback_half_extent
 
     @staticmethod
+    def _get_benchmark_entity_pose(entity):
+        get_pose = getattr(entity, "get_pose", None)
+        if get_pose is not None:
+            return get_pose()
+        get_links = getattr(entity, "get_links", None)
+        if get_links is not None:
+            links = list(get_links())
+            if links:
+                return links[0].get_pose()
+        return None
+
+    @staticmethod
     def _compute_benchmark_xy_overlap_ratio(upper_aabb, lower_aabb) -> float:
         upper_min, upper_max = upper_aabb
         lower_min, lower_max = lower_aabb
@@ -819,6 +905,101 @@ class Base_Task(gym.Env):
             return False
 
         return self._compute_benchmark_xy_overlap_ratio(upper_aabb, lower_aabb) >= 0.2
+
+    @staticmethod
+    def _is_benchmark_container_entry(entry: dict) -> bool:
+        """Return whether a catalog object is a plausible physical container."""
+        label = " ".join(
+            str(entry.get(field) or "").lower()
+            for field in ("name", "semantic_label", "asset_ref")
+        )
+        return any(
+            token in label
+            for token in (
+                "basket", "bin", "box", "cabinet", "drawer", "fridge",
+                "microwave", "sink", "bowl", "cup", "fileholder",
+                "file_holder", "dishrack", "trash", "container",
+            )
+        )
+
+    @staticmethod
+    def _is_benchmark_inside(object_aabb, container_aabb) -> bool:
+        """Conservatively test whether an object's center is in a container volume."""
+        object_min, object_max = object_aabb
+        container_min, container_max = container_aabb
+        center = 0.5 * (np.asarray(object_min) + np.asarray(object_max))
+        tolerance = 1e-4
+        return bool(
+            np.all(center >= np.asarray(container_min) - tolerance)
+            and np.all(center <= np.asarray(container_max) + tolerance)
+        )
+
+    def _build_benchmark_visibility_relations(self, object_catalog, actor_by_id):
+        """Build object-to-camera visibility from already captured segmentation."""
+        object_count = len(object_catalog)
+        try:
+            segmentation = self.cameras.get_segmentation_raw(level="actor")
+        except Exception:
+            segmentation = {}
+
+        camera_names = sorted(segmentation)
+        visible_to = np.zeros((object_count, len(camera_names)), dtype=np.bool_)
+        visible_to_valid = np.zeros_like(visible_to)
+        visible_pixel_count = np.zeros((object_count, len(camera_names)), dtype=np.int32)
+
+        for camera_idx, camera_name in enumerate(camera_names):
+            seg_img = segmentation.get(camera_name, {}).get("actor_segmentation_raw")
+            if seg_img is None:
+                continue
+            for object_idx, entry in enumerate(object_catalog):
+                entity = actor_by_id.get(int(entry["object_id"]))
+                if entity is None:
+                    continue
+                try:
+                    target_ids = self._resolve_target_seg_ids(entity)
+                except (TypeError, AttributeError, ValueError):
+                    continue
+                count = int(np.isin(seg_img, list(target_ids)).sum())
+                visible_pixel_count[object_idx, camera_idx] = count
+                visible_to[object_idx, camera_idx] = count > 0
+                visible_to_valid[object_idx, camera_idx] = True
+
+        return visible_to, visible_to_valid, visible_pixel_count, camera_names
+
+    def _build_benchmark_reachability_relations(self, object_catalog, actor_by_id):
+        """Build collision-aware object-to-effector reachability via batched IK."""
+        object_count = len(object_catalog)
+        reachable_by = np.zeros((object_count, 2), dtype=np.bool_)
+        reachable_by_valid = np.zeros_like(reachable_by)
+        query_indices = []
+        query_poses = []
+        for object_idx, entry in enumerate(object_catalog):
+            entity = actor_by_id.get(int(entry["object_id"]))
+            if entity is None or entry.get("is_robot"):
+                continue
+            pose = self._get_benchmark_entity_pose(entity)
+            if pose is None:
+                continue
+            query_indices.append(object_idx)
+            query_poses.append(list(np.asarray(pose.p, dtype=float)) + [1.0, 0.0, 0.0, 0.0])
+
+        if not query_poses or not hasattr(self, "robot"):
+            return reachable_by, reachable_by_valid
+
+        for effector_idx, method_name in enumerate(("left_check_ik_batch", "right_check_ik_batch")):
+            method = getattr(self.robot, method_name, None)
+            if method is None:
+                continue
+            try:
+                results = np.asarray(method(query_poses, relax_orientation=True), dtype=np.bool_).reshape(-1)
+            except Exception:
+                continue
+            if len(results) != len(query_indices):
+                continue
+            reachable_by[query_indices, effector_idx] = results
+            reachable_by_valid[query_indices, effector_idx] = True
+
+        return reachable_by, reachable_by_valid
 
     def _get_benchmark_effector_state(self, arm_tag: str) -> tuple[np.ndarray | None, bool]:
         if not hasattr(self, "robot"):
@@ -858,6 +1039,16 @@ class Base_Task(gym.Env):
                 continue
             actor_by_id[object_id] = entity
             aabb_by_id[object_id] = self._get_benchmark_entity_aabb(entity)
+        for articulation in self.scene.get_all_articulations():
+            if not articulation.get_name() or not articulation.get_links():
+                continue
+            root_entity = getattr(articulation.get_links()[0], "entity", None)
+            object_id = getattr(root_entity, "per_scene_id", None)
+            if object_id is None or int(object_id) not in index_by_id:
+                continue
+            object_id = int(object_id)
+            actor_by_id[object_id] = articulation
+            aabb_by_id[object_id] = self._get_benchmark_entity_aabb(articulation)
 
         object_ids = np.array([int(entry["object_id"]) for entry in object_catalog], dtype=np.int64)
         object_count = len(object_catalog)
@@ -867,6 +1058,8 @@ class Base_Task(gym.Env):
         part_of = np.zeros((object_count, object_count), dtype=np.bool_)
         grasped_by_code = np.full((object_count,), -1, dtype=np.int8)
         held_by = np.zeros((object_count, 2), dtype=np.bool_)
+        in_relation = np.zeros((object_count, object_count), dtype=np.bool_)
+        containment_valid = np.zeros_like(in_relation)
 
         left_gripper_names = set(getattr(self.robot, "left_fix_gripper_name", []))
         right_gripper_names = set(getattr(self.robot, "right_fix_gripper_name", []))
@@ -946,7 +1139,10 @@ class Base_Task(gym.Env):
             entity = actor_by_id.get(int(object_id))
             if entity is None:
                 continue
-            center = np.array(entity.get_pose().p, dtype=np.float64)
+            entity_pose = self._get_benchmark_entity_pose(entity)
+            if entity_pose is None:
+                continue
+            center = np.array(entity_pose.p, dtype=np.float64)
             left_held = (
                 left_tcp is not None
                 and left_closed
@@ -970,6 +1166,31 @@ class Base_Task(gym.Env):
 
         on = supports_from.copy()
         supports = supports_from.T.copy()
+        for container_idx, container_entry in enumerate(object_catalog):
+            if not self._is_benchmark_container_entry(container_entry):
+                continue
+            container_aabb = aabb_by_id.get(int(container_entry["object_id"]))
+            if container_aabb is None:
+                continue
+            for object_idx, object_entry in enumerate(object_catalog):
+                if object_idx == container_idx:
+                    continue
+                object_aabb = aabb_by_id.get(int(object_entry["object_id"]))
+                if object_aabb is None:
+                    continue
+                containment_valid[object_idx, container_idx] = True
+                in_relation[object_idx, container_idx] = self._is_benchmark_inside(
+                    object_aabb, container_aabb
+                )
+        contains = in_relation.T.copy()
+        contains_valid = containment_valid.T.copy()
+
+        visible_to, visible_to_valid, visible_pixel_count, camera_names = (
+            self._build_benchmark_visibility_relations(object_catalog, actor_by_id)
+        )
+        reachable_by, reachable_by_valid = self._build_benchmark_reachability_relations(
+            object_catalog, actor_by_id
+        )
         collides_with = np.logical_and(
             raw_contact,
             np.logical_not(np.logical_or(on, supports)),
@@ -989,9 +1210,22 @@ class Base_Task(gym.Env):
             "near": near,
             "grasped_by_code": grasped_by_code,
             "on": on,
+            "in": in_relation,
             "supports": supports,
+            "contains": contains,
+            "containment_valid": containment_valid,
+            "contains_valid": contains_valid,
             "collides_with": collides_with,
             "held_by": held_by,
+            "reachable_by": reachable_by,
+            "reachable_by_valid": reachable_by_valid,
+            "reachable_by_effector_names": np.array(
+                [self.BENCHMARK_LEFT_EE_NAME, self.BENCHMARK_RIGHT_EE_NAME], dtype="S32"
+            ),
+            "visible_to": visible_to,
+            "visible_to_valid": visible_to_valid,
+            "visible_pixel_count": visible_pixel_count,
+            "visible_to_camera_names": np.array(camera_names, dtype="S64"),
             "part_of": part_of,
             "held_by_effector_names": np.array([self.BENCHMARK_LEFT_EE_NAME, self.BENCHMARK_RIGHT_EE_NAME], dtype="S32"),
             "canonical_relation_names": np.array(self.BENCHMARK_CANONICAL_RELATION_NAMES, dtype="S32"),
@@ -1153,6 +1387,8 @@ class Base_Task(gym.Env):
                 for dataset_name in (
                     "object_ids",
                     "held_by_effector_names",
+                    "reachable_by_effector_names",
+                    "visible_to_camera_names",
                     "canonical_relation_names",
                     "implemented_relation_names",
                     "implemented_binary_relation_names",

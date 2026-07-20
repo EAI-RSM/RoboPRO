@@ -205,9 +205,13 @@ def _summarize_benchmark_support(root: h5py.File):
         near = state["near"][()] if "near" in state else None
         grasped_by_code = state["grasped_by_code"][()] if "grasped_by_code" in state else None
         on_matrix = state["on"][()] if "on" in state else None
+        in_matrix = state["in"][()] if "in" in state else None
         supports_matrix = state["supports"][()] if "supports" in state else None
+        contains_matrix = state["contains"][()] if "contains" in state else None
         collides_with = state["collides_with"][()] if "collides_with" in state else None
         held_by = state["held_by"][()] if "held_by" in state else None
+        reachable_by = state["reachable_by"][()] if "reachable_by" in state else None
+        visible_to = state["visible_to"][()] if "visible_to" in state else None
         part_of = state["part_of"][()] if "part_of" in state else None
         held_by_effector_names = _decode_string_array(state["held_by_effector_names"]) if "held_by_effector_names" in state else []
         canonical_relation_names = _decode_string_array(state["canonical_relation_names"]) if "canonical_relation_names" in state else []
@@ -224,12 +228,20 @@ def _summarize_benchmark_support(root: h5py.File):
             print(f"    grasped_by_code shape: {grasped_by_code.shape}")
         if on_matrix is not None:
             print(f"    on shape: {on_matrix.shape}")
+        if in_matrix is not None:
+            print(f"    in shape: {in_matrix.shape}")
         if supports_matrix is not None:
             print(f"    supports shape: {supports_matrix.shape}")
+        if contains_matrix is not None:
+            print(f"    contains shape: {contains_matrix.shape}")
         if collides_with is not None:
             print(f"    collides_with shape: {collides_with.shape}")
         if held_by is not None:
             print(f"    held_by shape: {held_by.shape}")
+        if reachable_by is not None:
+            print(f"    reachable_by shape: {reachable_by.shape}")
+        if visible_to is not None:
+            print(f"    visible_to shape: {visible_to.shape}")
         if part_of is not None:
             print(f"    part_of shape: {part_of.shape}")
         if held_by_effector_names:
@@ -254,12 +266,22 @@ def _summarize_benchmark_support(root: h5py.File):
             checks["grasped_by_code dims are (T,N)"] = grasped_by_code.ndim == 2
         if on_matrix is not None:
             checks["on dims are (T,N,N)"] = on_matrix.ndim == 3
+        if in_matrix is not None:
+            checks["in dims are (T,N,N)"] = in_matrix.ndim == 3
         if supports_matrix is not None:
             checks["supports dims are (T,N,N)"] = supports_matrix.ndim == 3
         if collides_with is not None:
             checks["collides_with dims are (T,N,N)"] = collides_with.ndim == 3
+        if contains_matrix is not None:
+            checks["contains is inverse of in"] = (
+                in_matrix is not None and np.array_equal(contains_matrix, in_matrix.transpose(0, 2, 1))
+            )
         if held_by is not None:
             checks["held_by dims are (T,N,E)"] = held_by.ndim == 3
+        if reachable_by is not None:
+            checks["reachable_by dims are (T,N,E)"] = reachable_by.ndim == 3
+        if visible_to is not None:
+            checks["visible_to dims are (T,N,C)"] = visible_to.ndim == 3
         if part_of is not None:
             checks["part_of dims are (T,N,N)"] = part_of.ndim == 3
         if object_ids and raw_contact is not None:
@@ -437,8 +459,15 @@ def main():
                         relation_state_summary["on_shape"] = list(on_matrix.shape)
                         if on_matrix.ndim == 3 and on_matrix.shape[0] > 0:
                             relation_state_summary["frame0_on_edges"] = int(np.count_nonzero(on_matrix[0]))
+                    if "in" in state:
+                        in_matrix = state["in"][()]
+                        relation_state_summary["in_shape"] = list(in_matrix.shape)
+                        if in_matrix.ndim == 3 and in_matrix.shape[0] > 0:
+                            relation_state_summary["frame0_in_edges"] = int(np.count_nonzero(in_matrix[0]))
                     if "supports" in state:
                         relation_state_summary["supports_shape"] = list(state["supports"].shape)
+                    if "contains" in state:
+                        relation_state_summary["contains_shape"] = list(state["contains"].shape)
                     if "collides_with" in state:
                         collides_with = state["collides_with"][()]
                         relation_state_summary["collides_with_shape"] = list(collides_with.shape)
@@ -449,6 +478,16 @@ def main():
                         relation_state_summary["held_by_shape"] = list(held_by.shape)
                         if held_by.ndim == 3 and held_by.shape[0] > 0:
                             relation_state_summary["frame0_held_by_edges"] = int(np.count_nonzero(held_by[0]))
+                    if "reachable_by" in state:
+                        reachable_by = state["reachable_by"][()]
+                        relation_state_summary["reachable_by_shape"] = list(reachable_by.shape)
+                        if reachable_by.ndim == 3 and reachable_by.shape[0] > 0:
+                            relation_state_summary["frame0_reachable_by_edges"] = int(np.count_nonzero(reachable_by[0]))
+                    if "visible_to" in state:
+                        visible_to = state["visible_to"][()]
+                        relation_state_summary["visible_to_shape"] = list(visible_to.shape)
+                        if visible_to.ndim == 3 and visible_to.shape[0] > 0:
+                            relation_state_summary["frame0_visible_to_edges"] = int(np.count_nonzero(visible_to[0]))
                     if "part_of" in state:
                         part_of = state["part_of"][()]
                         relation_state_summary["part_of_shape"] = list(part_of.shape)
