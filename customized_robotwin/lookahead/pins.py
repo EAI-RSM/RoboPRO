@@ -1,18 +1,21 @@
 """Configurable verification pins for plan replay.
 
-When a replay policy loads a :class:`~lookahead.plan.Plan`, it should verify that
-the scene it is about to replay into actually matches the scene the plan was
-searched in — otherwise the raw-action playback is meaningless. A :class:`Pin`
-controls how strictly one named property is checked:
+Pins verify the plan's **replay hash** — the set of properties that determine the
+trajectory (task / config / seed, physics-changing randomization, embodiment,
+control & action semantics, physics params, the raw actions, harness provenance).
+When a replay policy loads a :class:`~lookahead.plan.Plan`, it checks that the scene
+it is about to replay into matches the replay hash the plan was searched under; the
+t0 state fingerprint is the arbiter, and a mismatch means the raw-action playback
+would not reproduce the searched trajectory. A :class:`Pin` controls how strictly
+one named property is checked:
 
 * ``enforce`` (default) — raise :class:`PinViolation` on mismatch,
 * ``warn``             — log a clear warning and continue,
 * ``off``              — skip the check entirely.
 
-This is THE knob the user asked for: ship a sensible default policy, but make it
-trivial to relax any single pin (e.g. ``provenance: off`` to stop pinning the
-harness commit hash while iterating). Numeric pins (fingerprints) compare with a
-per-pin ``atol``.
+Ship a sensible default policy, but make it trivial to relax any single pin (e.g.
+``provenance: off`` to stop pinning the harness commit hash while iterating). Numeric
+pins (fingerprints) compare with a per-pin ``atol``.
 
 Pure module: no jax, no sim.
 """

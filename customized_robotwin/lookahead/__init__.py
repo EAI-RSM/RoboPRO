@@ -25,7 +25,8 @@ jax dependency; only ``candidates`` / ``run_search`` touch a policy model.
 from __future__ import annotations
 
 from . import fitness, pins, plan, rollback, search  # noqa: F401
-from .candidates import CandidateSource, PolicyCandidates
+from .candidates import (CandidateSource, PolicyCandidates, mode_propose,
+                         noise_propose)
 from .fitness import Fitness, OracleFitness, SuccessFitness, build_fitness
 from .pins import Pin, PinPolicy, PinViolation, default_policy
 from .plan import Plan, TaskSpec
@@ -38,7 +39,7 @@ from .search import (BeamSearch, FullTreeSearch, MonteCarloSearch, SearchResult,
 __all__ = [
     "rollback", "candidates", "fitness", "search", "plan", "pins",
     "TaskAdapter", "snapshot", "restore", "apply_chunk", "settle", "state_fingerprint",
-    "CandidateSource", "PolicyCandidates",
+    "CandidateSource", "PolicyCandidates", "noise_propose", "mode_propose",
     "Fitness", "OracleFitness", "SuccessFitness", "build_fitness",
     "SearchStrategy", "BeamSearch", "MonteCarloSearch", "FullTreeSearch",
     "SearchResult", "build_strategy",

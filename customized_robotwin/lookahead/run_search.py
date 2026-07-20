@@ -47,7 +47,7 @@ try:
     from . import plan as plan_mod
     from . import rollback as rb
     from . import search as search_mod
-    from .candidates import PolicyCandidates
+    from .candidates import PolicyCandidates, noise_propose
 except ImportError:  # pragma: no cover - executed only as a top-level script
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     from lookahead import fitness as fit_mod
@@ -55,7 +55,7 @@ except ImportError:  # pragma: no cover - executed only as a top-level script
     from lookahead import plan as plan_mod
     from lookahead import rollback as rb
     from lookahead import search as search_mod
-    from lookahead.candidates import PolicyCandidates
+    from lookahead.candidates import PolicyCandidates, noise_propose
 
 
 # ------------------------------------------------------------------ provenance
@@ -120,18 +120,45 @@ def build_scene(task_name: str, task_config: str, seed: int):
     return task, args
 
 
+def _parse_candidate_opts(pairs: Optional[list]) -> Dict[str, Any]:
+    """Parse ``--candidate-opt KEY=VAL`` pairs into a dict (values as Python literals).
+
+    Opaque passthrough to the candidate proposer — no key is interpreted by
+    ``run_search`` itself (there is no "mode" special-case).
+    """
+    import ast
+    opts: Dict[str, Any] = {}
+    for item in (pairs or []):
+        if "=" not in item:
+            raise ValueError(f"--candidate-opt expects KEY=VAL, got {item!r}")
+        key, val = item.split("=", 1)
+        try:
+            opts[key.strip()] = ast.literal_eval(val)
+        except (ValueError, SyntaxError):
+            opts[key.strip()] = val
+    return opts
+
+
 def load_candidate(candidate_policy: str, usr_args: Dict[str, Any]):
-    """Import the policy module and load its model. Returns ``(model, encode_obs)``."""
+    """Import the policy module and load its model.
+
+    Returns ``(model, encode_obs, propose_fn)``. ``propose_fn`` is the policy's
+    optional ``propose_candidates(model, obs, k)`` hook if it exposes one (mirrors the
+    ``get_model`` / ``eval`` / ``reset_model`` convention); ``None`` otherwise, in
+    which case the search uses the policy-agnostic noise proposer. The search core is
+    policy-agnostic — the candidate mechanism lives entirely in the policy module.
+    """
     import importlib
     _ensure_robotwin_paths(candidate_policy)
     mod = importlib.import_module(candidate_policy)
-    return mod.get_model(usr_args), mod.encode_obs
+    propose_fn = getattr(mod, "propose_candidates", None)
+    return mod.get_model(usr_args), mod.encode_obs, propose_fn
 
 
 def build_task_spec(task_name: str, task_config: str, seed: int, args: Dict[str, Any],
                     action_dim: int, chunk: int, repo_dir: str,
                     created_at: Optional[str] = None) -> "plan_mod.TaskSpec":
-    """Assemble the PINNED TaskSpec from the resolved task args + provenance."""
+    """Assemble the replay-hash TaskSpec from the resolved task args + provenance."""
     control = {
         "action_dim": int(action_dim),
         "chunk": int(chunk),
@@ -199,7 +226,7 @@ def run(args: argparse.Namespace) -> str:
     root = rb.snapshot(task)
 
     # 2) load candidate policy + build the search components
-    model, encode_obs = load_candidate(args.candidate_policy, usr_args)
+    model, encode_obs, propose_fn = load_candidate(args.candidate_policy, usr_args)
     # the policy model needs its language set before inference (pi05 embeds the
     # instruction in the observation window); prefer --instruction, else the task's.
     instruction = args.instruction
@@ -207,8 +234,19 @@ def run(args: argparse.Namespace) -> str:
         instruction = task.get_instruction()
     if hasattr(model, "set_language") and instruction:
         model.set_language(instruction)
-    candidates = PolicyCandidates(model, encode_obs, mode=args.candidate_mode,
-                                  chunk=chunk, noise_seed=args.noise_seed)
+    # policy-agnostic candidate generation: use the policy's propose_candidates hook
+    # if it exposes one, else the default noise proposer. Optional --candidate-opt
+    # key=val pairs are bound opaquely onto the proposer (e.g. seed=1234).
+    opts = _parse_candidate_opts(args.candidate_opt)
+    has_hook = propose_fn is not None
+    print(f"[run_search] candidate proposer: "
+          f"{args.candidate_policy}.propose_candidates" if has_hook
+          else "[run_search] candidate proposer: default noise proposer", flush=True)
+    if opts:
+        import functools
+        propose_fn = functools.partial(propose_fn or noise_propose, **opts)
+    candidates = PolicyCandidates(model, encode_obs, k=args.k,
+                                  propose_fn=propose_fn, chunk=chunk)
     fitness = fit_mod.build_fitness(args.fitness, use_dist_tiebreak=not args.no_dist_tiebreak)
     strategy = search_mod.build_strategy(args.strategy, width=args.width, k=args.k,
                                          depth=args.depth)
@@ -257,7 +295,8 @@ def run(args: argparse.Namespace) -> str:
                 "strategy_params": {"width": args.width, "k": args.k, "depth": args.depth},
                 "fitness": args.fitness,
                 "candidate_policy": args.candidate_policy,
-                "candidate_mode": args.candidate_mode,
+                "candidate_hook": has_hook,
+                "candidate_opt": opts or None,
                 "rank": rank,
                 "top_m": top_m,
                 "score": list(result.score),
@@ -287,10 +326,13 @@ def parse_args(argv=None) -> argparse.Namespace:
     p.add_argument("--task_config", required=True, help="task config yml stem")
     p.add_argument("--seed", type=int, required=True)
     p.add_argument("--candidate_policy", default="pi05",
-                   help="policy module name under ./policy (implements get_model/encode_obs)")
+                   help="policy module name under ./policy (implements get_model/encode_obs; "
+                        "may expose an optional propose_candidates(model, obs, k) hook)")
     p.add_argument("--policy_config", required=True, help="path to the policy's deploy_policy.yml")
-    p.add_argument("--candidate_mode", default="modes", choices=["modes", "noise"],
-                   help="draw candidates by latent mode z (WTA) or by noise sampling")
+    p.add_argument("--candidate-opt", "--candidate_opt", dest="candidate_opt", action="append",
+                   default=None, metavar="KEY=VAL",
+                   help="opaque key=val passed to the candidate proposer (repeatable), "
+                        "e.g. seed=1234. Values are parsed as Python literals when possible.")
     p.add_argument("--instruction", default=None,
                    help="language instruction for the candidate policy (else the task's)")
     p.add_argument("--strategy", default="beam", choices=sorted(search_mod.STRATEGY_REGISTRY))
@@ -300,7 +342,6 @@ def parse_args(argv=None) -> argparse.Namespace:
     p.add_argument("--fitness", default="oracle", choices=sorted(fit_mod.FITNESS_REGISTRY))
     p.add_argument("--no_dist_tiebreak", action="store_true",
                    help="disable the distance-to-goal tiebreak in OracleFitness")
-    p.add_argument("--noise_seed", type=int, default=1234)
     p.add_argument("--atol", type=float, default=1e-5, help="fingerprint match tolerance")
     p.add_argument("--top-m", "--top_m", dest="top_m", type=int, default=1,
                    help="number of top distinct plans to emit (rank-0 -> seed<N>.json, "

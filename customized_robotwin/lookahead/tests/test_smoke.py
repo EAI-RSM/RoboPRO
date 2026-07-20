@@ -28,6 +28,7 @@ try:
     from lookahead import plan as plan_mod
     from lookahead import rollback as rb
     from lookahead import search as search_mod
+    from lookahead import candidates as cand_mod
     from lookahead.candidates import CandidateSource
 except ImportError:  # pragma: no cover
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
@@ -36,6 +37,7 @@ except ImportError:  # pragma: no cover
     from lookahead import plan as plan_mod
     from lookahead import rollback as rb
     from lookahead import search as search_mod
+    from lookahead import candidates as cand_mod
     from lookahead.candidates import CandidateSource
 
 
@@ -196,6 +198,34 @@ class FakeCandidates(CandidateSource):
         return out
 
 
+class _FakePolicy:
+    """Minimal deploy-policy .policy: infer() varies with noise and latent z."""
+    def __init__(self):
+        self._sample_kwargs = {}
+
+    def infer(self, obs, noise=None):
+        z = float(self._sample_kwargs.get("z", -1))
+        base = float(np.asarray(noise).mean()) if noise is not None else 0.0
+        # each chunk is constant-valued so distinct (base, z) => distinct chunks
+        return {"actions": np.full((50, 32), base + 10.0 * z, dtype=np.float32)}
+
+
+class _FakeModel:
+    """Minimal deploy-policy model surface PolicyCandidates duck-types."""
+    def __init__(self):
+        self.observation_window = None
+        self.policy = _FakePolicy()
+        self.rendered = 0
+
+    def update_observation_window(self, rgb, state):
+        self.observation_window = {"rgb": rgb, "state": state}
+        self.rendered += 1
+
+
+def _encode_obs(obs):
+    return [obs], obs
+
+
 # ============================================================ tests
 def test_snapshot_restore_roundtrip():
     task = FakeTask()
@@ -285,6 +315,36 @@ def test_top_m_ranked_distinct_ordered():
         assert [x.score for x in rs] == sorted(x.score for x in rs)
         ps = [tuple(x.candidate_indices) for x in rs]
         assert len(set(ps)) == len(ps)
+
+
+def test_policy_candidates_proposer_routing():
+    # default proposer = noise: K distinct chunks (K different noises), obs rendered
+    model = _FakeModel()
+    pc = cand_mod.PolicyCandidates(model, _encode_obs, k=4, chunk=50)
+    assert pc.propose_fn is cand_mod.noise_propose        # noise is the default
+    chunks = pc.propose(FakeTask(), 4)
+    assert model.rendered == 1                            # rendered the obs once
+    assert len(chunks) == 4 and chunks[0].shape == (50, 32)
+    vals = {round(float(c[0, 0]), 6) for c in chunks}
+    assert len(vals) == 4                                 # 4 distinct noise samples
+
+    # a provided propose_fn is used instead of the default
+    sentinel_used = {"n": 0}
+
+    def my_propose(m, obs, k):
+        sentinel_used["n"] += 1
+        return [np.full((50, 32), 99.0, dtype=np.float32) for _ in range(k)]
+
+    pc2 = cand_mod.PolicyCandidates(model, _encode_obs, k=3, propose_fn=my_propose, chunk=10)
+    chunks2 = pc2.propose(FakeTask(), 3)
+    assert sentinel_used["n"] == 1                        # our proposer was called
+    assert len(chunks2) == 3 and chunks2[0].shape == (10, 32)  # chunk slicing applied
+    assert all(float(c[0, 0]) == 99.0 for c in chunks2)
+
+    # mode_propose helper varies the latent z -> distinct chunks
+    model.update_observation_window([0], 0)
+    modes = cand_mod.mode_propose(model, model.observation_window, 5)
+    assert len({round(float(c[0, 0]), 6) for c in modes}) == 5
 
 
 def test_montecarlo_and_fulltree():

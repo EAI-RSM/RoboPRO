@@ -27,9 +27,9 @@ masks, event labels, language relabeling, …) without changing the outcome.
 | module | role |
 | --- | --- |
 | `rollback.py` | `snapshot` / `restore` / `apply_chunk` / `settle` / `state_fingerprint` + the `TaskAdapter` Protocol. PhysX `pack()`/`unpack()` **plus** controller drive targets, and the critical `task.eval_success = False` reset on restore. |
-| `candidates.py` | `CandidateSource` ABC; `PolicyCandidates` (reuse a deploy-policy model; K chunks by latent mode `z` or by K noises). `CuroboCandidates` seam. |
+| `candidates.py` | `CandidateSource` ABC; policy-agnostic `PolicyCandidates(model, encode_obs, k, propose_fn=None)` — default proposer is `noise_propose` (K noise re-samples); a policy overrides via its own `propose_candidates` hook. `mode_propose` is a WTA helper; `CuroboCandidates` seam. |
 | `fitness.py` | `Fitness` ABC; `OracleFitness` = `({HARD:0, SOFT:1}.get(tier,2), dist_to_goal)`, minimised. Collision/distance terms are optional so target-less tasks fall back to success-only. |
-| `search.py` | `SearchStrategy` ABC; `BeamSearch` (default), `MonteCarloSearch`, `FullTreeSearch`. `search(..., m=1) -> List[SearchResult]` returns the top-M distinct plans (best first), each carrying the winning path's **raw actions** (not modes). |
+| `search.py` | `SearchStrategy` ABC; `BeamSearch` (default), `MonteCarloSearch`, `FullTreeSearch`. `search(..., m=1) -> List[SearchResult]` returns the top-M distinct plans (best first), each carrying the winning path's **raw actions**. |
 | `plan.py` | `TaskSpec` / `Plan` dataclasses + JSON `save` / `load`. Self-contained, portable, inspectable; actions inline as nested lists. |
 | `pins.py` | `Pin` / `PinPolicy` / `PinViolation` — the configurable replay-time verification knob. |
 | `run_search.py` | CLI: build task → capture spec + provenance → search → **verify via from-start replay** → write plan. |
@@ -38,27 +38,41 @@ masks, event labels, language relabeling, …) without changing the outcome.
 The pure modules (`rollback`, `fitness`, `search`, `plan`, `pins`) have **no jax
 dependency**; only `candidates` / `run_search` touch a policy model.
 
-## Pinned vs free
+## Replay hash
 
-The plan pins everything that determines the outcome. Everything that is outcome
-**invariant** stays a replay-time knob. The **t0 fingerprint check is the arbiter**
-for the gray zone: a nominally "free" knob that perturbs the seeded scene is caught.
+The **replay hash** is everything the plan captures that *determines the
+trajectory* — what must match for a replay to reproduce the exact task spec:
 
-| PINNED (in the plan; changing → re-search) | FREE (replay-time knob; outcome invariant) |
+| replay-hash property | in the plan |
 | --- | --- |
-| `task_name`, `task_config`, `seed` | cameras / sensors (count, pose, resolution, FOV) |
-| physics-changing randomization (`cluttered_table`, `random_table_height`, object instance ids) | modalities (rgb / depth / seg / pointcloud / tactile) |
-| embodiment | annotations / labels (masks, events, success flags, language relabeling) |
-| control / action semantics (action dim, chunk, control freq) | visual-only randomization (background, lighting) *— subject to the RNG caveat* |
-| physics params | recording config (save_freq, codec, fps) |
-| the raw actions | consumer (eval vs collect) |
-| harness provenance (commit, config hash) | |
+| task / config / seed | `task_spec.{task_name, task_config, seed}` |
+| physics-changing randomization (`cluttered_table`, `random_table_height`, object instance ids) | `task_spec.domain_randomization` |
+| embodiment | `task_spec.embodiment` |
+| control & action semantics (action dim, chunk, control freq) | `task_spec.control` |
+| physics params | `task_spec.control` (`physics_timestep`) |
+| the raw actions | `actions` |
+| harness provenance (commit, config hash) | `task_spec.provenance` |
 
-**RNG caveat / gray-zone rule.** Visual-only randomization is only free if it does
-not perturb the *seeded* scene. Rule: **apply free knobs AFTER the seeded scene is
-built, from an independent RNG.** If a "free" knob draws from the same seeded RNG
-that places objects, it shifts the physics scene — and the `fingerprint_t0` pin will
-catch it.
+The **t0 fingerprint is the arbiter**: it is a deterministic digest of the built
+scene, so if any replay-hash property differs the fingerprint differs. On replay the
+`pins` verify these (`enforce | warn | off`, per-pin `atol`), and any can be relaxed
+in one line (e.g. `pins: {provenance: off}`). Apply any replay-control knob (below)
+*after* the seeded scene is built and from an independent RNG, so it never perturbs
+the replay hash.
+
+## Replay control
+
+**Replay control** is the additive knobs available at replay time that don't change
+the outcome — the point of decoupling search from execution: search once, then
+replay to collect richer data or eval under new sensors while the physics stays fixed.
+
+| replay-control knob | examples |
+| --- | --- |
+| cameras / sensors | count, pose, resolution, FOV |
+| modalities | rgb / depth / seg / point-cloud / tactile |
+| annotations & labels | masks, events, success flags, language relabeling |
+| recording config | save_freq, codec, fps |
+| consumer | eval vs collect |
 
 ## PinPolicy — the verification knob
 
@@ -101,7 +115,7 @@ policy.check("fingerprint_t0", expected, actual)   # enforce -> raises PinViolat
 ```jsonc
 {
   "format": "lookahead_plan_v1",
-  "task_spec": {                       // PINNED
+  "task_spec": {                       // the replay hash
     "task_name": "put_milktea_on_shelf",
     "task_config": "bench_demo_office_d8",
     "seed": 40000,
@@ -161,11 +175,42 @@ Because RoboTwin does not store the episode seed on the task, the replay model
 selects the plan for a **configured seed** (`seed` in yml) or a single `plan_path`;
 if a future env exposes `task.seed`, `ReplayModel.select_for_task` honours it.
 
+## Candidate generation (policy-agnostic)
+
+The search engine and `run_search` know nothing about *how* candidates are produced —
+that lives entirely in the policy layer behind one interface:
+`propose_fn(model, obs, k) -> list[chunks]`.
+
+- **Default:** `noise_propose` — K flow-matching noise re-samples. Works for any
+  single-mode flow/diffusion policy, so `run_search` needs no special flag.
+- **Policy override (the hook):** a candidate policy opts into a custom mechanism by
+  exposing an optional module-level `propose_candidates(model, obs, k)` — mirroring
+  the `get_model` / `eval` / `reset_model` convention. `run_search` resolves it with
+  `getattr(<policy_module>, "propose_candidates", None)`; if absent it falls back to
+  the default noise proposer. There is no "mode" flag on the CLI.
+- **WTA example:** a policy with latent action modes implements the hook with the
+  `mode_propose` helper (K latent modes `z=0..k-1` under one fixed noise):
+
+  ```python
+  # in the WTA policy's deploy_policy.py (alongside get_model / eval / reset_model)
+  from lookahead.candidates import mode_propose, noise_propose
+
+  def propose_candidates(model, obs, k):
+      # use latent MODES when the checkpoint has a multimodal action head, else noise
+      if getattr(model, "_enable_mm", False) and int(getattr(model, "_num_modes", 1)) > 1:
+          return mode_propose(model, obs, k)
+      return noise_propose(model, obs, k)
+  ```
+
+- **Escape hatch:** `--candidate-opt key=val` (repeatable) passes opaque kwargs to the
+  proposer (e.g. `--candidate-opt seed=1234`); no key is interpreted by `run_search`.
+
 ## Extension points
 
 - **Candidate sources** — subclass `CandidateSource`; `CuroboCandidates` is a seam
   for a planner-based source (return K planner trajectories as `[chunk, action_dim]`
-  arrays). No change to the search core.
+  arrays). No change to the search core. Or, for a policy-driven source, expose
+  `propose_candidates` (above) instead of a whole subclass.
 - **Fitness** — subclass `Fitness` (`make_context` / `outcome` / `score`, lower =
   better) and register it in `FITNESS_REGISTRY`.
 - **Strategies** — subclass `SearchStrategy`; `MonteCarloSearch` / `FullTreeSearch`

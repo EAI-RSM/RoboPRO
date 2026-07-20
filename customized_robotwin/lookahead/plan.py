@@ -1,10 +1,10 @@
 """Motion-plan data model + JSON (de)serialisation.
 
 A :class:`Plan` is a self-contained, portable, inspectable record of a searched
-trajectory: the pinned task spec (what must match to reuse the plan), the winning
-**raw action sequence** (inline nested lists), the t0/terminal state fingerprints
-(the replay arbiter) and search/fitness metadata. It is the hand-off artifact
-between the search side (:mod:`lookahead.run_search`) and the replay policy
+trajectory: the replay-hash task spec (the properties that determine the trajectory),
+the winning **raw action sequence** (inline nested lists), the t0/terminal state
+fingerprints (the replay arbiter) and search/fitness metadata. It is the hand-off
+artifact between the search side (:mod:`lookahead.run_search`) and the replay policy
 (``policy/replay``).
 
 Pure module: no jax, no sim, no ``datetime.now`` inside serialisation (timestamps
@@ -41,10 +41,11 @@ def _to_jsonable(x: Any) -> Any:
 
 @dataclass
 class TaskSpec:
-    """The PINNED half of a plan — everything that must match to reuse it.
+    """The plan's replay hash — the properties that determine the trajectory.
 
-    Changing any of these changes the outcome, so a mismatch means the plan must be
-    re-searched (see the replay :class:`~lookahead.pins.PinPolicy`).
+    These are what a replay must match to reproduce the exact task spec; changing any
+    of them changes the outcome, so a mismatch means the plan must be re-searched (the
+    replay :class:`~lookahead.pins.PinPolicy` verifies them).
 
     Fields
     ------
@@ -93,7 +94,7 @@ class Plan:
     Fields
     ------
     task_spec:
-        The pinned :class:`TaskSpec`.
+        The replay-hash :class:`TaskSpec`.
     actions:
         Raw action sequence as nested lists ``[[...row...], ...]`` (inline, portable).
     fingerprints:

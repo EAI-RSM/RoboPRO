@@ -2,15 +2,21 @@
 
 A :class:`CandidateSource` proposes K candidate next-chunks at the CURRENT task
 state (without mutating the sim). The search branches each candidate, rolls it
-forward and scores it. The default :class:`PolicyCandidates` reuses a deploy-policy
-model (pi05 / a WTA variant) and draws K chunks either by latent MODE (``z``) or by
-K different flow-matching NOISE samples — mirroring
-``outcome_diversity.sample_chunk`` / ``run_branch``.
+forward and scores it.
+
+The default :class:`PolicyCandidates` is **policy-agnostic**: it renders the
+observation into the model and delegates the actual sampling to a ``propose_fn``.
+When no ``propose_fn`` is given it uses :func:`noise_propose` — K flow-matching
+NOISE re-samples, which works for any single-mode flow/diffusion policy. A policy
+with a richer candidate mechanism (e.g. a WTA policy's latent action MODES) opts in
+by providing its own proposer; :func:`mode_propose` is a ready-made helper such a
+policy can use. The search core never mentions "modes": that concept lives entirely
+in the policy layer behind the uniform ``propose_fn(model, obs, k) -> list[chunks]``
+interface.
 
 This is the only core module that touches a policy model, and it does so purely by
-duck typing (``model.get_action`` / ``model.policy.infer`` / ``model.observation_window``)
-— there is NO jax import here, so the module byte-compiles and imports on the client
-side. A ``CuroboCandidates`` seam is left for a planner-based source.
+duck typing (``model.update_observation_window`` / ``model.observation_window`` /
+``model.policy.infer`` / ``model.get_action``) — there is NO jax import here.
 """
 
 from __future__ import annotations
@@ -20,7 +26,69 @@ from typing import Any, Callable, List, Optional
 
 import numpy as np
 
+# A proposer turns the current (rendered) observation into K candidate chunks.
+ProposeFn = Callable[[Any, Any, int], List[np.ndarray]]
 
+# Default flow-matching noise shape (action horizon x action dim). Proposers accept
+# overrides, so a policy with a different shape can pass its own.
+AH_DEFAULT, AD_DEFAULT = 50, 32
+
+
+# ------------------------------------------------------------------ inference helper
+def _infer(model: Any, obs: Any, z: Optional[int] = None,
+           noise: Optional[np.ndarray] = None) -> np.ndarray:
+    """One action chunk from the model. Prefers ``policy.infer`` (mode/noise control);
+    falls back to ``model.get_action`` when the model exposes no such knobs.
+
+    ``z`` selects a latent mode via ``policy._sample_kwargs`` (ignored by single-mode
+    policies); ``noise`` is the flow-matching noise. Both are optional so this helper
+    serves the noise and mode proposers alike.
+    """
+    policy = getattr(model, "policy", None)
+    if policy is not None and hasattr(policy, "infer"):
+        try:
+            policy._sample_kwargs = {} if z is None else {"z": int(z)}
+        except Exception:  # noqa: BLE001 - single-mode policies lack this attr
+            pass
+        try:
+            out = policy.infer(obs, noise=noise)
+        except TypeError:
+            out = policy.infer(obs)          # single-mode policy: no noise kwarg
+        return np.asarray(out["actions"])
+    return np.asarray(model.get_action())    # last-resort deterministic fallback
+
+
+# ------------------------------------------------------------------ proposers
+def noise_propose(model: Any, obs: Any, k: int, *,
+                  action_horizon: int = AH_DEFAULT, action_dim: int = AD_DEFAULT,
+                  seed: int = 0) -> List[np.ndarray]:
+    """Policy-agnostic default: ``k`` flow-matching NOISE re-samples (single mode).
+
+    Draws ``k`` independent noises (deterministic, seeded) and infers a chunk for
+    each. Works for any flow/diffusion policy; a single-mode policy's outcome
+    diversity comes purely from the noise.
+    """
+    rng = np.random.default_rng(seed)
+    return [_infer(model, obs, z=None,
+                   noise=rng.standard_normal((action_horizon, action_dim)).astype(np.float32))
+            for _ in range(k)]
+
+
+def mode_propose(model: Any, obs: Any, k: int, *,
+                 action_horizon: int = AH_DEFAULT, action_dim: int = AD_DEFAULT,
+                 seed: int = 0) -> List[np.ndarray]:
+    """WTA-style helper: ``k`` latent action MODES ``z = 0..k-1`` under one fixed noise.
+
+    A LIBRARY helper for policies that expose latent action modes (e.g. a WTA head).
+    The single shared noise isolates the mode as the only varying factor. NOT used by
+    the search core or ``run_search`` — a policy opts into it via its own
+    ``propose_candidates`` hook (see the module docstring).
+    """
+    fixed = np.random.default_rng(seed).standard_normal((action_horizon, action_dim)).astype(np.float32)
+    return [_infer(model, obs, z=z, noise=fixed) for z in range(k)]
+
+
+# ------------------------------------------------------------------ sources
 class CandidateSource(ABC):
     """Proposes K candidate next-chunks at the task's current state.
 
@@ -35,89 +103,47 @@ class CandidateSource(ABC):
 
 
 class PolicyCandidates(CandidateSource):
-    """K candidate chunks from a deploy-policy model.
+    """K candidate chunks from a deploy-policy model, via a pluggable proposer.
 
     Parameters
     ----------
     model:
         A loaded deploy-policy model (``deploy_policy.get_model(...)``). Must expose
-        ``update_observation_window(rgb, state)`` and either
-        ``policy.infer(obs, noise=...)`` (preferred; enables mode/noise control) or
-        ``get_action()`` (deterministic fallback).
+        ``update_observation_window(rgb, state)`` + ``observation_window`` and either
+        ``policy.infer(obs, noise=...)`` or ``get_action()``.
     encode_obs:
         The policy module's ``encode_obs`` — turns ``task.get_obs()`` into
         ``(rgb_list, state)``.
-    mode:
-        ``"modes"`` samples latent modes ``z = 0..k-1`` under a single fixed noise
-        (isolates a WTA policy's modes); ``"noise"`` fixes ``z`` and draws ``k``
-        different noises (outcome diversity of a single-mode policy).
+    k:
+        Default number of candidates (the search passes its own ``k`` to
+        :meth:`propose`; this is a convenience default).
+    propose_fn:
+        ``propose_fn(model, obs, k) -> list[chunks]``. Defaults to
+        :func:`noise_propose` (the policy-agnostic fallback). A policy overrides it
+        with its own mechanism (e.g. :func:`mode_propose` for a WTA policy).
     chunk:
-        Number of leading action rows to keep from each sampled chunk (the executed
+        Number of leading action rows kept from each sampled chunk (the executed
         horizon, e.g. ``pi0_step``).
-    action_horizon, action_dim:
-        Shape of the flow-matching noise the model consumes (default 50 x 32).
-    noise_seed:
-        Base seed for reproducible noise draws.
     """
 
-    def __init__(self, model: Any, encode_obs: Callable[[dict], Any],
-                 mode: str = "modes", chunk: int = 50,
-                 action_horizon: int = 50, action_dim: int = 32,
-                 noise_seed: int = 0) -> None:
-        if mode not in ("modes", "noise"):
-            raise ValueError(f"mode must be 'modes' or 'noise', got {mode!r}")
+    def __init__(self, model: Any, encode_obs: Callable[[dict], Any], k: int = 6,
+                 propose_fn: Optional[ProposeFn] = None, chunk: int = 50) -> None:
         self.model = model
         self.encode_obs = encode_obs
-        self.mode = mode
+        self.k = int(k)
+        self.propose_fn: ProposeFn = propose_fn or noise_propose
         self.chunk = int(chunk)
-        self.ah = int(action_horizon)
-        self.ad = int(action_dim)
-        self.noise_seed = int(noise_seed)
-        self._call = 0  # advances the noise stream so repeated calls differ
 
-    # -- internals -------------------------------------------------------------
     def _render(self, task: Any) -> None:
         """Push the current observation into the model window (no sim mutation)."""
         rgb, state = self.encode_obs(task.get_obs())
         self.model.update_observation_window(rgb, state)
 
-    def _noises(self, k: int, salt: int) -> List[np.ndarray]:
-        rng = np.random.default_rng(self.noise_seed + salt)
-        return [rng.standard_normal((self.ah, self.ad)).astype(np.float32) for _ in range(k)]
-
-    def _sample(self, z: Optional[int], noise: Optional[np.ndarray]) -> np.ndarray:
-        """One chunk from the model. Prefers ``policy.infer`` (mode/noise control);
-        falls back to ``get_action`` when the model exposes no such knobs."""
-        policy = getattr(self.model, "policy", None)
-        obs = getattr(self.model, "observation_window", None)
-        if policy is not None and hasattr(policy, "infer"):
-            # WTA-style knob: pick the latent mode via _sample_kwargs
-            try:
-                policy._sample_kwargs = {} if z is None else {"z": int(z)}
-            except Exception:  # noqa: BLE001 - single-mode policies lack this attr
-                pass
-            try:
-                out = policy.infer(obs, noise=noise)
-            except TypeError:
-                # single-mode policy: no noise kwarg
-                out = policy.infer(obs)
-            return np.asarray(out["actions"])
-        # last-resort deterministic fallback
-        return np.asarray(self.model.get_action())
-
-    # -- public ---------------------------------------------------------------
     def propose(self, task: Any, k: int) -> List[np.ndarray]:
         self._render(task)
-        salt = self._call * 1000
-        self._call += 1
-        if self.mode == "modes":
-            zs: List[Optional[int]] = list(range(k))
-            fixed = self._noises(1, salt)[0]
-            noises = [fixed] * k
-        else:  # "noise"
-            zs = [0] * k
-            noises = self._noises(k, salt)
-        return [self._sample(zs[i], noises[i])[:self.chunk] for i in range(k)]
+        obs = getattr(self.model, "observation_window", None)
+        chunks = self.propose_fn(self.model, obs, k)
+        return [np.asarray(c)[:self.chunk] for c in chunks]
 
 
 class CuroboCandidates(CandidateSource):
