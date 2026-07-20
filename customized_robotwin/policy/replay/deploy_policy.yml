@@ -1,0 +1,43 @@
+# Replay policy config — deterministic playback of a searched motion Plan.
+#
+# The replay policy runs NO inference; it streams the raw action chunks stored in a
+# lookahead Plan. Point it at a plan store (a dir of seed<N>.json) or a single plan,
+# and choose how strictly to verify the scene it replays into via the pins block.
+
+# Basic experiment configuration (kept for interface parity with the other policies)
+policy_name: replay
+task_name: null
+task_config: null
+ckpt_setting: null
+seed: null                     # configured seed used to pick a plan from plan_dir
+instruction_type: unseen
+
+# ── Plan store ───────────────────────────────────────────────────────────────
+# plan_dir: a directory produced by run_search, e.g.
+#   <out>/<task>/<task_config>/  containing seed<N>.json plan files.
+# plan_path: a single plan json (used when plan_dir is not a per-seed store).
+plan_dir: null
+plan_path: null
+# chunk: rows emitted per get_action; null -> use the plan's control.chunk.
+chunk: null
+
+# Rollout collection parameters (used by collect_rollout_client.py)
+collect_num: 100
+collect_fixed_seed: true       # replay a fixed seed's plan; skip the expert seed search
+action_noise_var: 0
+
+# ── Verification pins ────────────────────────────────────────────────────────
+# Each pin: a bare level string ("enforce" | "warn" | "off"), or {level, atol}.
+# Default policy is all-enforce; relax any single pin here. The t0 fingerprint is
+# the gray-zone arbiter — a "free" replay knob that perturbs the seeded scene is
+# caught by fingerprint_t0.
+pins:
+  provenance: warn             # harness commit / config hash drift across worktrees is common
+  task_config: enforce         # task_name + task_config must match
+  embodiment: enforce
+  control: enforce             # action_dim / chunk must match
+  fingerprint_t0:              # the seeded-scene arbiter
+    level: enforce
+    atol: 1.0e-5
+  fingerprint_terminal: warn   # informative; replay may legitimately settle differently
+  success: warn                # report if replay success != plan success
