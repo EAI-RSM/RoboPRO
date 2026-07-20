@@ -2,10 +2,16 @@
 
 A :class:`SearchStrategy` explores candidate chunk sequences from a root snapshot,
 branching with :mod:`lookahead.rollback` (snapshot / restore) and ranking branches
-with a :class:`~lookahead.fitness.Fitness`. The output is a :class:`SearchResult`
-carrying the winning path's **raw action sequence** (the concatenated committed
-chunks) — NOT the modes/noise that produced it — so a downstream replay policy can
-reproduce the trajectory by pure action playback.
+with a :class:`~lookahead.fitness.Fitness`. It returns the **top-M distinct plans**
+(``List[SearchResult]``, best first) — each carrying its winning path's **raw action
+sequence** (the concatenated committed chunks), NOT the modes/noise that produced it
+— so a downstream replay policy can reproduce each trajectory by pure action
+playback.
+
+``m`` defaults to 1, in which case the returned list holds exactly the single best
+plan (identical to the pre-top-M behaviour). The top-M are drawn from ALL scored
+expansions seen during the search and deduped by the committed candidate-index path,
+so near-identical plans are not returned twice.
 
 :class:`BeamSearch` is the default. :class:`MonteCarloSearch` and
 :class:`FullTreeSearch` are provided as simple alternative strategies / extension
@@ -16,7 +22,6 @@ No jax / no policy imports.
 
 from __future__ import annotations
 
-import itertools
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
@@ -30,25 +35,25 @@ from .fitness import Fitness
 
 @dataclass
 class SearchResult:
-    """The winning branch of a search.
+    """One ranked branch of a search.
 
     Attributes
     ----------
     actions:
         The committed raw action sequence, ``float`` array ``[T, action_dim]`` =
-        every action row executed along the winning path (concatenated chunks).
-        This is what a replay policy plays back.
+        every action row executed along this path (concatenated chunks). This is
+        what a replay policy plays back.
     score:
-        The winning outcome's fitness score (lower = better), as a tuple.
+        This outcome's fitness score (lower = better), as a tuple.
     candidate_indices:
         The candidate index chosen at each committed step (length = number of
-        committed chunks). Provenance only — replay uses ``actions``, not these.
+        committed chunks). Provenance + the dedup key; replay uses ``actions``.
     outcome:
-        The terminal outcome dict from the fitness at the winning leaf.
+        The terminal outcome dict from the fitness at this leaf.
     success:
         ``outcome["success"]`` convenience copy.
     depth:
-        Number of committed chunks along the winning path.
+        Number of committed chunks along this path.
     root_fingerprint, terminal_fingerprint:
         State fingerprints at t0 and at the scored terminal, for replay verification.
     """
@@ -95,26 +100,57 @@ def _result_from_node(node: _Node, root_fp: np.ndarray) -> SearchResult:
     )
 
 
+def _rank_nodes(nodes: List[_Node], m: int) -> List[_Node]:
+    """Top-``m`` DISTINCT nodes by score (best first).
+
+    Distinctness is by the committed candidate-index path, so two paths with the
+    same commit sequence collapse to their best-scoring instance and near-identical
+    plans are not returned twice. Ties keep the first (best) occurrence. The result
+    is never empty (there is always at least the root).
+    """
+    m = max(1, int(m))
+    seen: set = set()
+    ranked: List[_Node] = []
+    for node in sorted(nodes):                      # ascending score
+        key = tuple(node.indices)
+        if key in seen:
+            continue
+        seen.add(key)
+        ranked.append(node)
+        if len(ranked) >= m:
+            break
+    return ranked
+
+
 class SearchStrategy(ABC):
-    """Explore the future-tree from a root snapshot and return the best branch."""
+    """Explore the future-tree from a root snapshot and return the top-M branches."""
 
     @abstractmethod
     def search(self, task: Any, root_snapshot: Dict[str, Any],
                candidates: CandidateSource, fitness: Fitness,
                depth: Optional[int] = None,
-               context: Optional[Dict[str, Any]] = None) -> SearchResult:
-        """Run the search. ``context`` defaults to ``fitness.make_context(task)``
-        captured at the root; ``depth`` overrides the strategy's default depth."""
+               context: Optional[Dict[str, Any]] = None,
+               m: int = 1) -> List[SearchResult]:
+        """Run the search and return the top-``m`` distinct plans (best first).
+
+        ``context`` defaults to ``fitness.make_context(task)`` captured at the root;
+        ``depth`` overrides the strategy's default depth. With ``m == 1`` the list
+        holds exactly the single best plan. The task is left restored at the best
+        (rank-0) plan's scored terminal state.
+        """
 
 
 class BeamSearch(SearchStrategy):
     """Beam search over committed chunks (the default strategy).
 
     At each depth every beam node proposes ``k`` candidate chunks; each candidate is
-    branched (restore node -> apply chunk -> score outcome -> snapshot), and the top
-    ``width`` expansions by fitness are kept. The best-scoring node found is the
-    winner. When ``stop_on_success`` (default) a fully successful best node ends the
-    search early. The committed RAW ACTIONS of the winner are recorded (not modes).
+    branched (restore node -> apply chunk -> score outcome -> snapshot) and every
+    scored child is retained in a pool. The top ``width`` expansions by fitness
+    survive into the next beam. The top-M are drawn from the FULL pool of scored
+    expansions (not just the pruned survivors), deduped by candidate-index path.
+    When ``stop_on_success`` (default) the depth loop stops once the global-best node
+    is a success, but the returned list is still filled from everything scored so
+    far. The committed RAW ACTIONS of each ranked node are recorded (not modes).
 
     Reasonable defaults: ``width=3``, ``k=6``, ``depth=4``.
     """
@@ -129,27 +165,25 @@ class BeamSearch(SearchStrategy):
     def search(self, task: Any, root_snapshot: Dict[str, Any],
                candidates: CandidateSource, fitness: Fitness,
                depth: Optional[int] = None,
-               context: Optional[Dict[str, Any]] = None) -> SearchResult:
+               context: Optional[Dict[str, Any]] = None,
+               m: int = 1) -> List[SearchResult]:
         depth = self.depth if depth is None else int(depth)
         ctx = fitness.make_context(task) if context is None else context
         root_fp = np.asarray(root_snapshot["fingerprint"], dtype=np.float64)
 
-        # seed the beam with the root (no actions committed yet)
         rollback.restore(task, root_snapshot)
         root_outcome = fitness.outcome(task, ctx)
-        beam: List[_Node] = [
-            _Node(score=fitness.score(root_outcome), snapshot=root_snapshot,
-                  actions=[], indices=[], outcome=root_outcome,
-                  success=bool(root_outcome.get("success", False)))
-        ]
-        best: _Node = beam[0]
+        root_node = _Node(score=fitness.score(root_outcome), snapshot=root_snapshot,
+                          actions=[], indices=[], outcome=root_outcome,
+                          success=bool(root_outcome.get("success", False)))
+        beam: List[_Node] = [root_node]
+        pool: List[_Node] = [root_node]  # every scored node ever, for the top-M
 
         for _d in range(depth):
             expansions: List[_Node] = []
             for node in beam:
                 if node.success:
-                    # already-successful nodes are carried forward unchanged
-                    expansions.append(node)
+                    expansions.append(node)      # survive in the beam (already pooled)
                     continue
                 rollback.restore(task, node.snapshot)
                 cand_chunks = candidates.propose(task, self.k)
@@ -157,32 +191,33 @@ class BeamSearch(SearchStrategy):
                     rollback.restore(task, node.snapshot)
                     rollback.apply_chunk(task, chunk)
                     outcome = fitness.outcome(task, ctx)
-                    snap = rollback.snapshot(task)
-                    expansions.append(_Node(
-                        score=fitness.score(outcome), snapshot=snap,
+                    child = _Node(
+                        score=fitness.score(outcome), snapshot=rollback.snapshot(task),
                         actions=node.actions + [np.asarray(r) for r in chunk],
                         indices=node.indices + [ci], outcome=outcome,
-                        success=bool(outcome.get("success", False))))
+                        success=bool(outcome.get("success", False)))
+                    expansions.append(child)
+                    pool.append(child)
             if not expansions:
                 break
-            expansions.sort()  # ascending score (lower = better)
+            expansions.sort()                      # ascending score (lower = better)
             beam = expansions[:self.width]
-            if beam[0].score < best.score:
-                best = beam[0]
-            if self.stop_on_success and best.success:
+            if self.stop_on_success and min(pool).success:
                 break
 
-        # leave the task in the scored terminal state of the winner
-        rollback.restore(task, best.snapshot)
-        return _result_from_node(best, root_fp)
+        ranked = _rank_nodes(pool, m)
+        rollback.restore(task, ranked[0].snapshot)
+        return [_result_from_node(n, root_fp) for n in ranked]
 
 
 class MonteCarloSearch(SearchStrategy):
-    """Random-rollout search: ``n_samples`` independent depth-long chains.
+    """Random-rollout search: up to ``n_samples`` independent depth-long chains.
 
     Each sample restores the root and, at every step, proposes ``k`` candidates and
-    commits a uniformly random one; the best terminal (by fitness) wins. A cheap,
-    unbiased baseline / extension point next to :class:`BeamSearch`.
+    commits a uniformly random one; every terminal is pooled and the top-M distinct
+    are returned. When ``stop_on_success`` it stops early once a success has been
+    found AND at least ``m`` distinct plans are in the pool. A cheap, unbiased
+    baseline / extension point next to :class:`BeamSearch`.
     """
 
     def __init__(self, n_samples: int = 8, k: int = 6, depth: int = 4,
@@ -196,7 +231,8 @@ class MonteCarloSearch(SearchStrategy):
     def search(self, task: Any, root_snapshot: Dict[str, Any],
                candidates: CandidateSource, fitness: Fitness,
                depth: Optional[int] = None,
-               context: Optional[Dict[str, Any]] = None) -> SearchResult:
+               context: Optional[Dict[str, Any]] = None,
+               m: int = 1) -> List[SearchResult]:
         depth = self.depth if depth is None else int(depth)
         ctx = fitness.make_context(task) if context is None else context
         root_fp = np.asarray(root_snapshot["fingerprint"], dtype=np.float64)
@@ -204,9 +240,11 @@ class MonteCarloSearch(SearchStrategy):
 
         rollback.restore(task, root_snapshot)
         root_outcome = fitness.outcome(task, ctx)
-        best = _Node(score=fitness.score(root_outcome), snapshot=root_snapshot,
-                     actions=[], indices=[], outcome=root_outcome,
-                     success=bool(root_outcome.get("success", False)))
+        pool: List[_Node] = [
+            _Node(score=fitness.score(root_outcome), snapshot=root_snapshot,
+                  actions=[], indices=[], outcome=root_outcome,
+                  success=bool(root_outcome.get("success", False)))]
+        keys: set = {()}
 
         for _s in range(self.n_samples):
             rollback.restore(task, root_snapshot)
@@ -227,23 +265,25 @@ class MonteCarloSearch(SearchStrategy):
                 success = bool(outcome.get("success", False))
                 if self.stop_on_success and success:
                     break
-            node = _Node(score=fitness.score(outcome), snapshot=rollback.snapshot(task),
-                         actions=actions, indices=indices, outcome=outcome, success=success)
-            if node.score < best.score:
-                best = node
-            if self.stop_on_success and best.success:
+            pool.append(_Node(score=fitness.score(outcome),
+                              snapshot=rollback.snapshot(task), actions=actions,
+                              indices=indices, outcome=outcome, success=success))
+            keys.add(tuple(indices))
+            if self.stop_on_success and any(n.success for n in pool) and len(keys) >= max(1, int(m)):
                 break
 
-        rollback.restore(task, best.snapshot)
-        return _result_from_node(best, root_fp)
+        ranked = _rank_nodes(pool, m)
+        rollback.restore(task, ranked[0].snapshot)
+        return [_result_from_node(n, root_fp) for n in ranked]
 
 
 class FullTreeSearch(SearchStrategy):
     """Exhaustive DFS over the full ``k**depth`` future-tree.
 
-    Enumerates every candidate sequence and keeps the best terminal. Correct but
-    exponential — guarded by ``max_leaves`` (raises if the tree is too large). Use
-    only with small ``k``/``depth``; :class:`BeamSearch` is the practical default.
+    Enumerates every candidate sequence, pools every scored node and returns the
+    top-M distinct. Correct but exponential — guarded by ``max_leaves`` (raises if
+    the tree is too large). Use only with small ``k``/``depth``; :class:`BeamSearch`
+    is the practical default.
     """
 
     def __init__(self, k: int = 3, depth: int = 3, max_leaves: int = 512,
@@ -256,7 +296,8 @@ class FullTreeSearch(SearchStrategy):
     def search(self, task: Any, root_snapshot: Dict[str, Any],
                candidates: CandidateSource, fitness: Fitness,
                depth: Optional[int] = None,
-               context: Optional[Dict[str, Any]] = None) -> SearchResult:
+               context: Optional[Dict[str, Any]] = None,
+               m: int = 1) -> List[SearchResult]:
         depth = self.depth if depth is None else int(depth)
         n_leaves = self.k ** depth
         if n_leaves > self.max_leaves:
@@ -269,13 +310,13 @@ class FullTreeSearch(SearchStrategy):
 
         rollback.restore(task, root_snapshot)
         root_outcome = fitness.outcome(task, ctx)
-        best = _Node(score=fitness.score(root_outcome), snapshot=root_snapshot,
-                     actions=[], indices=[], outcome=root_outcome,
-                     success=bool(root_outcome.get("success", False)))
+        pool: List[_Node] = [
+            _Node(score=fitness.score(root_outcome), snapshot=root_snapshot,
+                  actions=[], indices=[], outcome=root_outcome,
+                  success=bool(root_outcome.get("success", False)))]
 
         def dfs(snap: Dict[str, Any], actions: List[np.ndarray],
                 indices: List[int], d: int) -> None:
-            nonlocal best
             if d == depth:
                 return
             rollback.restore(task, snap)
@@ -290,13 +331,13 @@ class FullTreeSearch(SearchStrategy):
                              actions=actions + [np.asarray(r) for r in chunk],
                              indices=indices + [ci], outcome=outcome,
                              success=bool(outcome.get("success", False)))
-                if node.score < best.score:
-                    best = node
+                pool.append(node)
                 dfs(child_snap, node.actions, node.indices, d + 1)
 
         dfs(root_snapshot, [], [], 0)
-        rollback.restore(task, best.snapshot)
-        return _result_from_node(best, root_fp)
+        ranked = _rank_nodes(pool, m)
+        rollback.restore(task, ranked[0].snapshot)
+        return [_result_from_node(n, root_fp) for n in ranked]
 
 
 # Registry so a CLI ``--strategy <name>`` resolves a strategy class.

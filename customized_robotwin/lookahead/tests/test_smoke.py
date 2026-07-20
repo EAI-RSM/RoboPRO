@@ -240,7 +240,9 @@ def test_beam_search_finds_success_and_replays():
     root = rb.snapshot(task)
     cands = FakeCandidates(base=0.08, chunk_len=4)
     fit = fit_mod.OracleFitness()
-    res = search_mod.BeamSearch(width=3, k=4, depth=4).search(task, root, cands, fit)
+    results = search_mod.BeamSearch(width=3, k=4, depth=4).search(task, root, cands, fit)
+    assert isinstance(results, list) and len(results) == 1     # m defaults to 1
+    res = results[0]
     assert res.success is True
     assert res.depth >= 1
     assert res.actions.shape[1] == 14
@@ -253,6 +255,38 @@ def test_beam_search_finds_success_and_replays():
     assert np.allclose(rb.state_fingerprint(task), res.terminal_fingerprint, atol=1e-6)
 
 
+def test_top_m_ranked_distinct_ordered():
+    task = FakeTask(goal=1.0)
+    root = rb.snapshot(task)
+    cands = FakeCandidates(base=0.08, chunk_len=4)
+    fit = fit_mod.OracleFitness()
+    M = 5
+    results = search_mod.BeamSearch(width=3, k=4, depth=4).search(
+        task, root, cands, fit, m=M)
+    assert 1 < len(results) <= M                          # <= M plans
+    # score-ordered (best first), non-decreasing
+    scores = [r.score for r in results]
+    assert scores == sorted(scores)
+    # distinct by committed candidate-index path (no near-identical plans)
+    paths = [tuple(r.candidate_indices) for r in results]
+    assert len(set(paths)) == len(paths)
+    # rank-0 is the single-best plan (identical to m=1)
+    best1 = search_mod.BeamSearch(width=3, k=4, depth=4).search(task, root, cands, fit)[0]
+    assert results[0].score == best1.score
+    assert np.allclose(results[0].actions, best1.actions, atol=1e-6)
+
+    # MonteCarlo + FullTree also honour m (<= M, distinct, ordered)
+    for strat in (search_mod.MonteCarloSearch(n_samples=20, k=4, depth=4, seed=1),
+                  search_mod.FullTreeSearch(k=3, depth=3, max_leaves=64)):
+        t = FakeTask(goal=1.0)
+        r = rb.snapshot(t)
+        rs = strat.search(t, r, cands, fit, m=M)
+        assert 1 <= len(rs) <= M
+        assert [x.score for x in rs] == sorted(x.score for x in rs)
+        ps = [tuple(x.candidate_indices) for x in rs]
+        assert len(set(ps)) == len(ps)
+
+
 def test_montecarlo_and_fulltree():
     fit = fit_mod.OracleFitness()
     cands = FakeCandidates(base=0.12, chunk_len=4)
@@ -260,13 +294,13 @@ def test_montecarlo_and_fulltree():
     task = FakeTask(goal=1.0)
     root = rb.snapshot(task)
     mc = search_mod.MonteCarloSearch(n_samples=12, k=4, depth=4, seed=0).search(
-        task, root, cands, fit)
+        task, root, cands, fit)[0]
     assert mc.success is True
 
     task2 = FakeTask(goal=1.0)
     root2 = rb.snapshot(task2)
     ft = search_mod.FullTreeSearch(k=2, depth=3, max_leaves=64).search(
-        task2, root2, cands, fit)
+        task2, root2, cands, fit)[0]
     assert ft.success is True
     # replay verify for fulltree too
     rb.restore(task2, root2)
@@ -290,7 +324,7 @@ def test_plan_save_load_roundtrip():
     task = FakeTask(goal=1.0)
     root = rb.snapshot(task)
     res = search_mod.BeamSearch(width=3, k=4, depth=4).search(
-        task, root, FakeCandidates(), fit_mod.OracleFitness())
+        task, root, FakeCandidates(), fit_mod.OracleFitness())[0]
     spec = plan_mod.TaskSpec(
         task_name="fake_reach", task_config="unit", seed=42,
         embodiment={"embodiment": ["aloha"], "embodiment_name": "aloha"},

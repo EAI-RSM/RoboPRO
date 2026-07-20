@@ -113,7 +113,8 @@ def load_candidate(candidate_policy: str, usr_args: Dict[str, Any]):
 
 
 def build_task_spec(task_name: str, task_config: str, seed: int, args: Dict[str, Any],
-                    action_dim: int, chunk: int, repo_dir: str) -> "plan_mod.TaskSpec":
+                    action_dim: int, chunk: int, repo_dir: str,
+                    created_at: Optional[str] = None) -> "plan_mod.TaskSpec":
     """Assemble the PINNED TaskSpec from the resolved task args + provenance."""
     control = {
         "action_dim": int(action_dim),
@@ -133,7 +134,7 @@ def build_task_spec(task_name: str, task_config: str, seed: int, args: Dict[str,
         provenance={
             "robotwin_commit": git_head(repo_dir),
             "bench_config_hash": config_hash(task_config),
-            "created_at": now_iso(),
+            "created_at": created_at or now_iso(),
         },
     )
 
@@ -189,54 +190,65 @@ def run(args: argparse.Namespace) -> str:
     strategy = search_mod.build_strategy(args.strategy, width=args.width, k=args.k,
                                          depth=args.depth)
 
-    # 3) search the future-tree
-    result = strategy.search(task, root, candidates, fitness, depth=args.depth)
-    action_dim = int(result.actions.shape[1]) if result.actions.size else 0
+    # 3) search the future-tree for the top-M distinct plans (best first)
+    top_m = max(1, int(args.top_m))
+    results = strategy.search(task, root, candidates, fitness, depth=args.depth, m=top_m)
     print(f"[run_search] {args.task}/{args.task_config} seed{args.seed}: "
-          f"strategy={args.strategy} success={result.success} score={result.score} "
-          f"depth={result.depth} n_actions={len(result.actions)}", flush=True)
+          f"strategy={args.strategy} top_m={top_m} got={len(results)} "
+          f"best_success={results[0].success} best_score={results[0].score}", flush=True)
     task.close_env()
 
-    # 4) VERIFY: fresh from-start raw-action replay reproduces the searched terminal
+    # 4+5) VERIFY each ranked plan by a fresh from-start replay, then write it.
     atol = args.atol
-    t0_fp, term_fp, replay_success = verify_from_start(
-        args.task, args.task_config, args.seed, result.actions, atol)
-    fp_match = (term_fp.shape == result.terminal_fingerprint.shape
-                and bool(np.allclose(term_fp, result.terminal_fingerprint, atol=atol, rtol=0.0)))
-    success_match = (replay_success == result.success)
-    verified = bool(fp_match and success_match)
-    if not verified:
-        print(f"\033[93m[run_search] VERIFY MISMATCH fp_match={fp_match} "
-              f"success_match={success_match} (search={result.success} "
-              f"replay={replay_success}) — writing plan with verified=False\033[0m",
-              flush=True)
+    created_at = now_iso()                          # one timestamp across all ranks
+    out_dir = os.path.join(args.out, args.task, args.task_config)
+    out_paths = []
+    for rank, result in enumerate(results):
+        action_dim = int(result.actions.shape[1]) if result.actions.size else 0
+        t0_fp, term_fp, replay_success = verify_from_start(
+            args.task, args.task_config, args.seed, result.actions, atol)
+        fp_match = (term_fp.shape == result.terminal_fingerprint.shape
+                    and bool(np.allclose(term_fp, result.terminal_fingerprint, atol=atol, rtol=0.0)))
+        success_match = (replay_success == result.success)
+        verified = bool(fp_match and success_match)
+        if not verified:
+            print(f"\033[93m[run_search] rank{rank} VERIFY MISMATCH fp_match={fp_match} "
+                  f"success_match={success_match} (search={result.success} "
+                  f"replay={replay_success}) — writing plan with verified=False\033[0m",
+                  flush=True)
 
-    # 5) assemble + write the Plan
-    spec = build_task_spec(args.task, args.task_config, args.seed, task_args,
-                           action_dim, chunk, repo_dir)
-    plan = plan_mod.Plan(
-        task_spec=spec,
-        actions=result.actions.tolist(),
-        fingerprints={"t0": t0_fp.tolist(), "terminal": term_fp.tolist()},
-        meta={
-            "strategy": args.strategy,
-            "strategy_params": {"width": args.width, "k": args.k, "depth": args.depth},
-            "fitness": args.fitness,
-            "candidate_policy": args.candidate_policy,
-            "candidate_mode": args.candidate_mode,
-            "score": list(result.score),
-            "outcome": result.outcome,
-            "success": bool(result.success),
-            "candidate_indices": result.candidate_indices,
-            "verified": verified,
-            "verify": {"fingerprint_match": fp_match, "success_match": success_match,
-                       "replay_success": replay_success, "atol": atol},
-        },
-    )
-    out_path = os.path.join(args.out, args.task, args.task_config, f"seed{args.seed}.json")
-    plan_mod.save(plan, out_path)
-    print(f"[run_search] wrote {out_path} (verified={verified})", flush=True)
-    return out_path
+        spec = build_task_spec(args.task, args.task_config, args.seed, task_args,
+                               action_dim, chunk, repo_dir, created_at=created_at)
+        plan = plan_mod.Plan(
+            task_spec=spec,
+            actions=result.actions.tolist(),
+            fingerprints={"t0": t0_fp.tolist(), "terminal": term_fp.tolist()},
+            meta={
+                "strategy": args.strategy,
+                "strategy_params": {"width": args.width, "k": args.k, "depth": args.depth},
+                "fitness": args.fitness,
+                "candidate_policy": args.candidate_policy,
+                "candidate_mode": args.candidate_mode,
+                "rank": rank,
+                "top_m": top_m,
+                "score": list(result.score),
+                "outcome": result.outcome,
+                "success": bool(result.success),
+                "candidate_indices": result.candidate_indices,
+                "verified": verified,
+                "verify": {"fingerprint_match": fp_match, "success_match": success_match,
+                           "replay_success": replay_success, "atol": atol},
+            },
+        )
+        # rank-0 -> seed<N>.json; rank-r -> seed<N>_rank<r>.json
+        fname = f"seed{args.seed}.json" if rank == 0 else f"seed{args.seed}_rank{rank}.json"
+        out_path = os.path.join(out_dir, fname)
+        plan_mod.save(plan, out_path)
+        print(f"[run_search] wrote {out_path} (rank={rank} verified={verified} "
+              f"success={result.success} score={result.score})", flush=True)
+        out_paths.append(out_path)
+
+    return out_paths[0]
 
 
 def parse_args(argv=None) -> argparse.Namespace:
@@ -258,6 +270,9 @@ def parse_args(argv=None) -> argparse.Namespace:
                    help="disable the distance-to-goal tiebreak in OracleFitness")
     p.add_argument("--noise_seed", type=int, default=1234)
     p.add_argument("--atol", type=float, default=1e-5, help="fingerprint match tolerance")
+    p.add_argument("--top-m", "--top_m", dest="top_m", type=int, default=1,
+                   help="number of top distinct plans to emit (rank-0 -> seed<N>.json, "
+                        "rank-r -> seed<N>_rank<r>.json)")
     p.add_argument("--out", required=True, help="output dir root for plans")
     return p.parse_args(argv)
 

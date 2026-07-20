@@ -29,7 +29,7 @@ masks, event labels, language relabeling, …) without changing the outcome.
 | `rollback.py` | `snapshot` / `restore` / `apply_chunk` / `settle` / `state_fingerprint` + the `TaskAdapter` Protocol. PhysX `pack()`/`unpack()` **plus** controller drive targets, and the critical `task.eval_success = False` reset on restore. |
 | `candidates.py` | `CandidateSource` ABC; `PolicyCandidates` (reuse a deploy-policy model; K chunks by latent mode `z` or by K noises). `CuroboCandidates` seam. |
 | `fitness.py` | `Fitness` ABC; `OracleFitness` = `({HARD:0, SOFT:1}.get(tier,2), dist_to_goal)`, minimised. Collision/distance terms are optional so target-less tasks fall back to success-only. |
-| `search.py` | `SearchStrategy` ABC; `BeamSearch` (default), `MonteCarloSearch`, `FullTreeSearch`. Returns a `SearchResult` carrying the winning path's **raw actions** (not modes). |
+| `search.py` | `SearchStrategy` ABC; `BeamSearch` (default), `MonteCarloSearch`, `FullTreeSearch`. `search(..., m=1) -> List[SearchResult]` returns the top-M distinct plans (best first), each carrying the winning path's **raw actions** (not modes). |
 | `plan.py` | `TaskSpec` / `Plan` dataclasses + JSON `save` / `load`. Self-contained, portable, inspectable; actions inline as nested lists. |
 | `pins.py` | `Pin` / `PinPolicy` / `PinViolation` — the configurable replay-time verification knob. |
 | `run_search.py` | CLI: build task → capture spec + provenance → search → **verify via from-start replay** → write plan. |
@@ -126,15 +126,20 @@ cd customized_robotwin
 python -m lookahead.run_search \
     --task put_milktea_on_shelf --task_config bench_demo_office_d8 --seed 40000 \
     --candidate_policy pi05 --policy_config policy/pi05/deploy_policy.yml \
-    --strategy beam --width 3 --k 6 --depth 4 --fitness oracle \
+    --strategy beam --width 3 --k 6 --depth 4 --fitness oracle --top-m 1 \
     --out /work/mohammed/datasets/lookahead_plans
 # -> /work/mohammed/datasets/lookahead_plans/put_milktea_on_shelf/bench_demo_office_d8/seed40000.json
 ```
 
+`--top-m M` (default 1) emits the top-M distinct plans: rank-0 →
+`seed<N>.json`, rank-r → `seed<N>_rank<r>.json`; each plan carries its `rank` and
+`score` in `meta` and is **verified independently**.
+
 `run_search` captures the full `TaskSpec` (incl. `domain_randomization`) + t0
-fingerprint + provenance, runs the search, then **verifies** by a from-start
-raw-action replay in a fresh scene at the same seed (apply the plan's actions → assert
-the terminal fingerprint / success reproduce the searched outcome) before writing the
+fingerprint + provenance, runs the search, then **verifies each ranked plan** by a
+from-start raw-action replay in a fresh scene at the same seed (apply the plan's
+actions → assert the terminal fingerprint / success reproduce the searched outcome)
+before writing the
 plan (`meta.verified`).
 
 ### 2. Replay a plan
