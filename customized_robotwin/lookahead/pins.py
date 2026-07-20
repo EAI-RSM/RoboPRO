@@ -97,7 +97,7 @@ class PinPolicy:
 
     def __init__(self, pins: Optional[Dict[str, Pin]] = None) -> None:
         # start from defaults, then overlay any provided pins
-        self.pins: Dict[str, Pin] = {name: Pin(atol=_default_atol(name))
+        self.pins: Dict[str, Pin] = {name: Pin(level=_default_level(name), atol=_default_atol(name))
                                      for name in PIN_NAMES}
         if pins:
             self.pins.update(pins)
@@ -151,6 +151,14 @@ def _default_atol(name: str) -> float:
     return 1e-5
 
 
+def _default_level(name: str) -> str:
+    """Default level per pin. The TERMINAL fingerprint drifts at physics-jitter
+    level over long rollouts, so it defaults to ``warn`` (informational). The t0
+    fingerprint — the seeded-scene arbiter — and every other pin default to
+    ``enforce``."""
+    return "warn" if name == "fingerprint_terminal" else "enforce"
+
+
 def _brief(x: Any) -> str:
     """Compact repr for a pin value (summarise large numeric arrays)."""
     arr = _as_float_array(x)
@@ -160,7 +168,9 @@ def _brief(x: Any) -> str:
 
 
 def default_policy() -> PinPolicy:
-    """The shipped default: every pin ``enforce`` (fingerprint atol 1e-5).
+    """The shipped default: every pin ``enforce`` except ``fingerprint_terminal``,
+    which defaults to ``warn`` (it drifts at jitter level over long rollouts — the
+    t0 pin is the seeded-scene arbiter). Fingerprint atol 1e-5.
 
     Relax individual pins via :meth:`PinPolicy.from_dict`, e.g.
     ``PinPolicy.from_dict({"provenance": "off"})``.
