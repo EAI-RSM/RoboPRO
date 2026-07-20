@@ -16,6 +16,7 @@ import importlib
 import json
 import traceback
 import os
+import subprocess
 import time
 import h5py
 from argparse import ArgumentParser
@@ -37,6 +38,49 @@ except Exception as _e:  # noqa: BLE001
 current_file_path = os.path.abspath(__file__)
 parent_directory = os.path.dirname(current_file_path)
 bench_root = Path(os.environ["BENCH_ROOT"])
+
+
+def _parse_env_bool(name, value):
+    normalized = value.strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    raise ValueError(f"{name} must be one of 1/0, true/false, yes/no, or on/off; got {value!r}")
+
+
+def _apply_relation_collection_env_overrides(args):
+    """Apply the small, documented Make/env override surface for graph runs."""
+    reachability = args.setdefault("benchmark_relations", {}).setdefault("reachable_by", {})
+    bool_overrides = {
+        "ROBOPRO_REACHABLE_BY_ENABLED": "enabled",
+        "ROBOPRO_REACHABLE_BY_MOVABLE_ONLY": "movable_only",
+        "ROBOPRO_REACHABLE_BY_CACHE_UNCHANGED": "cache_unchanged",
+    }
+    int_overrides = {
+        "ROBOPRO_REACHABLE_BY_FRAME_STRIDE": (reachability, "frame_stride", 1),
+        "ROBOPRO_REACHABLE_BY_POSE_DECIMALS": (reachability, "pose_round_decimals", 0),
+        "ROBOPRO_RELATION_OBSTACLE_DENSITY": (
+            args.setdefault("domain_randomization", {}), "obstacle_density", 0
+        ),
+        "ROBOPRO_RELATION_EPISODE_NUM": (args, "episode_num", 1),
+    }
+
+    for env_name, config_name in bool_overrides.items():
+        value = os.getenv(env_name)
+        if value not in (None, ""):
+            reachability[config_name] = _parse_env_bool(env_name, value)
+
+    for env_name, (destination, config_name, minimum) in int_overrides.items():
+        value = os.getenv(env_name)
+        if value in (None, ""):
+            continue
+        parsed = int(value)
+        if parsed < minimum:
+            raise ValueError(f"{env_name} must be >= {minimum}; got {parsed}")
+        destination[config_name] = parsed
+
+    return args
 
 
 def class_decorator(task_name):
@@ -79,6 +123,8 @@ def build_task_and_args(task_name, task_config):
         
     with open(task_config_path, "r", encoding="utf-8") as f:
         args = yaml.load(f.read(), Loader=yaml.FullLoader)
+
+    _apply_relation_collection_env_overrides(args)
 
     args['task_name'] = task_name
 
@@ -327,6 +373,12 @@ def run(TASK_ENV, args):
             st_idx += 1
 
         attempted_num, deleted_num, error_num = 0, 0, 0
+        existing_num = min(st_idx, args["episode_num"])
+        if existing_num >= args["episode_num"]:
+            print(
+                f"Dataset already complete: found {existing_num}/{args['episode_num']} "
+                f"requested HDF5 episode(s) in {os.path.abspath(args['save_path'])}"
+            )
 
         for episode_idx in range(st_idx, args["episode_num"]):
             if exist_hdf5(episode_idx):
@@ -453,12 +505,23 @@ def run(TASK_ENV, args):
                             pass
                 continue
 
-        command = f"cd description && bash gen_episode_instructions.sh {args['task_name']} {args['task_config']} {args['language_num']}"
-        os.system(command)
+        subprocess.run(
+            [
+                sys.executable,
+                "utils/generate_episode_instructions.py",
+                args["task_name"],
+                args["task_config"],
+                str(args["language_num"]),
+            ],
+            cwd="description",
+            check=True,
+        )
 
         _banner(f"COLLECTION SUMMARY · {args['task_name']} / {args['task_config']}")
         print(f"  {'episodes attempted':26s} {attempted_num}")
+        print(f"  {'already present':26s} {existing_num}")
         print(f"  {'kept in dataset':26s} {attempted_num - deleted_num - error_num}")
+        print(f"  {'dataset directory':26s} {os.path.abspath(args['save_path'])}")
         if deleted_num:
             print(f"  {'removed (task failed)':26s} {deleted_num}")
         if error_num:

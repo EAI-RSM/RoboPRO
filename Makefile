@@ -57,6 +57,16 @@ REL_OUTPUT_IMAGE ?=
 REL_WIDTH ?= 1400
 REL_HEIGHT ?= 900
 
+# Graph-rich relation validation flags. REACHABLE_BY_INTERVAL is measured in
+# exported frames; 1 evaluates every changed frame, 10 evaluates every tenth.
+REACHABLE_BY_ENABLED ?= 1
+REACHABLE_BY_INTERVAL ?= 10
+REACHABLE_BY_MOVABLE_ONLY ?= 1
+REACHABLE_BY_CACHE_UNCHANGED ?= 1
+REACHABLE_BY_POSE_DECIMALS ?= 3
+RELATION_OBSTACLE_DENSITY ?= 14
+RELATION_EPISODE_NUM ?= 1
+
 # Asset / install flags
 PYTHON_VERSION ?= 3.10
 ASSETS_DEST ?= $(ROOT_DIR)/benchmark/assets
@@ -104,6 +114,7 @@ endef
 
 .PHONY: help check-prereqs bootstrap sync download-assets link-assets configure-curobo-assets \
 	patch-curobo-config setup render-test verify-scene verify-rollout collect-data \
+	relation-validation \
 	precollect-seeds eval-direct eval-client policy-server eval-pi05-single eval-pi05-double \
 	collect-rollout-pi05 diag-kitchen-curobo inspect-benchmark-hdf5 visualize-benchmark-rollout \
 	visualize-relation-frame occluder-visibility reachability-map \
@@ -151,6 +162,10 @@ help:
 	'' \
 	'Data collection:' \
 	'  make collect-data             Run collect_data.sh for one task/config.' \
+	'  make relation-validation      Collect graph-rich dense-scene validation data.' \
+	'    Vars: TASK_NAME=put_sauce_can_in_basket GPU_ID=0 RELATION_EPISODE_NUM=1 RELATION_OBSTACLE_DENSITY=14' \
+	'      REACHABLE_BY_ENABLED=1 REACHABLE_BY_INTERVAL=10 REACHABLE_BY_MOVABLE_ONLY=1' \
+	'      REACHABLE_BY_CACHE_UNCHANGED=1 REACHABLE_BY_POSE_DECIMALS=3' \
 	'  make collect-rollout-pi05     Dual-env pi05 rollout collection.' \
 	'' \
 	'Policy eval:' \
@@ -264,6 +279,19 @@ verify-rollout:
 
 collect-data:
 	$(call RUN_IN_CUSTOMIZED,bash collect_data.sh "$(TASK_NAME)" "$(TASK_CONFIG)" "$(GPU_ID)")
+
+relation-validation: TASK_NAME = put_sauce_can_in_basket
+relation-validation: TASK_CONFIG = relation_validation_d14
+relation-validation:
+	$(call RUN_IN_CUSTOMIZED,\
+		export ROBOPRO_REACHABLE_BY_ENABLED="$(REACHABLE_BY_ENABLED)"; \
+		export ROBOPRO_REACHABLE_BY_FRAME_STRIDE="$(REACHABLE_BY_INTERVAL)"; \
+		export ROBOPRO_REACHABLE_BY_MOVABLE_ONLY="$(REACHABLE_BY_MOVABLE_ONLY)"; \
+		export ROBOPRO_REACHABLE_BY_CACHE_UNCHANGED="$(REACHABLE_BY_CACHE_UNCHANGED)"; \
+		export ROBOPRO_REACHABLE_BY_POSE_DECIMALS="$(REACHABLE_BY_POSE_DECIMALS)"; \
+		export ROBOPRO_RELATION_OBSTACLE_DENSITY="$(RELATION_OBSTACLE_DENSITY)"; \
+		export ROBOPRO_RELATION_EPISODE_NUM="$(RELATION_EPISODE_NUM)"; \
+		bash collect_data.sh "$(TASK_NAME)" "$(TASK_CONFIG)" "$(GPU_ID)")
 
 precollect-seeds:
 	$(call RUN_IN_CUSTOMIZED,$(PYTHON) script/precollect_eval_seeds.py "$(TASK_NAME)" "$(TASK_CONFIG)")

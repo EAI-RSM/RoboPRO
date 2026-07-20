@@ -68,6 +68,49 @@ Schema version `1.4.0` directly exports the following additional relations:
    entity for which the query was unavailable. It is a pose reachability label,
    not a guarantee that a task-specific grasp or full trajectory is feasible.
 
+### Reachability collection policy
+
+Reachability remains collision-aware when collection cost is reduced. The
+collector can filter queries to movable and target objects, evaluate only every
+configured number of changed-scene frames, and reuse a previous result only
+when the rounded poses of all catalogued scene entities are unchanged. A
+changed, skipped frame is exported with `reachable_by_valid=false`; it is never
+silently treated as unreachable. `reachable_by_evaluated[T]` records whether a
+fresh IK batch was run on each frame (as opposed to a valid cache reuse).
+
+Configure this under `benchmark_relations.reachable_by`:
+
+1. `enabled` enables the relation (default `true`).
+2. `frame_stride` controls fresh evaluation cadence for changed scenes
+   (default `1`, so ordinary exports preserve per-frame evaluation).
+3. `movable_only` restricts queries to movable or task-target entities
+   (default `true`).
+4. `cache_unchanged` allows exact scene-signature reuse (default `true`).
+5. `pose_round_decimals` controls pose-signature tolerance (default `3`).
+
+For the dense validation run, these parameters are exposed as Make variables:
+
+```bash
+make relation-validation \
+  GPU_ID=0 \
+  REACHABLE_BY_INTERVAL=10 \
+  REACHABLE_BY_MOVABLE_ONLY=1 \
+  REACHABLE_BY_CACHE_UNCHANGED=1 \
+  REACHABLE_BY_POSE_DECIMALS=3 \
+  RELATION_OBSTACLE_DENSITY=14 \
+  RELATION_EPISODE_NUM=1
+```
+
+Set `REACHABLE_BY_INTERVAL=1` for the highest temporal fidelity. Larger values
+reduce fresh IK calls; validity masks continue to distinguish skipped/unknown
+entries from evaluated negative reachability.
+
+These optimizations do not turn `reachable_by` into a contact relation.
+`raw_contact` describes contact that is occurring now; `reachable_by` is a
+prospective collision-aware IK feasibility query. Full grasp orientation,
+approach-path feasibility, gripper geometry, and task-specific constraints
+remain future refinements.
+
 Some benchmark-support exports also include auxiliary contact-derived signals
 that are useful for debugging and reconstruction but are not part of the
 canonical graph ontology:

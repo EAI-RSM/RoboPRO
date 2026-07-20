@@ -208,12 +208,20 @@ def _summarize_benchmark_support(root: h5py.File):
         in_matrix = state["in"][()] if "in" in state else None
         supports_matrix = state["supports"][()] if "supports" in state else None
         contains_matrix = state["contains"][()] if "contains" in state else None
+        containment_valid = state["containment_valid"][()] if "containment_valid" in state else None
+        contains_valid = state["contains_valid"][()] if "contains_valid" in state else None
         collides_with = state["collides_with"][()] if "collides_with" in state else None
         held_by = state["held_by"][()] if "held_by" in state else None
         reachable_by = state["reachable_by"][()] if "reachable_by" in state else None
+        reachable_by_valid = state["reachable_by_valid"][()] if "reachable_by_valid" in state else None
+        reachable_by_evaluated = state["reachable_by_evaluated"][()] if "reachable_by_evaluated" in state else None
         visible_to = state["visible_to"][()] if "visible_to" in state else None
+        visible_to_valid = state["visible_to_valid"][()] if "visible_to_valid" in state else None
+        visible_pixel_count = state["visible_pixel_count"][()] if "visible_pixel_count" in state else None
         part_of = state["part_of"][()] if "part_of" in state else None
         held_by_effector_names = _decode_string_array(state["held_by_effector_names"]) if "held_by_effector_names" in state else []
+        reachable_by_effector_names = _decode_string_array(state["reachable_by_effector_names"]) if "reachable_by_effector_names" in state else []
+        visible_to_camera_names = _decode_string_array(state["visible_to_camera_names"]) if "visible_to_camera_names" in state else []
         canonical_relation_names = _decode_string_array(state["canonical_relation_names"]) if "canonical_relation_names" in state else []
         implemented_relation_names = _decode_string_array(state["implemented_relation_names"]) if "implemented_relation_names" in state else []
         implemented_binary_relation_names = _decode_string_array(state["implemented_binary_relation_names"]) if "implemented_binary_relation_names" in state else []
@@ -240,12 +248,18 @@ def _summarize_benchmark_support(root: h5py.File):
             print(f"    held_by shape: {held_by.shape}")
         if reachable_by is not None:
             print(f"    reachable_by shape: {reachable_by.shape}")
+        if reachable_by_evaluated is not None:
+            print(f"    reachable_by fresh-evaluation frames: {int(np.count_nonzero(reachable_by_evaluated))}/{len(reachable_by_evaluated)}")
         if visible_to is not None:
             print(f"    visible_to shape: {visible_to.shape}")
         if part_of is not None:
             print(f"    part_of shape: {part_of.shape}")
         if held_by_effector_names:
             print(f"    held_by_effector_names: {held_by_effector_names}")
+        if reachable_by_effector_names:
+            print(f"    reachable_by_effector_names: {reachable_by_effector_names}")
+        if visible_to_camera_names:
+            print(f"    visible_to_camera_names: {visible_to_camera_names}")
         if canonical_relation_names:
             print(f"    canonical_relation_names: {canonical_relation_names}")
         if implemented_relation_names:
@@ -276,12 +290,45 @@ def _summarize_benchmark_support(root: h5py.File):
             checks["contains is inverse of in"] = (
                 in_matrix is not None and np.array_equal(contains_matrix, in_matrix.transpose(0, 2, 1))
             )
+        if containment_valid is not None:
+            checks["containment_valid matches in shape"] = (
+                in_matrix is not None and containment_valid.shape == in_matrix.shape
+            )
+            checks["true in edges are valid"] = (
+                in_matrix is not None and np.all(np.logical_or(~in_matrix, containment_valid))
+            )
+        if contains_valid is not None:
+            checks["contains_valid is inverse of containment_valid"] = (
+                containment_valid is not None
+                and np.array_equal(contains_valid, containment_valid.transpose(0, 2, 1))
+            )
         if held_by is not None:
             checks["held_by dims are (T,N,E)"] = held_by.ndim == 3
         if reachable_by is not None:
             checks["reachable_by dims are (T,N,E)"] = reachable_by.ndim == 3
+        if reachable_by_valid is not None:
+            checks["reachable_by_valid matches reachable_by shape"] = (
+                reachable_by is not None and reachable_by_valid.shape == reachable_by.shape
+            )
+            checks["true reachable_by edges are valid"] = (
+                reachable_by is not None and np.all(np.logical_or(~reachable_by, reachable_by_valid))
+            )
         if visible_to is not None:
             checks["visible_to dims are (T,N,C)"] = visible_to.ndim == 3
+        if visible_to_valid is not None:
+            checks["visible_to_valid matches visible_to shape"] = (
+                visible_to is not None and visible_to_valid.shape == visible_to.shape
+            )
+            checks["true visible_to edges are valid"] = (
+                visible_to is not None and np.all(np.logical_or(~visible_to, visible_to_valid))
+            )
+        if visible_pixel_count is not None:
+            checks["visible_pixel_count matches visible_to shape"] = (
+                visible_to is not None and visible_pixel_count.shape == visible_to.shape
+            )
+            checks["visible_to equals visible_pixel_count > 0"] = (
+                visible_to is not None and np.array_equal(visible_to, visible_pixel_count > 0)
+            )
         if part_of is not None:
             checks["part_of dims are (T,N,N)"] = part_of.ndim == 3
         if object_ids and raw_contact is not None:
@@ -294,6 +341,17 @@ def _summarize_benchmark_support(root: h5py.File):
             checks["same N across object_ids/part_of"] = part_of.shape[1] == len(object_ids)
         if held_by is not None and held_by_effector_names:
             checks["same E across held_by/effector_names"] = held_by.shape[2] == len(held_by_effector_names)
+        if reachable_by is not None and reachable_by_effector_names:
+            checks["same E across reachable_by/effector_names"] = (
+                reachable_by.shape[2] == len(reachable_by_effector_names)
+            )
+        if visible_to is not None and visible_to_camera_names:
+            checks["same C across visible_to/camera_names"] = (
+                visible_to.shape[2] == len(visible_to_camera_names)
+            )
+        catalog_ids = support["object_catalog"]["object_ids"][()].tolist() if "object_catalog" in support else []
+        if catalog_ids and object_ids:
+            checks["catalog object_ids match relation object_ids"] = catalog_ids == object_ids
         if on_matrix is not None and supports_matrix is not None:
             checks["supports is transpose of on (frame0)"] = np.array_equal(supports_matrix[0], on_matrix[0].T)
         for key, value in checks.items():
@@ -310,8 +368,8 @@ def _summarize_benchmark_support(root: h5py.File):
             event_types = sorted(set(_decode_string_array(events["event_type"])))
             print(f"    event_types: {event_types}")
 
-        if contact is not None and contact.shape[0] > 0:
-            frame0_edges = int(np.count_nonzero(np.triu(contact[0], k=1)))
+        if raw_contact is not None and raw_contact.shape[0] > 0:
+            frame0_edges = int(np.count_nonzero(np.triu(raw_contact[0], k=1)))
             print(f"    frame0 contact edges: {frame0_edges}")
         if grasped_by_code is not None and grasped_by_code.shape[0] > 0:
             frame0_grasped = int(np.count_nonzero(grasped_by_code[0] >= 0))

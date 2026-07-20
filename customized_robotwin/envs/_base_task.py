@@ -269,6 +269,16 @@ class Base_Task(gym.Env):
             self._benchmark_object_catalog_cache = None
         if not hasattr(self, "_benchmark_contact_event_log"):
             self._benchmark_contact_event_log = []
+        if not hasattr(self, "_benchmark_reachability_config"):
+            self._benchmark_reachability_config = {
+                "enabled": True,
+                "frame_stride": 1,
+                "movable_only": True,
+                "cache_unchanged": True,
+                "pose_round_decimals": 3,
+            }
+        if not hasattr(self, "_benchmark_reachability_cache"):
+            self._benchmark_reachability_cache = None
 
     # =========================================================== Init Task Env ===========================================================
     def _init_task_env_(self, table_xy_bias=[0, 0], table_height_bias=0, **kwags):
@@ -394,9 +404,35 @@ class Base_Task(gym.Env):
         self._benchmark_episode_record = None
         self._benchmark_object_catalog_cache = None
         self._benchmark_contact_event_log = []
+        relation_config = kwags.get("benchmark_relations", {}) or {}
+        reachability_config = relation_config.get("reachable_by", {}) or {}
+        self._benchmark_reachability_config = {
+            "enabled": bool(reachability_config.get("enabled", True)),
+            "frame_stride": max(1, int(reachability_config.get("frame_stride", 1))),
+            "movable_only": bool(reachability_config.get("movable_only", True)),
+            "cache_unchanged": bool(reachability_config.get("cache_unchanged", True)),
+            "pose_round_decimals": max(0, int(reachability_config.get("pose_round_decimals", 3))),
+        }
+        self._benchmark_reachability_cache = None
 
     def set_benchmark_export_context(self, task_config=None, config_snapshot=None, bench_subdir=None):
         self._ensure_benchmark_export_state()
+        # Several benchmark scene-family bases implement their own environment
+        # initialization instead of calling Base_Task._init_task_env_. Apply
+        # relation settings again from the resolved collection config here,
+        # immediately before replay/export, so every family uses the settings
+        # recorded in scenario_metadata.config_snapshot_json.
+        resolved_config = config_snapshot or {}
+        relation_config = resolved_config.get("benchmark_relations", {}) or {}
+        reachability_config = relation_config.get("reachable_by", {}) or {}
+        self._benchmark_reachability_config = {
+            "enabled": bool(reachability_config.get("enabled", True)),
+            "frame_stride": max(1, int(reachability_config.get("frame_stride", 1))),
+            "movable_only": bool(reachability_config.get("movable_only", True)),
+            "cache_unchanged": bool(reachability_config.get("cache_unchanged", True)),
+            "pose_round_decimals": max(0, int(reachability_config.get("pose_round_decimals", 3))),
+        }
+        self._benchmark_reachability_cache = None
         self._benchmark_export_context = {
             "task_config": task_config,
             "config_snapshot": deepcopy(config_snapshot),
@@ -967,15 +1003,28 @@ class Base_Task(gym.Env):
         return visible_to, visible_to_valid, visible_pixel_count, camera_names
 
     def _build_benchmark_reachability_relations(self, object_catalog, actor_by_id):
-        """Build collision-aware object-to-effector reachability via batched IK."""
+        """Build sampled collision-aware object-to-effector point reachability.
+
+        Only task-relevant movable entities are queried by default.  Unscheduled
+        frames whose collision-scene signature changed remain explicitly invalid;
+        an unchanged signature may safely reuse the last collision-aware IK result.
+        """
         object_count = len(object_catalog)
         reachable_by = np.zeros((object_count, 2), dtype=np.bool_)
         reachable_by_valid = np.zeros_like(reachable_by)
+        config = getattr(self, "_benchmark_reachability_config", {}) or {}
+        if not config.get("enabled", True):
+            return reachable_by, reachable_by_valid, False
+
         query_indices = []
         query_poses = []
         for object_idx, entry in enumerate(object_catalog):
             entity = actor_by_id.get(int(entry["object_id"]))
             if entity is None or entry.get("is_robot"):
+                continue
+            if config.get("movable_only", True) and not (
+                entry.get("is_movable", False) or entry.get("is_target", False)
+            ):
                 continue
             pose = self._get_benchmark_entity_pose(entity)
             if pose is None:
@@ -984,7 +1033,32 @@ class Base_Task(gym.Env):
             query_poses.append(list(np.asarray(pose.p, dtype=float)) + [1.0, 0.0, 0.0, 0.0])
 
         if not query_poses or not hasattr(self, "robot"):
-            return reachable_by, reachable_by_valid
+            return reachable_by, reachable_by_valid, False
+
+        decimals = config.get("pose_round_decimals", 3)
+        scene_signature = []
+        for object_id in sorted(actor_by_id):
+            entity = actor_by_id[object_id]
+            pose = self._get_benchmark_entity_pose(entity)
+            if pose is None:
+                continue
+            pose_values = np.concatenate((np.asarray(pose.p), np.asarray(pose.q)))
+            scene_signature.append((int(object_id), *np.round(pose_values, decimals=decimals).tolist()))
+        scene_signature = tuple(scene_signature)
+
+        cache = getattr(self, "_benchmark_reachability_cache", None)
+        if (
+            config.get("cache_unchanged", True)
+            and cache is not None
+            and cache.get("scene_signature") == scene_signature
+            and cache.get("query_indices") == tuple(query_indices)
+        ):
+            return cache["reachable_by"].copy(), cache["reachable_by_valid"].copy(), False
+
+        frame_stride = config.get("frame_stride", 1)
+        frame_idx = int(getattr(self, "FRAME_IDX", 0))
+        if frame_idx % frame_stride != 0:
+            return reachable_by, reachable_by_valid, False
 
         for effector_idx, method_name in enumerate(("left_check_ik_batch", "right_check_ik_batch")):
             method = getattr(self.robot, method_name, None)
@@ -999,7 +1073,13 @@ class Base_Task(gym.Env):
             reachable_by[query_indices, effector_idx] = results
             reachable_by_valid[query_indices, effector_idx] = True
 
-        return reachable_by, reachable_by_valid
+        self._benchmark_reachability_cache = {
+            "scene_signature": scene_signature,
+            "query_indices": tuple(query_indices),
+            "reachable_by": reachable_by.copy(),
+            "reachable_by_valid": reachable_by_valid.copy(),
+        }
+        return reachable_by, reachable_by_valid, True
 
     def _get_benchmark_effector_state(self, arm_tag: str) -> tuple[np.ndarray | None, bool]:
         if not hasattr(self, "robot"):
@@ -1188,7 +1268,7 @@ class Base_Task(gym.Env):
         visible_to, visible_to_valid, visible_pixel_count, camera_names = (
             self._build_benchmark_visibility_relations(object_catalog, actor_by_id)
         )
-        reachable_by, reachable_by_valid = self._build_benchmark_reachability_relations(
+        reachable_by, reachable_by_valid, reachable_by_evaluated = self._build_benchmark_reachability_relations(
             object_catalog, actor_by_id
         )
         collides_with = np.logical_and(
@@ -1219,6 +1299,7 @@ class Base_Task(gym.Env):
             "held_by": held_by,
             "reachable_by": reachable_by,
             "reachable_by_valid": reachable_by_valid,
+            "reachable_by_evaluated": np.bool_(reachable_by_evaluated),
             "reachable_by_effector_names": np.array(
                 [self.BENCHMARK_LEFT_EE_NAME, self.BENCHMARK_RIGHT_EE_NAME], dtype="S32"
             ),
