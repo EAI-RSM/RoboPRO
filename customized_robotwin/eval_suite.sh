@@ -59,8 +59,13 @@ else
 fi
 [ -n "$TASKS" ] || { echo "no tasks match: $TASK_SEL"; exit 1; }
 
-# ---- expand the config selector ----------------------------------------------
-CONFIGS=$(cd "$BENCH_ROOT/bench_task_config" && ls ${CONF_SEL}.yml 2>/dev/null | sed 's/\.yml$//')
+# ---- expand the config selector (comma-list and/or globs, each element) ------
+# split on commas via IFS (NOT $(...) word-splitting, which would glob the pattern
+# prematurely against the cwd); the glob is applied only at `ls ${pat}.yml`.
+IFS=',' read -ra _CONF_PATS <<< "$CONF_SEL"
+CONFIGS=$(cd "$BENCH_ROOT/bench_task_config" 2>/dev/null &&
+    for pat in "${_CONF_PATS[@]}"; do ls ${pat}.yml 2>/dev/null; done \
+    | sed 's/\.yml$//' | sort -u)
 [ -n "$CONFIGS" ] || { echo "no configs match: $CONF_SEL (in bench_task_config/)"; exit 1; }
 
 N_TASK=$(echo $TASKS | wc -w); N_CONF=$(echo $CONFIGS | wc -w)
