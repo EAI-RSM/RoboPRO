@@ -1,36 +1,49 @@
 """
-Phase 2 part 1 (#35): deterministic single-occluder spawn + visibility distribution.
+Phase 2 part 1 (#35): deterministic occluder-ring spawn + visibility distribution.
 
 Places the target (001_bottle id 9) in the upper third of the reachable region (in
-front of the back furniture) and spawns ONE tall milk-box occluder (038_milk-box id 2,
-scale 1.0) in a narrow band just in front (-y, robot/camera side) of the target -- no
-clutter, no binary search. Then measures the t=0 countertop `visible_fraction`
-distribution across seeds, reusing the Phase 1 harness (measurement + plotting).
+front of the back furniture) and spawns a RING of `--num-occluders` tall, skinny olive-oil
+occluders (029_olive-oil id 3, scale 1.0) equally spaced (2*pi/n apart) on a circle of
+radius `--offsets` around the target -- n=1 is a single box directly in front (-y, the
+robot/camera side). No clutter, no binary search. Then measures the t=0 countertop
+`visible_fraction` distribution across seeds, reusing the Phase 1 harness (measurement +
+plotting).
 
 visible_fraction = visible_target_px(with occluder) / full_target_px(no occluder),
 same seed (target pose is fixed before the occluder is added).
+
+OUTPUT LAYOUT: every run writes to its OWN timestamped folder under a single
+dedicated results folder, grouped by run type, so re-running never clobbers a
+previous run:
+    <out-dir>/<type>/<YYYYmmdd-HHMMSS>/
+where <type> is 'rollout' vs 'no_rollout' by default (override with --run-type,
+e.g. a planner name like 'hamid' / 'baseline'). --plot-only re-reads an existing
+timestamped folder, so pass its full path as --out-dir.
 
 USAGE (from the benchmark folder):
     cd benchmark
     source set_env.sh
     export ROBOTWIN_BENCH_TASK=bench
     python script/bench_script/analyze_occluder_visibility.py \
-        --seed-start 0 --num-seeds 50 --offsets 0.10 --bins 20 \
-        --out-dir ../scripts/validation/results/phase2_occluder
+        --seed-start 0 --num-seeds 50 --offsets 0.10 --bins 20
+    # -> ../scripts/validation/results/occluder_visibility/no_rollout/<timestamp>/
 
     # narrow-region sweep (a few offsets) to see how distance affects occlusion:
     python script/bench_script/analyze_occluder_visibility.py \
-        --num-seeds 40 --offsets 0.07,0.10,0.13 \
-        --out-dir ../scripts/validation/results/phase2_occluder
+        --num-seeds 40 --offsets 0.07,0.10,0.13
 
-    # re-plot only:
+    # re-plot only (point at an existing timestamped run folder):
     python script/bench_script/analyze_occluder_visibility.py --plot-only \
-        --out-dir ../scripts/validation/results/phase2_occluder
+        --out-dir ../scripts/validation/results/occluder_visibility/no_rollout/<timestamp>
 """
 import os
+import sys
 import json
+import time
 import argparse
+import contextlib
 from copy import deepcopy
+from datetime import datetime
 from pathlib import Path
 
 import numpy as np
@@ -52,7 +65,59 @@ from envs._GLOBAL_CONFIGS import GRASP_DIRECTION_DIC
 from visualize_task_scene import get_env_class
 # reuse the Phase 1 harness verbatim
 from analyze_natural_visibility import (build_cfg, DR_CLEAN, save_overlay, analyze, _resolve_target,
-                                        CAMERA, run_rollout, analyze_rollout, effective_out_dir)
+                                        CAMERA, run_rollout, analyze_rollout)
+
+
+def effective_out_dir(args):
+    """Resolve this run's output directory. main() has already rewritten
+    args.out_dir to <out-dir>/<type>/<timestamp> for a live run (or left it as the
+    user-supplied folder for --plot-only), so this is now a plain passthrough that
+    every downstream helper (run() + the analysis pass) shares to hit the SAME
+    folder. Shadows the analyze_natural_visibility helper of the same name, which
+    used a `_rollout` sibling-suffix scheme instead."""
+    return Path(args.out_dir)
+
+
+class _Tee:
+    """Fan writes out to several streams at once, so a rollout's stdout/stderr lands
+    in its per-episode log file while STILL showing up live on the console."""
+    def __init__(self, *streams):
+        self.streams = streams
+
+    def write(self, s):
+        # Best-effort per stream: a rollout prints an emoji line ("Video is saved...")
+        # from images_to_video, and if ANY sink (e.g. an ASCII-encoded log file, or a
+        # non-UTF-8 console) can't encode it, a raw st.write would raise mid-rollout --
+        # which previously propagated out of merge_pkl_to_hdf5_video and skipped the
+        # success/fail bucketing entirely. Never let a logging write abort the rollout.
+        for st in self.streams:
+            try:
+                st.write(s)
+            except Exception:
+                try:
+                    st.write(s.encode("ascii", "replace").decode("ascii"))
+                except Exception:
+                    pass
+
+    def flush(self):
+        for st in self.streams:
+            try:
+                st.flush()
+            except Exception:
+                pass
+
+
+def _prune_empty_topdirs(out_dir):
+    """_bucket_rollout_artifacts moves every episode's hdf5/mp4 into success/ or
+    fail/, leaving the top-level data/ and video/ folders (created fresh by the
+    save_data machinery each rollout) empty. Remove them so those two top-layer
+    folders don't sit around empty."""
+    for name in ("data", "video"):
+        d = Path(out_dir) / name
+        try:
+            d.rmdir()          # only succeeds if empty; leaves anything unexpected in place
+        except OSError:
+            pass
 
 # target object: 001_bottle id 9 (8-way grasp ring -> side-reaches around the occluder).
 # Swap TARGET_MODEL/TARGET_ID back to 047_mouse id 0 for the stock top-down mouse.
@@ -64,8 +129,47 @@ TARGET_ID = 9
 # the-box side waypoint and keeps target + waypoint inside the arm's reach envelope.
 TARGET_XLIM = (-0.15, 0.15)
 TARGET_YLIM = (0.0, 0.20)
+# Full tabletop extent (see the target-spawn note above). A ring occluder whose CENTRE
+# would fall outside this is simply not spawned (fewer than n bottles, same formation)
+# rather than rejecting the whole seed -- see occluder_ring_xy(... xlim/ylim ...).
+TABLE_XLIM = (-0.6, 0.6)
+TABLE_YLIM = (-0.35, 0.35)
 PAD_XY = (0.0, -0.28)          # destination pad parked at the front, out of the occluder zone
-OCCLUDER_QPOS = [0.66, 0.66, -0.25, -0.25]   # same upright carton orientation as the stock milk-box
+# Occluder object: 029_olive-oil id 3 -- a tall, skinny, round bottle (raw extents
+# H 0.305 m, footprint 0.080 x 0.080 m, aspect 3.8). Switched from the old 038_milk-box
+# id 2 (H 0.254 m, 0.110 x 0.122 m rectangular footprint, aspect 2.1), which was too fat.
+# Both share the same mesh convention (tall axis = local Y, base at origin), so OCCLUDER_QPOS
+# stands either upright unchanged. Olive-oil's round footprint has no yaw dependence -- ideal
+# for the planned circle-of-occluders. To swap back to the milk box: model "038_milk-box",
+# id 2, and bump OCC_HALF_FOOTPRINT/_OCC_HALF back to 0.08/0.06.
+OCCLUDER_MODEL = "029_olive-oil"
+OCCLUDER_ID = 3
+OCCLUDER_COLLISION = f"assets/objects/{OCCLUDER_MODEL}/collision/base{OCCLUDER_ID}.glb"
+OCCLUDER_QPOS = [0.66, 0.66, -0.25, -0.25]   # same upright orientation the stock milk-box used
+
+
+def occluder_ring_xy(cx, cy, radius, n, angle0=0.0, xlim=None, ylim=None):
+    """(x, y) centres of `n` occluders equally spaced on a circle of `radius` around the
+    target at (cx, cy) -- the ring cuts the circle into n equal 2*pi/n slices. Angle is
+    measured from the FRONT (-y, the robot/camera side) and rotates toward +x, so:
+      * n=1, angle0=0 -> one occluder directly in front (the original single-box layout),
+      * the +x quarter-turn position reproduces the old side_occluder_sign=+1 box.
+    If xlim/ylim (each a (lo, hi) pair) are given, any position whose CENTRE falls outside
+    them is DROPPED -- the formation keeps the same equal spacing, just with fewer bottles
+    where the ring would leave the table, instead of failing the whole scene.
+    Returns [] for n<=0. Deterministic; the caller adds any per-actor yaw jitter."""
+    pts = []
+    n = int(n)
+    for k in range(max(0, n)):
+        theta = angle0 + 2.0 * np.pi * k / n
+        x = cx + radius * np.sin(theta)
+        y = cy - radius * np.cos(theta)
+        if xlim is not None and not (xlim[0] <= x <= xlim[1]):
+            continue
+        if ylim is not None and not (ylim[0] <= y <= ylim[1]):
+            continue
+        pts.append((x, y))
+    return pts
 
 # Two-step (around-the-box) planning: curobo won't reliably route around a tall obstacle
 # between start and goal, so before the grasp (and before the place) we send the gripper
@@ -73,7 +177,7 @@ OCCLUDER_QPOS = [0.66, 0.66, -0.25, -0.25]   # same upright carton orientation a
 # x-offset from the box CENTRE = OCC_HALF_FOOTPRINT + SIDE_WAYPOINT_GAP, i.e. SIDE_WAYPOINT
 # _GAP is the clearance from the box EDGE to the gripper (not from centre). If the waypoint
 # would leave the reachable x-range we flip to the other (table-centre) side. All tunable.
-OCC_HALF_FOOTPRINT = 0.08      # milk-box base half-diagonal (~0.11 x 0.122, incl. yaw)
+OCC_HALF_FOOTPRINT = 0.04      # olive-oil base half-diagonal (~0.08 x 0.08 round, yaw-invariant)
 SIDE_WAYPOINT_GAP = 0.24       # clearance from the box EDGE to the waypoint (gripper)
 REACH_X_LIMIT = 0.5
 GRASP_CANDIDATE_LIMIT = 4
@@ -392,7 +496,7 @@ STAGE_ORDER = ["waypoint", "pre_grasp", "grasp", "lift", "post_grasp_escape",
 # target's final placement. Center-to-center threshold = pad_half + occluder_half + gap.
 OCC_PAD_CLEARANCE = 0.05
 _PAD_HALF = 0.06               # pad half-size (create_box half_size xy)
-_OCC_HALF = 0.06               # milk-box base half-extent (~0.11 x 0.122 footprint)
+_OCC_HALF = 0.04               # olive-oil base half-extent (~0.08 x 0.08 round footprint)
 OCC_PAD_MIN_DIST = _PAD_HALF + _OCC_HALF + OCC_PAD_CLEARANCE
 
 
@@ -421,7 +525,15 @@ def make_occluder_task():
         # pickup_reachability_map.py to reach the picked-up state, then probe IK.
         PICKUP_ONLY = False
         spawn_occluder = False
-        occluder_offset = 0.2         # metres in front (-y) of the target
+        # Occluder ring: num_occluders bottles equally spaced (2*pi/n apart) on a circle of
+        # radius occluder_offset centred on the target. occluder_offset is the RING RADIUS
+        # (kept under its old name so the reachability/gripper/swept tools that set
+        # env.occluder_offset still get a single front box). occluder_angle0 rotates the
+        # whole ring; 0 puts occluder k=0 directly in front (-y). num_occluders=1 == the
+        # original single front occluder. See occluder_ring_xy().
+        occluder_offset = 0.2         # ring radius in metres (target at centre)
+        num_occluders = 1
+        occluder_angle0 = 0.0         # radians; angle of occluder k=0, measured from -y (front)
         target_model = TARGET_MODEL
         target_id = TARGET_ID
         target_xlim = TARGET_XLIM
@@ -451,26 +563,43 @@ def make_occluder_task():
             self.des_obj_pose = self.des_obj.get_pose().p.tolist() + [0, 0, 0, 1]
             self.des_obj_pose[2] += 0.02
 
-            # occluder: one tall milk-box, deterministically at mouse-x, just in front (-y)
-            if self.spawn_occluder:
+            # occluder ring: num_occluders tall olive-oil bottles equally spaced (2*pi/n
+            # apart) on a circle of radius occluder_offset around the target. k=0 sits
+            # directly in front (-y) when occluder_angle0=0; num_occluders=1 reproduces the
+            # original single front box. self.occluder aliases ring bottle 0 so the
+            # single-box tools (reachability/gripper/swept) keep working unchanged.
+            self.occluders = []
+            self.occluder = None
+            if self.spawn_occluder and self.num_occluders > 0:
                 mp = self.target_obj.get_pose().p
-                ox, oy = float(mp[0]), float(mp[1]) - self.occluder_offset
-                occ_pose = rand_pose(xlim=[ox], ylim=[oy], qpos=OCCLUDER_QPOS,
-                                     rotate_rand=True, rotate_lim=[0, 3.14, 0])  # random yaw
-                self.occluder = create_actor(
-                    scene=self, pose=occ_pose, modelname="038_milk-box", convex=True,
-                    model_id=2, scale=[1.0, 1.0, 1.0],
-                )
-                self.occluder.set_mass(0.1)
-                # Register the occluder in curobo's collision world so the planner
-                # actually avoids it. NOT flagged is_obstacle -> it survives the
-                # exclude_obstacles=True pass used in collision-metrics/eval mode
-                # ("... curobo planner skips clutter obstacles"), which only drops
-                # is_obstacle=True procedural clutter.
-                self.collision_list.append({
-                    "actor": self.occluder,
-                    "collision_path": f"{os.environ['BENCH_ROOT']}/assets/objects/038_milk-box/collision/base2.glb",
-                })
+                # Drop any ring position whose centre would leave the tabletop -- keep the
+                # formation with fewer bottles rather than spawning one off the table.
+                ring = occluder_ring_xy(float(mp[0]), float(mp[1]),
+                                        self.occluder_offset, self.num_occluders,
+                                        self.occluder_angle0,
+                                        xlim=TABLE_XLIM, ylim=TABLE_YLIM)
+                for ox, oy in ring:
+                    occ_pose = rand_pose(xlim=[ox], ylim=[oy], qpos=OCCLUDER_QPOS,
+                                         rotate_rand=True, rotate_lim=[0, 3.14, 0])  # random yaw
+                    occ = create_actor(
+                        scene=self, pose=occ_pose, modelname=OCCLUDER_MODEL, convex=True,
+                        model_id=OCCLUDER_ID, scale=[1.0, 1.0, 1.0],
+                    )
+                    occ.set_mass(0.1)
+                    # Register each occluder in curobo's collision world so the planner
+                    # actually avoids it. NOT flagged is_obstacle -> it survives the
+                    # exclude_obstacles=True pass used in collision-metrics/eval mode
+                    # ("... curobo planner skips clutter obstacles"), which only drops
+                    # is_obstacle=True procedural clutter.
+                    self.collision_list.append({
+                        "actor": occ,
+                        "collision_path": f"{os.environ['BENCH_ROOT']}/{OCCLUDER_COLLISION}",
+                    })
+                    self.occluders.append(occ)
+                # self.occluder aliases ring bottle 0 for the single-box tools; stays None
+                # if every ring position was filtered off-table (an empty formation).
+                if self.occluders:
+                    self.occluder = self.occluders[0]
 
         def play_once(self):
             # Expert plan. FORWARD (grasp) below is fixed. BACKWARD (placement) is a list
@@ -500,6 +629,23 @@ def make_occluder_task():
             self.rollout_grasp_attempts = []
             self.rollout_retention_checks = []
             self.rollout_descent_slices = []
+            # Per-phase wall-clock timing: each checkpoint(name) records how long the
+            # expert spent since the previous checkpoint. Read by run() and written
+            # into the per-rollout log file. Reset per-episode (env reused across seeds).
+            self.rollout_stage_times = []
+            self._stage_clock = time.perf_counter()
+
+            # Re-register the FULL collision world (clutter included) before any
+            # planning. setup_demo ran update_world(exclude_obstacles=True) because the
+            # bench config sets enable_collision_metrics=true -- that drops every
+            # is_obstacle=True procedural clutter object from curobo's world, so the
+            # expert would plan straight THROUGH clutter and knock it over (even on
+            # "successful" rollouts). The whole point here is to test how well the
+            # expert AVOIDS clutter, so curobo must see it: update_world() (no exclude)
+            # rebuilds the world from collision_list including clutter. The physics-based
+            # collision metrics (check_collisions, gated by enable_collision_metrics) are
+            # independent of curobo's world, so they still measure any residual hits.
+            self.update_world()
 
             def checkpoint(name):
                 # Diagnostic: the dry-run candidate search only verifies the
@@ -513,8 +659,17 @@ def make_occluder_task():
                 if not self.plan_success and self.rollout_failure_stage is None:
                     self.rollout_failure_stage = name
                     self.rollout_failure_reason = self._last_fail_reason
+                now = time.perf_counter()
+                self.rollout_stage_times.append(
+                    {"stage": name, "seconds": round(now - self._stage_clock, 4)})
+                self._stage_clock = now
                 if log_move:
                     print(f"[play_once] after {name}: plan_success={self.plan_success}")
+                # Optional stage observer (set by tooling, e.g. swept_volume_3d.py, to slice
+                # the rollout into named stages). Only read via getattr; never set normally.
+                stage_hook = getattr(self, "stage_hook", None)
+                if stage_hook is not None:
+                    stage_hook(name)
 
             target_p0 = self.target_obj.get_pose().p        # original target location (pre-grasp)
             self._place_target_y = float(target_p0[1])      # available to backward subgoals
@@ -2352,12 +2507,11 @@ def run(args):
     jsonl_path = out_dir / "records.jsonl"
     offsets = [float(o) for o in args.offsets.split(",")]
     clutter_densities = [int(d) for d in args.clutter_densities.split(",")]
-    seeds = list(range(args.seed_start, args.seed_start + args.num_seeds))
     rollout = getattr(args, "rollout", False)
     ep_counter = 0   # unique episode id per rollout (-> video/episode{N}.mp4)
 
     env = make_occluder_task()()
-    print(f"seeds={seeds[0]}..{seeds[-1]} ({len(seeds)})  offsets={offsets}  "
+    print(f"seeds from {args.seed_start}, want {args.num_seeds} STABLE  offsets={offsets}  "
           f"clutter_densities={clutter_densities}  rollout={rollout}  camera={CAMERA}")
     print(f"writing -> {jsonl_path}\n")
 
@@ -2368,7 +2522,23 @@ def run(args):
             pass
 
     with open(jsonl_path, "w") as fout:
-        for si, seed in enumerate(seeds):
+        # Draw seeds until we have args.num_seeds FULLY-USABLE seeds -> num_seeds complete
+        # trajectory sets. "Fully usable" means EVERY build the seed needs succeeds and is
+        # stable: the clean denominator build AND every (offset x clutter_density) measurement
+        # build (target upright, occluder upright per check_stable, occluder clear of the pad).
+        # If ANY is rejected (UnStableError from a toppled bottle/milk box, a too-close-to-pad
+        # occluder, or any build error) the WHOLE seed is discarded and the next seed is drawn
+        # in its place -- nothing partial is written and produced is not incremented. So
+        # `--num-seeds N` always yields N seeds, each with the full (offset, density) grid
+        # rolled out (== N rollouts for a single offset+density run), never fewer with silent
+        # holes. Two passes per seed: (1) build+measure + stability gate, buffering; (2) only
+        # if the whole seed passed, run rollouts and commit records. (Ported from the testbench.)
+        produced = 0
+        draw = args.seed_start          # incrementing seed to draw from (rejected ones skipped)
+        max_draws = args.num_seeds * 20 + 50   # safety cap: don't loop forever if builds keep failing
+        while produced < args.num_seeds and (draw - args.seed_start) < max_draws:
+            seed = draw
+            draw += 1
             # --- denominator: same scene, NO occluder ---
             env.spawn_occluder = False
             try:
@@ -2381,30 +2551,43 @@ def run(args):
                     save_overlay(env, res_clean["mask"], img_dir / f"seed{seed:04d}_clean.png",
                                  f"seed {seed} CLEAN (denominator)  full_px={full_px}")
             except Exception as e:
-                print(f"[seed {seed}] clean build failed ({type(e).__name__}: {e}); skipping seed")
+                print(f"[seed {seed}] clean build failed/rejected ({type(e).__name__}: {e}); "
+                      f"drawing another seed")
                 safe_close()
                 continue
             safe_close()
             if full_px <= 0:
-                print(f"[seed {seed}] full_target_px=0 on clean scene; skipping seed.")
+                print(f"[seed {seed}] full_target_px=0 on clean scene; drawing another seed.")
                 continue
 
+            # ---- Pass 1: build + measure every (offset, density); gate stability ----
+            seed_items = []       # buffered per-build results, committed only if the seed passes
+            seed_ok = True
             for off in offsets:
+                if not seed_ok:
+                    break
                 # per-build coin flip: drop the occluder with prob no_occluder_prob
                 # (keyed on seed+offset so the decision is shared across densities)
                 show = bool(np.random.default_rng(int(seed) * 1000 + int(round(off * 100))).random()
                             >= args.no_occluder_prob)
-                # Reject scenes where the occluder (at target_x, target_y - off) would land
-                # too close to / on the destination pad, blocking the target's placement.
+                # Reject scenes where ANY occluder that WILL spawn (off-table ring positions
+                # are dropped by the same xlim/ylim filter load_actors uses) lands too close
+                # to / on the destination pad. Rejects the WHOLE seed (redraw) so the
+                # trajectory count is still met.
                 if show:
-                    occ_xy = np.array([clean_pose[0], clean_pose[1] - off])
-                    pad_dist = float(np.linalg.norm(occ_xy - np.array(PAD_XY)))
+                    ring_xys = occluder_ring_xy(clean_pose[0], clean_pose[1], off,
+                                                args.num_occluders,
+                                                xlim=TABLE_XLIM, ylim=TABLE_YLIM)
+                    pad_dist = min((float(np.linalg.norm(np.array(xy) - np.array(PAD_XY)))
+                                    for xy in ring_xys), default=float("inf"))
                     if pad_dist < OCC_PAD_MIN_DIST:
-                        print(f"[seed {seed}] occluder@off={off} is {pad_dist:.3f}m from pad "
-                              f"(< {OCC_PAD_MIN_DIST:.3f}m); rejecting this build.")
-                        continue
+                        print(f"[seed {seed}] a ring occluder@off={off} is {pad_dist:.3f}m from "
+                              f"pad (< {OCC_PAD_MIN_DIST:.3f}m); rejecting seed, drawing another.")
+                        seed_ok = False
+                        break
                 env.spawn_occluder = show
                 env.occluder_offset = off
+                env.num_occluders = args.num_occluders
                 for cd in clutter_densities:
                     try:
                         env.setup_demo(**build_cfg("put_mouse_on_pad", args.base_config, seed,
@@ -2422,9 +2605,13 @@ def run(args):
                                 f"frac={res['visible_fraction']:.3f} {res['bucket']} pose_match={pose_ok}",
                             )
                     except Exception as e:
-                        print(f"[seed {seed} off{off:.2f} cd{cd}] build failed ({type(e).__name__}: {e}); skipping")
+                        # A toppled bottle/milk box (check_stable -> UnStableError) or any build
+                        # error rejects the ENTIRE seed so we redraw and still hit num_seeds.
+                        print(f"[seed {seed} off{off:.2f} cd{cd}] build failed/unstable "
+                              f"({type(e).__name__}: {e}); rejecting seed, drawing another.")
                         safe_close()
-                        continue
+                        seed_ok = False
+                        break
                     safe_close()
 
                     rec = {"seed": int(seed), "offset": float(off), "full_px": int(full_px),
@@ -2432,42 +2619,105 @@ def run(args):
                            "visible_fraction": float(res["visible_fraction"]),
                            "bucket": res["bucket"], "in_fov": bool(res["in_fov"]),
                            "pose_match": pose_ok, "occluder_shown": show,
+                           "num_occluders": int(args.num_occluders) if show else 0,
                            "clutter_density": int(cd)}
-                    # --- expert curobo rollout on the same scene (video + success) ---
-                    # env.spawn_occluder / occluder_offset persist, so the rollout
-                    # build reproduces the same occluder placement as the measurement.
-                    if rollout:
+                    seed_items.append({"off": off, "cd": cd, "show": show,
+                                       "rec": rec, "res": res})
+
+            if not seed_ok or not seed_items:
+                continue   # rejected (unstable / pad-blocked / produced nothing) -> next seed
+
+            # ---- Pass 2: seed accepted -> roll out and commit all its records ----
+            for item in seed_items:
+                off, cd, show, rec, res = item["off"], item["cd"], item["show"], item["rec"], item["res"]
+                # --- expert curobo rollout on the same scene (video + success) ---
+                # Re-assert spawn_occluder / occluder_offset so run_rollout's own build
+                # reproduces this item's occluder placement (env is shared across items).
+                if rollout:
+                    env.spawn_occluder = show
+                    env.occluder_offset = off
+                    env.num_occluders = args.num_occluders
+                    # One log file per rollout under <out-dir>/log/episode{N}.log: the
+                    # usual stdout/stderr (play_once + run_rollout diagnostics) tee'd to
+                    # both console and file, plus the expert's per-phase timing appended.
+                    log_dir = out_dir / "log"
+                    log_dir.mkdir(parents=True, exist_ok=True)
+                    # utf-8 (not the platform-default ASCII) so the rollout's emoji log
+                    # lines ("Video is saved...") encode cleanly into the file.
+                    rollout_log = open(log_dir / f"episode{ep_counter}.log", "w",
+                                       encoding="utf-8")
+                    rollout_log.write(
+                        f"# rollout episode{ep_counter}  seed={seed} offset={off:.3f} "
+                        f"clutter_density={cd} occluder_shown={show} "
+                        f"num_occluders={args.num_occluders if show else 0}  "
+                        f"bucket_measured={res['bucket']}\n\n")
+                    rollout_log.flush()
+                    with contextlib.redirect_stdout(_Tee(sys.stdout, rollout_log)), \
+                         contextlib.redirect_stderr(_Tee(sys.stderr, rollout_log)):
                         rollout_result = run_rollout(env, "put_mouse_on_pad", args.base_config, seed,
                                                      dr_measure(cd), out_dir, ep_counter)
-                        success = bool(rollout_result["success"])
-                        rec["rollout_success"] = success
-                        rec["attached_trajectory_slowdown"] = ATTACHED_TRAJECTORY_SLOWDOWN
-                        rec["rollout_ep"] = ep_counter
-                        artifact_info = rollout_result.get("artifact_info") or {}
-                        rec["rollout_bucket"] = artifact_info.get("bucket", "success" if success else "fail")
-                        rec["rollout_video"] = artifact_info.get(
-                            "video_relpath", f"{rec['rollout_bucket']}/video/episode{ep_counter}.mp4"
-                        )
-                        rec["rollout_data"] = artifact_info.get(
-                            "hdf5_relpath", f"{rec['rollout_bucket']}/data/episode{ep_counter}.hdf5"
-                        )
-                        # Structured failure/candidate metadata set by play_once (see
-                        # its checkpoint()/_select_pick_place_candidate) -- survives
-                        # run_rollout's internal close_env() since it's just plain
-                        # attributes on the (reused) env object. None on success.
-                        rec["rollout_failure_stage"] = getattr(env, "rollout_failure_stage", None)
-                        rec["rollout_failure_reason"] = getattr(env, "rollout_failure_reason", None)
-                        rec["rollout_candidate_info"] = getattr(env, "rollout_candidate_info", None)
-                        rec["rollout_grasp_attempts"] = getattr(env, "rollout_grasp_attempts", None)
-                        rec["rollout_retention_checks"] = getattr(env, "rollout_retention_checks", None)
-                        rec["rollout_descent_slices"] = getattr(env, "rollout_descent_slices", None)
-                        print(f"    seed {seed} off={off:.2f} cd={cd} {res['bucket']}: "
-                              f"rollout {'SUCCESS' if success else 'FAIL'} -> "
-                              f"{rec['rollout_bucket']}/episode{ep_counter}")
-                        ep_counter += 1
-                    fout.write(json.dumps(rec) + "\n")
-                    fout.flush()
-            print(f"[{si+1}/{len(seeds)}] seed {seed}: full_px={full_px} done")
+                    success = bool(rollout_result["success"])
+                    rec["rollout_success"] = success
+                    rec["attached_trajectory_slowdown"] = ATTACHED_TRAJECTORY_SLOWDOWN
+                    rec["rollout_ep"] = ep_counter
+                    artifact_info = rollout_result.get("artifact_info") or {}
+                    rec["rollout_bucket"] = artifact_info.get("bucket", "success" if success else "fail")
+                    rec["rollout_video"] = artifact_info.get(
+                        "video_relpath", f"{rec['rollout_bucket']}/video/episode{ep_counter}.mp4"
+                    )
+                    rec["rollout_data"] = artifact_info.get(
+                        "hdf5_relpath", f"{rec['rollout_bucket']}/data/episode{ep_counter}.hdf5"
+                    )
+                    # Structured failure/candidate metadata set by play_once (see
+                    # its checkpoint()/_select_pick_place_candidate) -- survives
+                    # run_rollout's internal close_env() since it's just plain
+                    # attributes on the (reused) env object. None on success.
+                    rec["rollout_failure_stage"] = getattr(env, "rollout_failure_stage", None)
+                    rec["rollout_failure_reason"] = getattr(env, "rollout_failure_reason", None)
+                    rec["rollout_candidate_info"] = getattr(env, "rollout_candidate_info", None)
+                    rec["rollout_grasp_attempts"] = getattr(env, "rollout_grasp_attempts", None)
+                    rec["rollout_retention_checks"] = getattr(env, "rollout_retention_checks", None)
+                    rec["rollout_descent_slices"] = getattr(env, "rollout_descent_slices", None)
+                    # Physics collision metrics for THIS episode (accumulated by
+                    # check_collisions during play_once; reset per build by
+                    # _init_collision_metrics; survives close_env like the fields
+                    # above). This is the direct clutter-avoidance measurement:
+                    # robot_to_static_object / target_to_static_object count clutter
+                    # the arm / held object hit, with the object names. Empty/zero
+                    # when enable_collision_metrics is off.
+                    try:
+                        rec["collision_metrics"] = env.get_collision_metrics()
+                    except Exception:
+                        rec["collision_metrics"] = None
+                    cm = rec["collision_metrics"] or {}
+                    summary = (f"    seed {seed} off={off:.2f} cd={cd} {res['bucket']}: "
+                               f"rollout {'SUCCESS' if success else 'FAIL'} "
+                               f"collisions={cm.get('total_collision_count', '?')} "
+                               f"(clutter={cm.get('robot_to_static_object', '?')}"
+                               f"+{cm.get('target_to_static_object', '?')}) -> "
+                               f"{rec['rollout_bucket']}/episode{ep_counter}")
+                    print(summary)
+                    # append the expert's per-phase timing, then close the per-rollout log
+                    stage_times = getattr(env, "rollout_stage_times", None) or []
+                    rollout_log.write(summary + "\n")
+                    rollout_log.write("\n# expert phase timings (wall-clock seconds per phase)\n")
+                    total_s = 0.0
+                    for stg in stage_times:
+                        rollout_log.write(f"  {stg['stage']:<34} {stg['seconds']:8.3f}s\n")
+                        total_s += stg["seconds"]
+                    rollout_log.write(f"  {'TOTAL':<34} {total_s:8.3f}s\n")
+                    rollout_log.close()
+                    # top-level data/ and video/ are emptied by the success/fail bucketing
+                    _prune_empty_topdirs(out_dir)
+                    ep_counter += 1
+                fout.write(json.dumps(rec) + "\n")
+                fout.flush()
+            produced += 1
+            print(f"[{produced}/{args.num_seeds}] seed {seed}: full_px={full_px} done")
+
+        if produced < args.num_seeds:
+            print(f"WARNING: only {produced}/{args.num_seeds} stable scenes after "
+                  f"{draw - args.seed_start} seeds drawn (hit safety cap)")
 
     safe_close()
     print(f"\nsweep complete -> {jsonl_path}")
@@ -2478,23 +2728,54 @@ def main():
     ap.add_argument("--base-config", default="bench_demo_office_clean")
     ap.add_argument("--seed-start", type=int, default=0)
     ap.add_argument("--num-seeds", type=int, default=50)
-    ap.add_argument("--offsets", default="0.2", help="occluder offset(s) in m in front of the target")
+    ap.add_argument("--offsets", default="0.2",
+                    help="occluder ring radius/radii in m (target at centre); one figure group "
+                         "per value. e.g. 0.15,0.20,0.25")
+    ap.add_argument("--num-occluders", type=int, default=1,
+                    help="number of occluders equally spaced (2*pi/n apart) around the ring "
+                         "(default 1 = single box directly in front of the target)")
     ap.add_argument("--clutter-densities", default="0",
                     help="table clutter density/densities to sweep in the measurement scene, "
                          "comma-separated (0=off). e.g. 0,8,15")
     ap.add_argument("--group-by", default="offset", choices=["offset", "clutter_density"],
                     help="analysis grouping variable for the bucket/histogram figures")
     ap.add_argument("--no-occluder-prob", type=float, default=0.2,
-                    help="probability the milk-box occluder is NOT spawned for a build (default 0.2)")
+                    help="probability the olive-oil occluder is NOT spawned for a build (default 0.2)")
     ap.add_argument("--bins", type=int, default=20)
     ap.add_argument("--selectable-threshold", type=float, default=0.05)
-    ap.add_argument("--out-dir", default="../scripts/validation/results/phase2_occluder")
-    ap.add_argument("--save-images", action="store_true")
+    ap.add_argument("--out-dir", default="../scripts/validation/results/occluder_visibility",
+                    help="dedicated results folder for this script; each run lands in its own "
+                         "<out-dir>/<type>/<timestamp>/ subfolder (type = --run-type)")
+    ap.add_argument("--run-type", default=None,
+                    help="name of the <out-dir>/<type>/ subfolder grouping this run "
+                         "(default: 'rollout' when --rollout else 'no_rollout'). Use to label "
+                         "variants, e.g. a planner name like 'hamid' or 'baseline'.")
+    # Tri-state: default None -> resolved after parsing to "on unless --rollout".
+    # No-rollout runs save the per-scene overlay PNGs by default (they're the run's
+    # primary artifact); --rollout runs default to video-only (run_rollout always
+    # saves the episode mp4) and skip the stills. Pass --save-images / --no-save-images
+    # to force either way regardless of --rollout.
+    ap.add_argument("--save-images", action=argparse.BooleanOptionalAction, default=None,
+                    help="save per-scene overlay PNGs (default: on without --rollout, off with it)")
     ap.add_argument("--rollout", action="store_true",
-                    help="run an expert curobo rollout per scene (writes to <out-dir>_rollout, "
-                         "saves videos, and adds success-only distribution + P(success) per bucket)")
+                    help="run an expert curobo rollout per scene (goes under the 'rollout' type "
+                         "folder, saves videos, and adds success-only distribution + P(success) per bucket)")
     ap.add_argument("--plot-only", action="store_true")
     args = ap.parse_args()
+
+    # Resolve the tri-state --save-images default: on for no-rollout runs (overlay PNGs
+    # are their main artifact), off for --rollout runs (the episode video is). An explicit
+    # --save-images / --no-save-images on the command line wins over this.
+    if args.save_images is None:
+        args.save_images = not args.rollout
+
+    # One folder per run: <out-dir>/<type>/<timestamp>, so re-running never clobbers
+    # previous results. --plot-only re-reads an existing run, so leave args.out-dir
+    # exactly as the user pointed it (it should already be a .../<type>/<timestamp> dir).
+    if not args.plot_only:
+        run_type = args.run_type or ("rollout" if args.rollout else "no_rollout")
+        args.out_dir = str(Path(args.out_dir) / run_type / datetime.now().strftime("%Y%m%d-%H%M%S"))
+        print(f"[run] writing to {args.out_dir}")
 
     if not args.plot_only:
         run(args)
@@ -2502,7 +2783,7 @@ def main():
                    "clutter_density": "table clutter density"}[args.group_by]
     out_dir = effective_out_dir(args)
     analyze_kwargs = dict(group_key=args.group_by, group_label=group_label,
-                          suptitle="Visibility with one milk-box occluder (countertop)",
+                          suptitle="Visibility with one olive-oil occluder (countertop)",
                           bar_title=f"Bucket proportions vs {group_label}")
     if args.rollout:
         analyze_rollout(out_dir, args.bins, args.selectable_threshold, **analyze_kwargs)

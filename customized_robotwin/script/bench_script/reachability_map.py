@@ -15,6 +15,11 @@ cells from behind the box to the pad is what trajopt can actually connect.
 The milk-box occluder is added to the collision world by default; pass --no-occluder
 to map reachability on the bare (table-only) world instead.
 
+OUTPUT LAYOUT: every run writes to its OWN timestamped folder, so re-running never
+overwrites an earlier run's figures:
+
+    <out-dir>/<YYYYmmdd-HHMMSS>/reach_seed0001_off0.2_z0.90_left_sidegrasp_occ.png
+
 USAGE (from the benchmark folder, env sourced + ROBOTWIN_BENCH_TASK=bench):
     python reachability_map.py --seed 1 --offset 0.2 --res 0.02
     python reachability_map.py --arms right --z 0.90
@@ -32,6 +37,7 @@ horizontal side-grasp orientation (per arm). Pass --topdown for a top-down quat.
 """
 
 import argparse
+from datetime import datetime
 from pathlib import Path
 
 import numpy as np
@@ -116,6 +122,10 @@ def _solve_grid(robot, planner, ik, arm_tag, gp_world, chunk=256):
 
 # ----------------------------------------------------------------------------- run
 def run(args):
+    # One folder per run, so re-running a seed never clobbers the previous figures.
+    args.out_dir = str(Path(args.out_dir) / datetime.now().strftime("%Y%m%d-%H%M%S"))
+    print(f"[run] writing to {args.out_dir}")
+
     env = make_occluder_task()()
     env.spawn_occluder = args.occluder     # --no-occluder -> empty (table-only) collision world
     env.occluder_offset = args.offset
@@ -408,7 +418,8 @@ def main():
                     help="IK poses per batch; lower if you hit CUDA OOM (planners already use ~9GB)")
     ap.add_argument("--out-dir", default=str(RESULTS_DIR),
                     help="results location (default: repo-root scripts/validation/results/reachability, "
-                         "resolved from the script path so it's the same from any cwd)")
+                         "resolved from the script path so it's the same from any cwd). "
+                         "Each run lands in its own <out-dir>/<timestamp>/ subfolder.")
     run(ap.parse_args())
 
 
