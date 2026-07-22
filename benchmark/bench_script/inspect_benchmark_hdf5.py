@@ -73,6 +73,12 @@ def _summarize_benchmark_support(root: h5py.File):
 
     support = root["benchmark_support"]
     print("\nbenchmark_support:")
+    raw_contact = None
+    grasped_by_code = None
+    on_matrix = None
+    collides_with = None
+    held_by = None
+    part_of = None
 
     if "scenario_metadata" in support:
         print("  scenario_metadata:")
@@ -356,6 +362,121 @@ def _summarize_benchmark_support(root: h5py.File):
             checks["supports is transpose of on (frame0)"] = np.array_equal(supports_matrix[0], on_matrix[0].T)
         for key, value in checks.items():
             print(f"    {key}: {value}")
+
+    if "action_nodes" in support:
+        actions = support["action_nodes"]
+        print("  action_nodes:")
+        action_ids = actions["action_ids"][()] if "action_ids" in actions else np.zeros(0, dtype=np.int64)
+        action_types = _decode_string_array(actions["action_types"]) if "action_types" in actions else []
+        phases = _decode_string_array(actions["execution_phases"]) if "execution_phases" in actions else []
+        arms = _decode_string_array(actions["arms"]) if "arms" in actions else []
+        statuses = _decode_string_array(actions["statuses"]) if "statuses" in actions else []
+        starts = actions["start_frame"][()] if "start_frame" in actions else np.zeros(0, dtype=np.int64)
+        ends = actions["end_frame"][()] if "end_frame" in actions else np.zeros(0, dtype=np.int64)
+        active = actions["active"][()] if "active" in actions else None
+        canonical = _decode_string_array(actions["canonical_action_names"]) if "canonical_action_names" in actions else []
+        phase_names = _decode_string_array(actions["execution_phase_names"]) if "execution_phase_names" in actions else []
+        count = len(action_ids)
+        print(f"    count: {count}")
+        for idx in range(min(count, 20)):
+            print(
+                f"    [{int(action_ids[idx])}] {action_types[idx]} phase={phases[idx]} "
+                f"arm={arms[idx]} frames={int(starts[idx])}..{int(ends[idx])} status={statuses[idx]}"
+            )
+        checks = {}
+        parallel_lengths = [len(values) for values in (action_types, phases, arms, statuses, starts, ends)]
+        checks["all action fields share A"] = all(length == count for length in parallel_lengths)
+        checks["action_ids are contiguous"] = np.array_equal(action_ids, np.arange(count))
+        checks["action types are canonical"] = set(action_types).issubset(set(canonical))
+        checks["execution phases are canonical"] = set(phases).issubset(set(phase_names))
+        checks["statuses are terminal"] = set(statuses).issubset({"succeeded", "failed"})
+        frame_count = (
+            support["object_state"]["pose_world"].shape[0]
+            if "object_state" in support and "pose_world" in support["object_state"] else 0
+        )
+        checks["action intervals are ordered"] = bool(np.all(starts <= ends))
+        checks["action intervals are in frame range"] = bool(
+            count == 0 or (frame_count > 0 and np.all(starts >= 0) and np.all(ends < frame_count))
+        )
+        if active is not None:
+            checks["active mask shape is (T,A)"] = active.shape == (frame_count, count)
+            expected_active = np.zeros((frame_count, count), dtype=np.bool_)
+            for idx, (start, end) in enumerate(zip(starts, ends)):
+                if frame_count:
+                    expected_active[int(start):int(end) + 1, idx] = True
+            checks["active mask matches intervals"] = np.array_equal(active, expected_active)
+        for dataset_name in (
+            "parameters_json", "preconditions_json", "postconditions_json",
+            "observed_effects_json",
+        ):
+            if dataset_name in actions:
+                try:
+                    decoded = _decode_string_array(actions[dataset_name])
+                    checks[f"{dataset_name} is valid JSON"] = (
+                        len(decoded) == count and all(json.loads(value) is not None for value in decoded)
+                    )
+                except (TypeError, ValueError, json.JSONDecodeError):
+                    checks[f"{dataset_name} is valid JSON"] = False
+
+        catalog_ids = set(
+            support["object_catalog"]["object_ids"][()].tolist()
+            if "object_catalog" in support else []
+        )
+        for field in ("target_object_id", "destination_object_id", "effector_object_id"):
+            valid_name = f"{field}_valid"
+            if field in actions and valid_name in actions:
+                values = actions[field][()]
+                valid = actions[valid_name][()].astype(bool)
+                checks[f"{field} validity shape matches"] = len(values) == len(valid) == count
+                checks[f"valid {field} references catalog"] = all(
+                    int(value) in catalog_ids for value in values[valid]
+                )
+        if "target_object_id_valid" in actions:
+            target_valid = actions["target_object_id_valid"][()].astype(bool)
+            target_required = np.array([
+                action_type in {"approach", "grasp", "lift", "place", "release", "approach_handle", "grasp_handle", "open_articulation", "close_articulation"}
+                for action_type in action_types
+            ], dtype=bool)
+            checks["grounded manipulation actions have targets"] = bool(
+                len(target_valid) == count and np.all(target_valid[target_required])
+            )
+        if "destination_object_id_valid" in actions:
+            destination_valid = actions["destination_object_id_valid"][()].astype(bool)
+            destination_required = np.array([
+                action_type == "place" for action_type in action_types
+            ], dtype=bool)
+            checks["place actions have destinations"] = bool(
+                len(destination_valid) == count and np.all(destination_valid[destination_required])
+            )
+        if "effector_object_id_valid" in actions:
+            effector_valid = actions["effector_object_id_valid"][()].astype(bool)
+            effector_required = np.array([
+                action_type != "verify_success" for action_type in action_types
+            ], dtype=bool)
+            checks["executed actions have effectors"] = bool(
+                len(effector_valid) == count and np.all(effector_valid[effector_required])
+            )
+
+        if "action_entity_edges" in support:
+            edges = support["action_entity_edges"]
+            edge_actions = edges["action_id"][()] if "action_id" in edges else np.zeros(0, dtype=np.int64)
+            edge_objects = edges["object_id"][()] if "object_id" in edges else np.zeros(0, dtype=np.int64)
+            edge_roles = _decode_string_array(edges["roles"]) if "roles" in edges else []
+            checks["action edge fields share M"] = len(edge_actions) == len(edge_objects) == len(edge_roles)
+            checks["action edges reference action nodes"] = all(int(value) in set(action_ids.tolist()) for value in edge_actions)
+            checks["action edges reference catalog objects"] = all(int(value) in catalog_ids for value in edge_objects)
+            checks["action edge roles are canonical"] = set(edge_roles).issubset({"agent", "target", "destination"})
+            print(f"    action_entity_edges: {len(edge_actions)}")
+        for key, value in checks.items():
+            print(f"    {key}: {value}")
+        failed_checks = [
+            key for key, value in checks.items()
+            if isinstance(value, (bool, np.bool_)) and not bool(value)
+        ]
+        if failed_checks:
+            raise SystemExit(
+                "Action-node invariant failure(s): " + ", ".join(failed_checks)
+            )
 
     if "collision_metric_contact_events" in support:
         events = support["collision_metric_contact_events"]

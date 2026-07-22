@@ -1,0 +1,112 @@
+
+\section*{Related Work and Positioning}
+
+This review positions the proposal around the following thesis: current VLA and VLM-based robotic systems are increasingly capable at semantic grounding and action generation, but they still lack an explicit, queryable, temporally grounded representation for physical interaction risk. The proposed system fills this gap by combining a 4D action-aware scene graph, task-conditioned retrieval, and physics/safety tool calls for safe cluttered manipulation.
+
+\subsection*{Summary of the Gap}
+
+Existing work gives strong pieces of the solution, but the pieces are usually separated. Generalist VLA policies learn powerful visuomotor behavior, but their physical reasoning is mostly implicit. Tool-augmented robot systems can call planners, perception modules, or value maps, but usually do not maintain persistent 4D graph memory. 3D scene graph methods support structured reasoning and scalable retrieval, but often focus on semantic, spatial, or functional relations rather than contact safety, object dynamics, and action-conditioned physical outcomes. Safety and failure-detection methods diagnose unsafe execution, but they are rarely tied to a retrieved graph context that explains why an action is risky and how it should be revised.
+
+The proposal naturally follows from this gap: train a VLM/VLA to use an action-aware 4D scene graph as persistent memory, retrieve only the safety-relevant local context, and invoke physics tools such as collision checking, contact outcome estimation, stability checking, and occlusion reasoning before executing risky subgoals.
+
+\section*{Group 1: Generalist VLA Policies}
+
+\begin{itemize}
+\item \textbf{RT-2: Vision-Language-Action Models Transfer Web Knowledge to Robotic Control} (Google DeepMind, CoRL/PMLR 2023). \href{https://arxiv.org/abs/2307.15818}{Link}. RT-2 showed that web-scale VLM pretraining can be adapted to robot action generation by tokenizing robot actions in the language-model output space. It demonstrates semantic generalization and basic multi-step reasoning. Relevance: establishes the VLA paradigm that this proposal can build on. Gap/use: use RT-2-style VLA learning as evidence that policies can absorb semantic knowledge, but argue that physical safety, contact outcome prediction, and persistent state history are still mostly implicit and not queryable.
+
+\item \textbf{OpenVLA: An Open-Source Vision-Language-Action Model} (Stanford/Berkeley/CMU/Google/Physical Intelligence collaborators, 2024). \href{https://arxiv.org/abs/2406.09246}{Link}. OpenVLA trains a 7B open VLA on large-scale robot demonstrations and supports efficient fine-tuning. Relevance: gives a practical open backbone for experimentation. Gap/use: useful as a baseline or policy backbone, but it does not explicitly maintain a 4D scene graph or call physics verification tools before acting.
+
+\item \textbf{Octo: An Open-Source Generalist Robot Policy} (Berkeley/Stanford/Google, 2024). \href{https://arxiv.org/abs/2405.12213}{Link}. Octo is a generalist robot policy trained on Open X-Embodiment data and designed for efficient fine-tuning across embodiments, sensors, and action spaces. Relevance: strong baseline for generalist policy transfer. Gap/use: valuable as a policy comparison point, but it does not directly solve explicit long-horizon memory, clutter-aware retrieval, or physical contact-risk explanation.
+
+\item \textbf{pi\_0: A Vision-Language-Action Flow Model for General Robot Control} (Physical Intelligence and collaborators, 2024). \href{https://arxiv.org/abs/2410.24164}{Link}. pi\_0 uses a flow-matching action model on top of a pretrained VLM to support continuous, dexterous control across multiple robot embodiments. Relevance: represents the direction of high-frequency generalist VLA control. Gap/use: strong execution backbone, but physical reasoning remains learned end-to-end; the proposed graph and tool layer can serve as a complementary safety/reasoning module around such policies.
+\end{itemize}
+
+\textbf{Takeaway.} VLA models are strong action generators, but they are not enough for scientifically defensible safe manipulation under clutter. The proposal should not compete with VLA backbones directly; it should augment them with explicit graph memory, retrieval, and physics-aware verification.
+
+\section*{Group 2: Tool-Augmented Robot Reasoning and Planning}
+
+\begin{itemize}
+\item \textbf{SayCan: Do As I Can, Not As I Say} (Google, CoRL 2022). \href{https://arxiv.org/abs/2204.01691}{Link}. SayCan combines LLM task knowledge with affordance/value functions so a robot selects actions that are both semantically sensible and physically feasible. Relevance: foundational evidence that language models need embodied grounding. Gap/use: use the affordance-grounding idea, but replace fixed skill-value grounding with action-conditioned graph retrieval and physics tools for cluttered manipulation.
+
+\item \textbf{Code as Policies} (Google/Stanford, ICRA 2023). \href{https://arxiv.org/abs/2209.07753}{Link}. This work uses LLM-generated code to compose perception and control APIs for embodied tasks. Relevance: supports the idea that external tools and APIs can extend model reasoning. Gap/use: tool use is programmatic and spatial/geometric, but it does not center persistent 4D graph memory or learned decisions about when to call contact/stability tools.
+
+\item \textbf{VoxPoser: Composable 3D Value Maps for Robotic Manipulation with Language Models} (Stanford/Columbia/Google, CoRL-era 2023). \href{https://arxiv.org/abs/2307.05973}{Link}. VoxPoser uses LLMs and VLMs to compose 3D value maps for open-vocabulary manipulation and trajectory synthesis. Relevance: shows how language models can interact with spatial tools to produce physically grounded actions. Gap/use: value maps are powerful for geometric affordances, but the proposal adds persistent temporal graph memory, relation deltas, contact-event history, and explicit safety labels.
+
+\item \textbf{MOKA: Open-World Robotic Manipulation through Mark-Based Visual Prompting} (Berkeley, 2024). \href{https://arxiv.org/abs/2403.03174}{Link}. MOKA uses VLM visual prompting to infer keypoint affordances for manipulation. Relevance: strong example of VLM-based affordance reasoning. Gap/use: useful for target/affordance grounding, but it does not address graph explosion, long-horizon memory, or contact-risk retrieval.
+\end{itemize}
+
+\textbf{Takeaway.} Tool-augmented robotics is a validated direction. The proposal refines this direction by making the tools graph-conditioned and physics-focused: retrieve the relevant local subgraph, then call only the tools needed to assess a candidate action.
+
+\section*{Group 3: 3D Scene Graphs, Graph Retrieval, and Action-Aware Memory}
+
+\begin{itemize}
+\item \textbf{3D Scene Graphs Survey} (local reference in \texttt{docs/references/arXiv-2606.19383v1}). The survey frames 3D scene graphs as grounded, hierarchical, temporal, and increasingly action-aware representations. It emphasizes dynamic state, functional affordances, persistent memory, task-conditioned graph expansion, and the challenge of avoiding graph explosion. Relevance: this is the conceptual backbone for using a 4D graph rather than a static graph. Gap/use: use it to justify the representation choice and to argue that physics-aware action-conditioned graph memory remains an open direction.
+
+\item \textbf{SayPlan: Grounding Large Language Models using 3D Scene Graphs for Scalable Robot Task Planning} (2023). \href{https://arxiv.org/abs/2307.06135}{Link}. SayPlan uses hierarchical 3D scene graphs for scalable semantic search and long-horizon planning. Relevance: strong support for task-relevant subgraph retrieval. Gap/use: SayPlan focuses on semantic planning and navigation-style scalability; the proposed work extends retrieval to manipulation safety, contact risk, occlusion, and physical outcome prediction.
+
+\item \textbf{Structured Interfaces for Automated Reasoning with 3D Scene Graphs} (MIT/Stanford-affiliated authors, 2025). \href{https://arxiv.org/abs/2510.16643}{Link}. This work encodes 3D scene graphs in a graph database and exposes Cypher queries as an LLM tool, reducing token usage and improving grounded reasoning over large graphs. Relevance: directly validates the query/tool interface for 3D scene graphs. Gap/use: adopt the structured-query idea, but specialize the graph and tools toward action-conditioned safety and physical interaction risk.
+
+\item \textbf{KeySG: Hierarchical Keyframe-Based 3D Scene Graphs} (2025). \href{https://arxiv.org/abs/2510.01049}{Link}. KeySG uses hierarchical graph construction and retrieval-augmented context selection to handle large 3D scene graphs with multimodal keyframe information. Relevance: supports hierarchical retrieval and graph-context compression. Gap/use: KeySG improves semantic richness and retrieval, while the proposed work adds physics-aware event nodes, contact histories, and risk labels for training VLA decision making.
+
+\item \textbf{RoboEXP: Action-Conditioned Scene Graph via Interactive Exploration for Robotic Manipulation} (2024). \href{https://arxiv.org/abs/2402.15487}{Link}. RoboEXP constructs action-conditioned scene graphs through robot interaction and stores action-conditioned relations for manipulation. Relevance: very close in spirit because it links actions, exploration, and graph construction. Gap/use: treat RoboEXP as a close related work; the proposal differs by targeting safe manipulation under clutter with physics-aware retrieval, contact-event logging, and tool-call supervision for VLA training.
+
+\item \textbf{FunGraph and Open-Vocabulary Functional 3D Scene Graphs} (2025). \href{https://arxiv.org/abs/2503.07909}{FunGraph}, \href{https://arxiv.org/abs/2503.19199}{Open-Vocabulary Functional 3D Scene Graphs}. These works enrich scene graphs with functional elements such as handles, buttons, and affordance-relevant parts. Relevance: supports adding part-level and functionality-aware nodes. Gap/use: useful for functional node design, but they do not directly model safe contact outcomes, object stability under incidental collision, or action-conditioned risk labels.
+
+\item \textbf{ArtiSG: Functional 3D Scene Graph Construction via Human-demonstrated Articulated Objects Manipulation} (2025). \href{https://arxiv.org/abs/2512.24845}{Link}. ArtiSG uses demonstrations to build functional 3D scene graphs with articulation priors and functional memory for real-world manipulation. Relevance: supports action-derived graph memory and articulated-object modeling. Gap/use: complementary for articulated mechanisms, while the proposed work centers clutter, occlusion, contact risk, safe interaction, and training data for VLA tool use.
+\end{itemize}
+
+\textbf{Takeaway.} Scene graph work strongly supports the representation and retrieval premise. The gap is not semantic graph construction alone; it is making the graph action-aware, physics-aware, and useful for VLA safety decisions through local retrieval and tool calls.
+
+\section*{Group 4: Safety, Failure Detection, and Verification}
+
+\begin{itemize}
+\item \textbf{SAFE: Multitask Failure Detection for Vision-Language-Action Models} (2025). \href{https://arxiv.org/abs/2506.09937}{Link}. SAFE predicts task failure from VLA internal features and evaluates failure detection across multiple VLA backbones. Relevance: confirms that VLA deployment needs explicit failure/safety monitoring. Gap/use: SAFE detects likely failure, but does not provide a structured physical explanation or retrieved graph context for action revision.
+
+\item \textbf{FailSafe: Reasoning and Recovery from Failures in Vision-Language-Action Models} (2025). \href{https://arxiv.org/abs/2510.01642}{Link}. FailSafe generates failure and recovery data to improve VLA recovery behavior. Relevance: supports data generation for unsafe or failed trajectories. Gap/use: complementary data philosophy; the proposed benchmark should generate graph-grounded failures, tool outputs, and causal relation/contact deltas instead of only recovery actions.
+
+\item \textbf{SafeManip: A Property-Driven Benchmark for Temporal Safety Evaluation in Robotic Manipulation} (2026). \href{https://arxiv.org/abs/2605.12386}{Link}. SafeManip defines temporal safety properties using LTLf and evaluates manipulation policies beyond task success. Relevance: strong support for the claim that task success is insufficient and safety should be temporally evaluated. Gap/use: use SafeManip-style temporal labels as evaluation inspiration; the proposed work adds a training-time graph and tool-use mechanism for preventing unsafe actions, not only measuring them after rollout.
+
+\item \textbf{Semantically Safe Robot Manipulation} (2024). \href{https://arxiv.org/abs/2410.15185}{Link}. This framework maps semantic scene understanding and LLM-inferred unsafe conditions into motion safeguards via safety filters. Relevance: supports semantic safety beyond geometric collision avoidance. Gap/use: related in safety motivation, but the proposal focuses on 4D graph memory, clutter physics, contact outcomes, and VLA training with retrieval and tool-call supervision.
+\end{itemize}
+
+\textbf{Takeaway.} Safety work establishes the need for more than task success. The proposal should claim an upstream contribution: not merely detecting unsafe execution, but equipping the model with retrieved graph context and physics tools to revise risky subgoals before execution.
+
+\section*{Group 5: Contact-Rich and Physics-Aware Manipulation}
+
+\begin{itemize}
+\item \textbf{ForceVLA: Enhancing VLA Models with a Force-aware MoE for Contact-rich Manipulation} (2025). \href{https://arxiv.org/abs/2505.22159}{Link}. ForceVLA adds force sensing as a first-class modality for contact-rich VLA manipulation. Relevance: strongly supports the argument that vision-language inputs alone are insufficient for contact-heavy tasks. Gap/use: ForceVLA uses force feedback during execution; the proposed work uses graph memory and physics tools to reason about contact risk before or during action selection, including occluded clutter and candidate subgoals.
+
+\item \textbf{DreamTacVLA: Learning to Feel the Future for Contact-Rich Manipulation} (2025). \href{https://arxiv.org/abs/2512.23864}{Link}. DreamTacVLA predicts future tactile signals to improve contact-rich manipulation. Relevance: validates predictive physical sensing as a route to robust manipulation. Gap/use: complementary tactile-world-model direction; the proposal instead emphasizes symbolic/structured graph memory and local physics tools that can reason over mass, velocity, support, and contact consequences.
+
+\item \textbf{Physics-Driven Data Generation for Contact-Rich Manipulation via Trajectory Optimization} (MIT/Toyota Research Institute, 2025). \href{https://arxiv.org/abs/2502.20382}{Link}. This work uses physics-based simulation, demonstrations, retargeting, and trajectory optimization to generate physically consistent contact-rich manipulation data. Relevance: excellent support for physics-aware data generation. Gap/use: use the data-generation philosophy, but export graph-level labels: action traces, relation deltas, contact events, physical attributes, and risk labels for training retrieval and tool-use behavior.
+\end{itemize}
+
+\textbf{Takeaway.} Physics/contact work shows that contact dynamics matter and can be learned or simulated. The proposal contributes a bridge between physical interaction data and VLA reasoning: a compact 4D graph plus on-demand physics tools.
+
+\section*{Group 6: Simulation and Benchmark Infrastructure}
+
+\begin{itemize}
+\item \textbf{Open X-Embodiment / RT-X} (ICRA 2024). Large-scale cross-embodiment robot data enabled training generalist policies such as RT-X, OpenVLA, and Octo. Relevance: motivates scale and diverse robot demonstrations. Gap/use: broad robot data is not enough for this proposal; the benchmark needs safety-specific labels, graph state, contact events, and tool-call traces.
+
+\item \textbf{RoboCasa: Large-Scale Simulation of Everyday Tasks for Generalist Robots} (2024). \href{https://arxiv.org/abs/2406.02523}{Link}. RoboCasa scales everyday household manipulation tasks in realistic simulation with diverse assets and generated demonstrations. Relevance: strong benchmark precedent for simulation-based data scaling. Gap/use: useful inspiration for task diversity and asset randomization; the proposed benchmark should add physics-aware graph exports and safe/unsafe candidate-action labels.
+
+\item \textbf{RoboCAS: Complex Object Arrangement Scenarios} (2024). \href{https://arxiv.org/abs/2407.06951}{Link}. RoboCAS targets complex object arrangement, obstacle clearance, long-horizon planning, and chain reactions. Relevance: close to cluttered manipulation and object rearrangement. Gap/use: use as motivation for complex clutter scenes, but add explicit graph retrieval, contact-risk labels, and action revision supervision.
+
+\item \textbf{RoboTwin: Dual-Arm Robot Benchmark with Generative Digital Twins} (2025). \href{https://arxiv.org/abs/2504.13059}{Link}. RoboTwin uses generative digital twins and LLM-assisted task generation for dual-arm manipulation. Relevance: relevant to RoboPRO/RoboTwin-style simulation and dual-arm manipulation. Gap/use: strong infrastructure inspiration, but the proposal focuses on graph-structured safety reasoning and physics-aware tool calling rather than only generating demonstrations and evaluation tasks.
+\end{itemize}
+
+\textbf{Takeaway.} Existing benchmarks scale demonstrations and task diversity. The proposed benchmark should scale a different kind of data: graph-grounded safety reasoning traces, risky candidate actions, physics tool outputs, and revised safe actions.
+
+\section*{Positioning Statement}
+
+The proposed work sits at the intersection of VLA control, 4D scene graphs, tool-augmented reasoning, and safe contact-rich manipulation. Compared with generalist VLAs, it adds explicit memory and verification. Compared with scene-graph retrieval systems, it adds action-conditioned physics and safety labels. Compared with safety monitors, it aims to prevent unsafe execution through retrieved context and tool-guided revision. Compared with contact-rich manipulation methods, it exposes physical reasoning in a structured graph form that can be queried, supervised, and evaluated.
+
+A concise contribution statement is:
+
+\begin{quote}
+We propose a retrieval-augmented, physics-aware 4D scene graph framework for safe VLA manipulation in clutter. The graph stores persistent object state, action traces, relation deltas, contact events, physical attributes, and risk labels. At decision time, the VLA retrieves only the local action-relevant subgraph and invokes physics tools to verify collision, contact outcome, stability, and occlusion risk before execution. This bridges the gap between semantic VLA policies, scalable scene-graph retrieval, and contact-aware safety reasoning.
+\end{quote}
+
+\section*{Most Directly Related Works}
+
+The closest works to discuss in depth are RoboEXP, SayPlan, Structured Interfaces for 3D Scene Graphs, SAFE, SafeManip, ForceVLA, VoxPoser, and Physics-Driven Data Generation. Together, they define the boundary of the proposal: action-conditioned graph memory, scalable graph retrieval, tool-augmented reasoning, safety evaluation, contact-aware control, and physics-consistent data generation. The novelty should be framed as their integration around safe, cluttered, long-horizon manipulation with explicit 4D graph exports and tool-call supervision.

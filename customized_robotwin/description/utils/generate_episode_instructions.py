@@ -276,6 +276,11 @@ if __name__ == "__main__":
         default=100,
         help="Maximum number of descriptions per episode",
     )
+    parser.add_argument(
+        "--run-dir",
+        default=None,
+        help="Resolved episode run directory; overrides the save_path read from YAML.",
+    )
 
     args = parser.parse_args()
     bench_root_path = (
@@ -290,13 +295,29 @@ if __name__ == "__main__":
     with open(setting_file, "r", encoding="utf-8") as f:
         args_dict = yaml.load(f.read(), Loader=yaml.FullLoader)
 
-    # Load scene info and extract episode parameters
-    scene_info = load_scene_info(args.task_name, args.setting, args_dict['save_path'])
+    # Load scene info and extract episode parameters. Collection may override the
+    # YAML save_path through Make/env, so prefer its resolved run directory.
+    if args.run_dir:
+        with open(os.path.join(args.run_dir, "scene_info.json"), "r", encoding="utf-8") as f:
+            scene_info = json.load(f)
+    else:
+        scene_info = load_scene_info(args.task_name, args.setting, args_dict['save_path'])
     episodes = extract_episodes_from_scene_info(scene_info)
 
     # Generate descriptions
     results = generate_episode_descriptions(args.task_name, episodes, args.max_num)
 
     # Save results to output files
-    save_episode_descriptions(args.task_name, args.setting, results, args_dict['save_path'])
+    if args.run_dir:
+        output_dir = os.path.join(args.run_dir, "instructions")
+        os.makedirs(output_dir, exist_ok=True)
+        for episode_desc in results:
+            output_file = os.path.join(output_dir, f"episode{episode_desc['episode_index']}.json")
+            with open(output_file, "w", encoding="utf-8") as f:
+                json.dump({
+                    "seen": episode_desc.get("seen", []),
+                    "unseen": episode_desc.get("unseen", []),
+                }, f, indent=2)
+    else:
+        save_episode_descriptions(args.task_name, args.setting, results, args_dict['save_path'])
     print("Successfully Saved Instructions")

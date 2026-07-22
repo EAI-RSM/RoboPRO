@@ -9,6 +9,11 @@ RoboPRO extends the RoboTwin simulation framework with:
 - **Systematic perturbation suite** — Language, Vision, and Object axes for evaluating policy robustness
 - **Aloha-Agilex** bimanual embodiment with CuRobo motion planning
 
+Graph-rich benchmark consumers should use
+[`docs/graph_schema_reference.md`](docs/graph_schema_reference.md) as the
+authoritative reference for node types, state relations, action nodes,
+action-entity edges, tensor shapes, validity semantics, and examples.
+
 ## Installation
 
 System prereqs (one-time): `libvulkan1 mesa-vulkan-drivers vulkan-tools` (apt), `ffmpeg`, and an NVIDIA driver with CUDA 12.x.

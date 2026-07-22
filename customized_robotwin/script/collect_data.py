@@ -80,6 +80,19 @@ def _apply_relation_collection_env_overrides(args):
             raise ValueError(f"{env_name} must be >= {minimum}; got {parsed}")
         destination[config_name] = parsed
 
+    save_path = os.getenv("ROBOPRO_RELATION_SAVE_PATH")
+    if save_path not in (None, ""):
+        args["save_path"] = save_path
+
+    office_arrangement = os.getenv("ROBOPRO_OFFICE_ARRANGEMENT")
+    if office_arrangement not in (None, ""):
+        parsed = int(office_arrangement)
+        if parsed not in {0, 1, 2}:
+            raise ValueError(
+                f"ROBOPRO_OFFICE_ARRANGEMENT must be 0, 1, or 2; got {parsed}"
+            )
+        args["office_arrangement"] = parsed
+
     return args
 
 
@@ -512,6 +525,8 @@ def run(TASK_ENV, args):
                 args["task_name"],
                 args["task_config"],
                 str(args["language_num"]),
+                "--run-dir",
+                os.path.abspath(args["save_path"]),
             ],
             cwd="description",
             check=True,

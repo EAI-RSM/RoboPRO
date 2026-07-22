@@ -1,0 +1,1358 @@
+{
+    "episode_0": {
+        "cluttered_table_info": [
+            {
+                "object_type": "029_olive-oil",
+                "object_index": "3"
+            },
+            {
+                "object_type": "091_kettle",
+                "object_index": "4"
+            },
+            {
+                "object_type": "029_olive-oil",
+                "object_index": "2"
+            },
+            {
+                "object_type": "064_msg",
+                "object_index": "1"
+            },
+            {
+                "object_type": "029_olive-oil",
+                "object_index": "1"
+            },
+            {
+                "object_type": "028_roll-paper",
+                "object_index": "3"
+            },
+            {
+                "object_type": "064_msg",
+                "object_index": "0"
+            },
+            {
+                "object_type": "029_olive-oil",
+                "object_index": "0"
+            },
+            {
+                "object_type": "112_tea-box",
+                "object_index": "4"
+            },
+            {
+                "object_type": "025_chips-tub",
+                "object_index": "1"
+            }
+        ],
+        "texture_info": {
+            "wall_texture": null,
+            "table_texture": null,
+            "floor_texture": null
+        },
+        "info": {
+            "{A}": "105_sauce-can/base4",
+            "{a}": "right"
+        },
+        "language_perturbation": {
+            "instruction": "set the sauce can down in the cabinet",
+            "bank": "/home/hamidreza/projects/RoboPRO/benchmark/bench_task_config/instruction_bank.json"
+        },
+        "actor_id_map": {
+            "92": "task_sauce_can",
+            "93": "029_olive-oil",
+            "94": "091_kettle",
+            "95": "029_olive-oil",
+            "96": "064_msg",
+            "97": "029_olive-oil",
+            "98": "028_roll-paper",
+            "99": "064_msg",
+            "100": "029_olive-oil",
+            "101": "112_tea-box",
+            "102": "025_chips-tub",
+            "1": "ground",
+            "63": "wall",
+            "64": "table",
+            "75": "basket_right",
+            "83": "cabinet_wall_filler",
+            "5": "robot/footprint",
+            "6": "robot/base_link",
+            "18": "robot/box1_Link",
+            "23": "robot/fl_base_link",
+            "33": "robot/fr_base_link",
+            "43": "robot/lr_base_link",
+            "51": "robot/rr_base_link",
+            "7": "robot/inertial_link",
+            "8": "robot/right_wheel_link",
+            "9": "robot/left_wheel_link",
+            "10": "robot/fl_castor_link",
+            "12": "robot/fr_castor_link",
+            "14": "robot/rr_castor_link",
+            "16": "robot/rl_castor_link",
+            "19": "robot/box2_Link",
+            "20": "robot/camera_base_link",
+            "24": "robot/fl_link1",
+            "34": "robot/fr_link1",
+            "44": "robot/lr_link1",
+            "52": "robot/rr_link1",
+            "11": "robot/fl_wheel_link",
+            "13": "robot/fr_wheel_link",
+            "15": "robot/rr_wheel_link",
+            "17": "robot/rl_wheel_link",
+            "21": "robot/camera_link1",
+            "25": "robot/fl_link2",
+            "35": "robot/fr_link2",
+            "45": "robot/lr_link2",
+            "53": "robot/rr_link2",
+            "22": "robot/camera_link2",
+            "26": "robot/fl_link3",
+            "36": "robot/fr_link3",
+            "46": "robot/lr_link3",
+            "54": "robot/rr_link3",
+            "27": "robot/fl_link4",
+            "37": "robot/fr_link4",
+            "47": "robot/lr_link4",
+            "55": "robot/rr_link4",
+            "28": "robot/fl_link5",
+            "38": "robot/fr_link5",
+            "48": "robot/lr_link5",
+            "56": "robot/rr_link5",
+            "29": "robot/fl_link6",
+            "39": "robot/fr_link6",
+            "49": "robot/lr_link6",
+            "57": "robot/rr_link6",
+            "30": "robot/left_camera",
+            "31": "robot/fl_link7",
+            "32": "robot/fl_link8",
+            "40": "robot/right_camera",
+            "41": "robot/fr_link7",
+            "42": "robot/fr_link8",
+            "50": "robot/lr_link7",
+            "58": "robot/rr_link7",
+            "65": "fridge_left/base_link",
+            "66": "fridge_left/__jointframe__link_0",
+            "68": "fridge_left/__jointframe__meta__base_link_fillable_0_0_link",
+            "67": "fridge_left/link_0",
+            "69": "fridge_left/meta__base_link_fillable_0_0_link",
+            "70": "microwave_center/base",
+            "71": "microwave_center/link_3",
+            "72": "microwave_center/link_0",
+            "73": "microwave_center/link_1",
+            "74": "microwave_center/link_2",
+            "76": "cabinet/base_link",
+            "77": "cabinet/__jointframe__leftdoor",
+            "79": "cabinet/__jointframe__rightdoor",
+            "81": "cabinet/__jointframe__meta__base_link_fillable_0_0_link",
+            "78": "cabinet/leftdoor",
+            "80": "cabinet/rightdoor",
+            "82": "cabinet/meta__base_link_fillable_0_0_link"
+        },
+        "role_names": {
+            "target_object_names": [
+                "task_sauce_can"
+            ],
+            "intended_contact_names": [
+                "task_sauce_can"
+            ]
+        },
+        "object_pose_ids": [
+            1,
+            63,
+            64,
+            75,
+            83,
+            92,
+            93,
+            94,
+            95,
+            96,
+            97,
+            98,
+            99,
+            100,
+            101,
+            102
+        ],
+        "seed": 3,
+        "collision_metrics": {
+            "robot_to_furniture": 0,
+            "robot_to_static_object": 0,
+            "target_to_static_object": 0,
+            "intended_to_static_object": 0,
+            "is_collision": false,
+            "total_collision_count": 0,
+            "robot_to_furniture_names": [],
+            "robot_to_static_object_names": [],
+            "target_to_static_object_names": [],
+            "intended_to_static_object_names": []
+        },
+        "collision_info": {
+            "robot_to_furniture": 0,
+            "robot_to_static_object": 0,
+            "target_to_static_object": 0,
+            "intended_to_static_object": 0,
+            "is_collision": false,
+            "total_collision_count": 0,
+            "robot_to_furniture_names": [],
+            "robot_to_static_object_names": [],
+            "target_to_static_object_names": [],
+            "intended_to_static_object_names": []
+        },
+        "schema_name": "robopro_benchmark_support",
+        "schema_version": "1.5.0",
+        "export_timestamp": "2026-07-22T05:31:47.102486+00:00",
+        "exporter": "robopro_benchmark_export",
+        "episode_id": "put_sauce_can_in_cabinet_0",
+        "scenario_metadata": {
+            "task_name": "put_sauce_can_in_cabinet",
+            "task_config": "relation_validation_d14",
+            "seed": 3,
+            "success": true,
+            "scene_family": "kitchenl",
+            "embodiment": [
+                "aloha-agilex"
+            ],
+            "cluttered_table": true,
+            "obstacle_density": 10,
+            "clutter_level": "heavy",
+            "language_perturbation_enabled": true,
+            "vision_perturbation_enabled": false,
+            "object_perturbation_enabled": false,
+            "ood_perturbation_enabled": false,
+            "enable_collision_metrics": true,
+            "instruction_text": "set the sauce can down in the cabinet",
+            "config_snapshot": {
+                "render_freq": 0,
+                "episode_num": 1,
+                "use_seed": false,
+                "save_freq": 15,
+                "video_fps": 30,
+                "embodiment": [
+                    "aloha-agilex"
+                ],
+                "language_num": 100,
+                "domain_randomization": {
+                    "random_background": false,
+                    "cluttered_table": true,
+                    "clean_background_rate": 0,
+                    "random_head_camera_dis": 0,
+                    "random_table_height": 0,
+                    "random_light": false,
+                    "crazy_random_light_rate": 0,
+                    "obstacle_density": 10,
+                    "language_perturbation": {
+                        "enabled": true,
+                        "instruction_bank": "benchmark/bench_task_config/instruction_bank.json"
+                    }
+                },
+                "camera": {
+                    "head_camera_type": "D435",
+                    "wrist_camera_type": "D435",
+                    "demo_camera_type": "D435",
+                    "collect_head_camera": true,
+                    "collect_wrist_camera": true
+                },
+                "data_type": {
+                    "rgb": true,
+                    "third_view": false,
+                    "depth": true,
+                    "pointcloud": false,
+                    "observer": false,
+                    "endpose": true,
+                    "qpos": true,
+                    "mesh_segmentation": false,
+                    "actor_segmentation": true,
+                    "actor_bbox": true,
+                    "link_bbox": true,
+                    "proximity": true,
+                    "object_poses": true
+                },
+                "pcd_down_sample_num": 1024,
+                "pcd_crop": true,
+                "save_path": "/home/hamidreza/projects/RoboPRO/customized_robotwin/customized_robotwin/data/action_validation_suite_v2/put_sauce_can_in_cabinet/relation_validation_d14",
+                "clear_cache_freq": 1,
+                "collect_data": true,
+                "eval_video_log": true,
+                "enable_collision_metrics": true,
+                "planner_exclude_obstacles": false,
+                "benchmark_relations": {
+                    "reachable_by": {
+                        "enabled": true,
+                        "frame_stride": 10,
+                        "movable_only": true,
+                        "cache_unchanged": true,
+                        "pose_round_decimals": 3
+                    }
+                },
+                "task_name": "put_sauce_can_in_cabinet",
+                "left_robot_file": "../benchmark/assets/embodiments/aloha-agilex/",
+                "right_robot_file": "../benchmark/assets/embodiments/aloha-agilex/",
+                "dual_arm_embodied": true,
+                "left_embodiment_config": {
+                    "urdf_path": "./urdf/arx5_description_isaac.urdf",
+                    "srdf_path": "./srdf/arx5_description_isaac.srdf",
+                    "joint_stiffness": 1000,
+                    "joint_damping": 200,
+                    "gripper_stiffness": 1000,
+                    "gripper_damping": 200,
+                    "move_group": [
+                        "fl_link6",
+                        "fr_link6"
+                    ],
+                    "ee_joints": [
+                        "fl_joint6",
+                        "fr_joint6"
+                    ],
+                    "arm_joints_name": [
+                        [
+                            "fl_joint1",
+                            "fl_joint2",
+                            "fl_joint3",
+                            "fl_joint4",
+                            "fl_joint5",
+                            "fl_joint6"
+                        ],
+                        [
+                            "fr_joint1",
+                            "fr_joint2",
+                            "fr_joint3",
+                            "fr_joint4",
+                            "fr_joint5",
+                            "fr_joint6"
+                        ]
+                    ],
+                    "gripper_name": [
+                        {
+                            "base": "fl_joint7",
+                            "mimic": [
+                                [
+                                    "fl_joint8",
+                                    1.0,
+                                    0.0
+                                ]
+                            ]
+                        },
+                        {
+                            "base": "fr_joint7",
+                            "mimic": [
+                                [
+                                    "fr_joint8",
+                                    1.0,
+                                    0.0
+                                ]
+                            ]
+                        }
+                    ],
+                    "gripper_bias": 0.12,
+                    "gripper_scale": [
+                        -0.01,
+                        0.045
+                    ],
+                    "homestate": [
+                        [
+                            0,
+                            0,
+                            0,
+                            0,
+                            0,
+                            0
+                        ],
+                        [
+                            0,
+                            0,
+                            0,
+                            0,
+                            0,
+                            0
+                        ]
+                    ],
+                    "delta_matrix": [
+                        [
+                            1,
+                            0,
+                            0
+                        ],
+                        [
+                            0,
+                            1,
+                            0
+                        ],
+                        [
+                            0,
+                            0,
+                            1
+                        ]
+                    ],
+                    "global_trans_matrix": [
+                        [
+                            1,
+                            0,
+                            0
+                        ],
+                        [
+                            0,
+                            -1,
+                            0
+                        ],
+                        [
+                            0,
+                            0,
+                            -1
+                        ]
+                    ],
+                    "robot_pose": [
+                        [
+                            0,
+                            -0.65,
+                            0.0,
+                            0.707,
+                            0,
+                            0,
+                            0.707
+                        ]
+                    ],
+                    "planner": "curobo",
+                    "dual_arm": true,
+                    "rotate_lim": [
+                        0,
+                        1
+                    ],
+                    "grasp_perfect_direction": [
+                        "front_right",
+                        "front_left"
+                    ],
+                    "static_camera_list": [
+                        {
+                            "name": "head_camera",
+                            "type": "D435",
+                            "position": [
+                                -0.032,
+                                -0.45,
+                                1.35
+                            ],
+                            "forward": [
+                                0,
+                                0.6,
+                                -0.8
+                            ],
+                            "left": [
+                                -1,
+                                0,
+                                0
+                            ]
+                        },
+                        {
+                            "name": "front_camera",
+                            "type": "D435",
+                            "position": [
+                                0,
+                                -0.45,
+                                0.85
+                            ],
+                            "forward": [
+                                0,
+                                1,
+                                -0.1
+                            ],
+                            "left": [
+                                -1,
+                                0,
+                                0
+                            ]
+                        }
+                    ]
+                },
+                "right_embodiment_config": {
+                    "urdf_path": "./urdf/arx5_description_isaac.urdf",
+                    "srdf_path": "./srdf/arx5_description_isaac.srdf",
+                    "joint_stiffness": 1000,
+                    "joint_damping": 200,
+                    "gripper_stiffness": 1000,
+                    "gripper_damping": 200,
+                    "move_group": [
+                        "fl_link6",
+                        "fr_link6"
+                    ],
+                    "ee_joints": [
+                        "fl_joint6",
+                        "fr_joint6"
+                    ],
+                    "arm_joints_name": [
+                        [
+                            "fl_joint1",
+                            "fl_joint2",
+                            "fl_joint3",
+                            "fl_joint4",
+                            "fl_joint5",
+                            "fl_joint6"
+                        ],
+                        [
+                            "fr_joint1",
+                            "fr_joint2",
+                            "fr_joint3",
+                            "fr_joint4",
+                            "fr_joint5",
+                            "fr_joint6"
+                        ]
+                    ],
+                    "gripper_name": [
+                        {
+                            "base": "fl_joint7",
+                            "mimic": [
+                                [
+                                    "fl_joint8",
+                                    1.0,
+                                    0.0
+                                ]
+                            ]
+                        },
+                        {
+                            "base": "fr_joint7",
+                            "mimic": [
+                                [
+                                    "fr_joint8",
+                                    1.0,
+                                    0.0
+                                ]
+                            ]
+                        }
+                    ],
+                    "gripper_bias": 0.12,
+                    "gripper_scale": [
+                        -0.01,
+                        0.045
+                    ],
+                    "homestate": [
+                        [
+                            0,
+                            0,
+                            0,
+                            0,
+                            0,
+                            0
+                        ],
+                        [
+                            0,
+                            0,
+                            0,
+                            0,
+                            0,
+                            0
+                        ]
+                    ],
+                    "delta_matrix": [
+                        [
+                            1,
+                            0,
+                            0
+                        ],
+                        [
+                            0,
+                            1,
+                            0
+                        ],
+                        [
+                            0,
+                            0,
+                            1
+                        ]
+                    ],
+                    "global_trans_matrix": [
+                        [
+                            1,
+                            0,
+                            0
+                        ],
+                        [
+                            0,
+                            -1,
+                            0
+                        ],
+                        [
+                            0,
+                            0,
+                            -1
+                        ]
+                    ],
+                    "robot_pose": [
+                        [
+                            0,
+                            -0.65,
+                            0.0,
+                            0.707,
+                            0,
+                            0,
+                            0.707
+                        ]
+                    ],
+                    "planner": "curobo",
+                    "dual_arm": true,
+                    "rotate_lim": [
+                        0,
+                        1
+                    ],
+                    "grasp_perfect_direction": [
+                        "front_right",
+                        "front_left"
+                    ],
+                    "static_camera_list": [
+                        {
+                            "name": "head_camera",
+                            "type": "D435",
+                            "position": [
+                                -0.032,
+                                -0.45,
+                                1.35
+                            ],
+                            "forward": [
+                                0,
+                                0.6,
+                                -0.8
+                            ],
+                            "left": [
+                                -1,
+                                0,
+                                0
+                            ]
+                        },
+                        {
+                            "name": "front_camera",
+                            "type": "D435",
+                            "position": [
+                                0,
+                                -0.45,
+                                0.85
+                            ],
+                            "forward": [
+                                0,
+                                1,
+                                -0.1
+                            ],
+                            "left": [
+                                -1,
+                                0,
+                                0
+                            ]
+                        }
+                    ]
+                },
+                "embodiment_name": "aloha-agilex",
+                "task_config": "relation_validation_d14",
+                "need_plan": false,
+                "save_data": true
+            }
+        },
+        "object_catalog": [
+            {
+                "object_id": -3,
+                "name": "right_ee",
+                "entity_kind": "end_effector",
+                "role": "robot",
+                "semantic_label": "right_end_effector",
+                "asset_ref": null,
+                "is_target": false,
+                "is_distractor": false,
+                "is_furniture": false,
+                "is_robot": true,
+                "is_articulated": false,
+                "is_movable": false,
+                "provenance": "privileged",
+                "metadata": {
+                    "structural": true,
+                    "side": "right"
+                }
+            },
+            {
+                "object_id": -2,
+                "name": "left_ee",
+                "entity_kind": "end_effector",
+                "role": "robot",
+                "semantic_label": "left_end_effector",
+                "asset_ref": null,
+                "is_target": false,
+                "is_distractor": false,
+                "is_furniture": false,
+                "is_robot": true,
+                "is_articulated": false,
+                "is_movable": false,
+                "provenance": "privileged",
+                "metadata": {
+                    "structural": true,
+                    "side": "left"
+                }
+            },
+            {
+                "object_id": -1,
+                "name": "robot",
+                "entity_kind": "robot",
+                "role": "robot",
+                "semantic_label": "robot",
+                "asset_ref": null,
+                "is_target": false,
+                "is_distractor": false,
+                "is_furniture": false,
+                "is_robot": true,
+                "is_articulated": true,
+                "is_movable": false,
+                "provenance": "privileged",
+                "metadata": {
+                    "structural": true
+                }
+            },
+            {
+                "object_id": 1,
+                "name": "ground",
+                "entity_kind": "actor",
+                "role": "furniture",
+                "semantic_label": "ground",
+                "asset_ref": null,
+                "is_target": false,
+                "is_distractor": false,
+                "is_furniture": true,
+                "is_robot": false,
+                "is_articulated": false,
+                "is_movable": false,
+                "provenance": "privileged",
+                "metadata": {}
+            },
+            {
+                "object_id": 63,
+                "name": "wall",
+                "entity_kind": "actor",
+                "role": "furniture",
+                "semantic_label": "wall",
+                "asset_ref": null,
+                "is_target": false,
+                "is_distractor": false,
+                "is_furniture": true,
+                "is_robot": false,
+                "is_articulated": false,
+                "is_movable": false,
+                "provenance": "privileged",
+                "metadata": {}
+            },
+            {
+                "object_id": 64,
+                "name": "table",
+                "entity_kind": "actor",
+                "role": "furniture",
+                "semantic_label": "table",
+                "asset_ref": null,
+                "is_target": false,
+                "is_distractor": false,
+                "is_furniture": true,
+                "is_robot": false,
+                "is_articulated": false,
+                "is_movable": false,
+                "provenance": "privileged",
+                "metadata": {}
+            },
+            {
+                "object_id": 65,
+                "name": "fridge_left",
+                "entity_kind": "articulation",
+                "role": "furniture",
+                "semantic_label": "fridge_left",
+                "asset_ref": null,
+                "is_target": false,
+                "is_distractor": false,
+                "is_furniture": true,
+                "is_robot": false,
+                "is_articulated": true,
+                "is_movable": false,
+                "provenance": "privileged",
+                "metadata": {
+                    "segmentation_ids": [
+                        65,
+                        66,
+                        67,
+                        68,
+                        69
+                    ]
+                }
+            },
+            {
+                "object_id": 70,
+                "name": "microwave_center",
+                "entity_kind": "articulation",
+                "role": "furniture",
+                "semantic_label": "microwave_center",
+                "asset_ref": null,
+                "is_target": false,
+                "is_distractor": false,
+                "is_furniture": true,
+                "is_robot": false,
+                "is_articulated": true,
+                "is_movable": false,
+                "provenance": "privileged",
+                "metadata": {
+                    "segmentation_ids": [
+                        70,
+                        71,
+                        72,
+                        73,
+                        74
+                    ]
+                }
+            },
+            {
+                "object_id": 75,
+                "name": "basket_right",
+                "entity_kind": "actor",
+                "role": "furniture",
+                "semantic_label": "basket_right",
+                "asset_ref": null,
+                "is_target": false,
+                "is_distractor": false,
+                "is_furniture": true,
+                "is_robot": false,
+                "is_articulated": false,
+                "is_movable": false,
+                "provenance": "privileged",
+                "metadata": {}
+            },
+            {
+                "object_id": 76,
+                "name": "cabinet",
+                "entity_kind": "articulation",
+                "role": "furniture",
+                "semantic_label": "cabinet",
+                "asset_ref": null,
+                "is_target": false,
+                "is_distractor": false,
+                "is_furniture": true,
+                "is_robot": false,
+                "is_articulated": true,
+                "is_movable": false,
+                "provenance": "privileged",
+                "metadata": {
+                    "segmentation_ids": [
+                        76,
+                        77,
+                        78,
+                        79,
+                        80,
+                        81,
+                        82
+                    ]
+                }
+            },
+            {
+                "object_id": 83,
+                "name": "cabinet_wall_filler",
+                "entity_kind": "actor",
+                "role": "furniture",
+                "semantic_label": "cabinet_wall_filler",
+                "asset_ref": null,
+                "is_target": false,
+                "is_distractor": false,
+                "is_furniture": true,
+                "is_robot": false,
+                "is_articulated": false,
+                "is_movable": false,
+                "provenance": "privileged",
+                "metadata": {}
+            },
+            {
+                "object_id": 92,
+                "name": "task_sauce_can",
+                "entity_kind": "actor",
+                "role": "target",
+                "semantic_label": "task_sauce_can",
+                "asset_ref": null,
+                "is_target": true,
+                "is_distractor": false,
+                "is_furniture": false,
+                "is_robot": false,
+                "is_articulated": false,
+                "is_movable": true,
+                "provenance": "privileged",
+                "metadata": {}
+            },
+            {
+                "object_id": 93,
+                "name": "029_olive-oil",
+                "entity_kind": "actor",
+                "role": "distractor",
+                "semantic_label": "029_olive-oil",
+                "asset_ref": "029_olive-oil/base3",
+                "is_target": false,
+                "is_distractor": true,
+                "is_furniture": false,
+                "is_robot": false,
+                "is_articulated": false,
+                "is_movable": true,
+                "provenance": "privileged",
+                "metadata": {}
+            },
+            {
+                "object_id": 94,
+                "name": "091_kettle",
+                "entity_kind": "actor",
+                "role": "distractor",
+                "semantic_label": "091_kettle",
+                "asset_ref": "091_kettle/base4",
+                "is_target": false,
+                "is_distractor": true,
+                "is_furniture": false,
+                "is_robot": false,
+                "is_articulated": false,
+                "is_movable": true,
+                "provenance": "privileged",
+                "metadata": {}
+            },
+            {
+                "object_id": 95,
+                "name": "029_olive-oil",
+                "entity_kind": "actor",
+                "role": "distractor",
+                "semantic_label": "029_olive-oil",
+                "asset_ref": "029_olive-oil/base3",
+                "is_target": false,
+                "is_distractor": true,
+                "is_furniture": false,
+                "is_robot": false,
+                "is_articulated": false,
+                "is_movable": true,
+                "provenance": "privileged",
+                "metadata": {}
+            },
+            {
+                "object_id": 96,
+                "name": "064_msg",
+                "entity_kind": "actor",
+                "role": "distractor",
+                "semantic_label": "064_msg",
+                "asset_ref": "064_msg/base1",
+                "is_target": false,
+                "is_distractor": true,
+                "is_furniture": false,
+                "is_robot": false,
+                "is_articulated": false,
+                "is_movable": true,
+                "provenance": "privileged",
+                "metadata": {}
+            },
+            {
+                "object_id": 97,
+                "name": "029_olive-oil",
+                "entity_kind": "actor",
+                "role": "distractor",
+                "semantic_label": "029_olive-oil",
+                "asset_ref": "029_olive-oil/base3",
+                "is_target": false,
+                "is_distractor": true,
+                "is_furniture": false,
+                "is_robot": false,
+                "is_articulated": false,
+                "is_movable": true,
+                "provenance": "privileged",
+                "metadata": {}
+            },
+            {
+                "object_id": 98,
+                "name": "028_roll-paper",
+                "entity_kind": "actor",
+                "role": "distractor",
+                "semantic_label": "028_roll-paper",
+                "asset_ref": "028_roll-paper/base3",
+                "is_target": false,
+                "is_distractor": true,
+                "is_furniture": false,
+                "is_robot": false,
+                "is_articulated": false,
+                "is_movable": true,
+                "provenance": "privileged",
+                "metadata": {}
+            },
+            {
+                "object_id": 99,
+                "name": "064_msg",
+                "entity_kind": "actor",
+                "role": "distractor",
+                "semantic_label": "064_msg",
+                "asset_ref": "064_msg/base1",
+                "is_target": false,
+                "is_distractor": true,
+                "is_furniture": false,
+                "is_robot": false,
+                "is_articulated": false,
+                "is_movable": true,
+                "provenance": "privileged",
+                "metadata": {}
+            },
+            {
+                "object_id": 100,
+                "name": "029_olive-oil",
+                "entity_kind": "actor",
+                "role": "distractor",
+                "semantic_label": "029_olive-oil",
+                "asset_ref": "029_olive-oil/base3",
+                "is_target": false,
+                "is_distractor": true,
+                "is_furniture": false,
+                "is_robot": false,
+                "is_articulated": false,
+                "is_movable": true,
+                "provenance": "privileged",
+                "metadata": {}
+            },
+            {
+                "object_id": 101,
+                "name": "112_tea-box",
+                "entity_kind": "actor",
+                "role": "distractor",
+                "semantic_label": "112_tea-box",
+                "asset_ref": "112_tea-box/base4",
+                "is_target": false,
+                "is_distractor": true,
+                "is_furniture": false,
+                "is_robot": false,
+                "is_articulated": false,
+                "is_movable": true,
+                "provenance": "privileged",
+                "metadata": {}
+            },
+            {
+                "object_id": 102,
+                "name": "025_chips-tub",
+                "entity_kind": "actor",
+                "role": "distractor",
+                "semantic_label": "025_chips-tub",
+                "asset_ref": "025_chips-tub/base1",
+                "is_target": false,
+                "is_distractor": true,
+                "is_furniture": false,
+                "is_robot": false,
+                "is_articulated": false,
+                "is_movable": true,
+                "provenance": "privileged",
+                "metadata": {}
+            }
+        ],
+        "action_nodes": [
+            {
+                "action_id": 0,
+                "action_type": "approach",
+                "execution_phase": "forward_grasp",
+                "arm": "right",
+                "start_frame": 0,
+                "end_frame": 38,
+                "status": "succeeded",
+                "target_object_id": 92,
+                "destination_object_id": null,
+                "effector_object_id": -3,
+                "parameters": {
+                    "primitive": "move",
+                    "target_pose": [
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0
+                    ]
+                },
+                "preconditions": [
+                    {
+                        "relation": "reachable_by",
+                        "source": 92,
+                        "destination": -3
+                    }
+                ],
+                "postconditions": [
+                    {
+                        "predicate": "end_effector_near_target",
+                        "target": 92,
+                        "effector": -3
+                    }
+                ],
+                "provenance": "expert_planner_action"
+            },
+            {
+                "action_id": 1,
+                "action_type": "approach",
+                "execution_phase": "forward_grasp",
+                "arm": "right",
+                "start_frame": 39,
+                "end_frame": 58,
+                "status": "succeeded",
+                "target_object_id": 92,
+                "destination_object_id": null,
+                "effector_object_id": -3,
+                "parameters": {
+                    "primitive": "move",
+                    "target_pose": [
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0
+                    ],
+                    "constraint_pose": [
+                        1,
+                        1,
+                        1,
+                        0,
+                        0,
+                        0
+                    ]
+                },
+                "preconditions": [
+                    {
+                        "relation": "reachable_by",
+                        "source": 92,
+                        "destination": -3
+                    }
+                ],
+                "postconditions": [
+                    {
+                        "predicate": "end_effector_near_target",
+                        "target": 92,
+                        "effector": -3
+                    }
+                ],
+                "provenance": "expert_planner_action"
+            },
+            {
+                "action_id": 2,
+                "action_type": "grasp",
+                "execution_phase": "forward_grasp",
+                "arm": "right",
+                "start_frame": 59,
+                "end_frame": 80,
+                "status": "succeeded",
+                "target_object_id": 92,
+                "destination_object_id": null,
+                "effector_object_id": -3,
+                "parameters": {
+                    "primitive": "gripper",
+                    "target_gripper_pos": 0.0
+                },
+                "preconditions": [
+                    {
+                        "predicate": "end_effector_near_target",
+                        "target": 92,
+                        "effector": -3
+                    }
+                ],
+                "postconditions": [
+                    {
+                        "relation": "held_by",
+                        "source": 92,
+                        "destination": -3
+                    }
+                ],
+                "provenance": "expert_planner_action"
+            },
+            {
+                "action_id": 3,
+                "action_type": "lift",
+                "execution_phase": "transition",
+                "arm": "right",
+                "start_frame": 81,
+                "end_frame": 99,
+                "status": "succeeded",
+                "target_object_id": 92,
+                "destination_object_id": null,
+                "effector_object_id": -3,
+                "parameters": {
+                    "primitive": "move",
+                    "target_pose": [
+                        0.19187143445014954,
+                        -0.053034596145153046,
+                        0.9506865978240967,
+                        0.0018882752172798317,
+                        -0.04969772913948272,
+                        -0.0005834549079758444,
+                        0.9987623489676877
+                    ],
+                    "displacement": {
+                        "x": 0.0,
+                        "y": 0.0,
+                        "z": 0.15,
+                        "move_axis": "world"
+                    }
+                },
+                "preconditions": [
+                    {
+                        "relation": "held_by",
+                        "source": 92,
+                        "destination": -3
+                    }
+                ],
+                "postconditions": [],
+                "provenance": "expert_planner_action"
+            },
+            {
+                "action_id": 4,
+                "action_type": "retreat",
+                "execution_phase": "transition",
+                "arm": "right",
+                "start_frame": 100,
+                "end_frame": 132,
+                "status": "succeeded",
+                "target_object_id": null,
+                "destination_object_id": null,
+                "effector_object_id": -3,
+                "parameters": {
+                    "primitive": "move",
+                    "target_pose": [
+                        0.30643314123153687,
+                        -0.31279805302619934,
+                        0.940990149974823,
+                        0.7035624329273833,
+                        -1.6354480976792096e-05,
+                        6.756292869725122e-06,
+                        0.7106334516895365
+                    ]
+                },
+                "preconditions": [],
+                "postconditions": [],
+                "provenance": "expert_planner_action"
+            },
+            {
+                "action_id": 5,
+                "action_type": "lift",
+                "execution_phase": "transition",
+                "arm": "right",
+                "start_frame": 133,
+                "end_frame": 165,
+                "status": "succeeded",
+                "target_object_id": 92,
+                "destination_object_id": null,
+                "effector_object_id": -3,
+                "parameters": {
+                    "primitive": "move",
+                    "target_pose": [
+                        0.25599218606948854,
+                        -0.1726344084739685,
+                        1.3113073658943177,
+                        0.7015550014264327,
+                        -0.00026715295870428295,
+                        0.0006730467302730192,
+                        0.7126149420345836
+                    ],
+                    "displacement": {
+                        "x": -0.05,
+                        "y": 0.14,
+                        "z": 0.37,
+                        "move_axis": "world"
+                    }
+                },
+                "preconditions": [
+                    {
+                        "relation": "held_by",
+                        "source": 92,
+                        "destination": -3
+                    }
+                ],
+                "postconditions": [],
+                "provenance": "expert_planner_action"
+            },
+            {
+                "action_id": 6,
+                "action_type": "transport",
+                "execution_phase": "transition",
+                "arm": "right",
+                "start_frame": 166,
+                "end_frame": 183,
+                "status": "succeeded",
+                "target_object_id": 92,
+                "destination_object_id": null,
+                "effector_object_id": -3,
+                "parameters": {
+                    "primitive": "move",
+                    "target_pose": [
+                        0.257015585899353,
+                        -0.02284990847110749,
+                        1.2907634782791138,
+                        0.7027035571206618,
+                        0.00037751161072623973,
+                        0.0015630038165063143,
+                        0.7114809381241514
+                    ],
+                    "displacement": {
+                        "x": 0.0,
+                        "y": 0.15,
+                        "z": -0.02,
+                        "move_axis": "world"
+                    }
+                },
+                "preconditions": [
+                    {
+                        "relation": "held_by",
+                        "source": 92,
+                        "destination": -3
+                    }
+                ],
+                "postconditions": [],
+                "provenance": "expert_planner_action"
+            },
+            {
+                "action_id": 7,
+                "action_type": "release",
+                "execution_phase": "final_descent",
+                "arm": "right",
+                "start_frame": 184,
+                "end_frame": 205,
+                "status": "succeeded",
+                "target_object_id": 92,
+                "destination_object_id": null,
+                "effector_object_id": -3,
+                "parameters": {
+                    "primitive": "gripper",
+                    "target_gripper_pos": 1.0
+                },
+                "preconditions": [
+                    {
+                        "relation": "held_by",
+                        "source": 92,
+                        "destination": -3
+                    }
+                ],
+                "postconditions": [
+                    {
+                        "predicate": "not_held_by",
+                        "target": 92,
+                        "effector": -3
+                    }
+                ],
+                "provenance": "expert_planner_action"
+            },
+            {
+                "action_id": 8,
+                "action_type": "verify_success",
+                "execution_phase": "success_check",
+                "arm": "none",
+                "start_frame": 205,
+                "end_frame": 205,
+                "status": "succeeded",
+                "target_object_id": null,
+                "destination_object_id": null,
+                "effector_object_id": null,
+                "parameters": {},
+                "preconditions": [],
+                "postconditions": [
+                    {
+                        "predicate": "task_success",
+                        "value": true
+                    }
+                ],
+                "provenance": "task_success_check"
+            }
+        ],
+        "metadata": {
+            "task_name": "put_sauce_can_in_cabinet",
+            "task_config": "relation_validation_d14",
+            "seed": 3,
+            "success": true,
+            "episode_id": "put_sauce_can_in_cabinet_0",
+            "data_file": "data/episode0.hdf5",
+            "video_file": "video/episode0.mp4"
+        },
+        "collision_metric_contact_events_summary": {
+            "count": 2278
+        }
+    }
+}

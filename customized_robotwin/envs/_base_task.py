@@ -203,7 +203,7 @@ DEFAULT_VISIBILITY_BUCKETS = [
 
 class Base_Task(gym.Env):
     BENCHMARK_SCHEMA_NAME = "robopro_benchmark_support"
-    BENCHMARK_SCHEMA_VERSION = "1.4.0"
+    BENCHMARK_SCHEMA_VERSION = "1.5.0"
     BENCHMARK_EXPORTER_NAME = "robopro_benchmark_export"
     BENCHMARK_ROBOT_OBJECT_ID = -1
     BENCHMARK_LEFT_EE_OBJECT_ID = -2
@@ -256,6 +256,15 @@ class Base_Task(gym.Env):
         "raw_contact",
         "grasped_by_code",
     )
+    BENCHMARK_CANONICAL_ACTION_NAMES = (
+        "approach", "grasp", "lift", "transport", "place", "release",
+        "retreat", "verify_success", "approach_handle", "grasp_handle",
+        "open_articulation", "close_articulation",
+    )
+    BENCHMARK_EXECUTION_PHASE_NAMES = (
+        "setup", "forward_grasp", "transition", "backward_placement",
+        "final_descent", "success_check",
+    )
 
     def __init__(self):
         pass
@@ -269,6 +278,12 @@ class Base_Task(gym.Env):
             self._benchmark_object_catalog_cache = None
         if not hasattr(self, "_benchmark_contact_event_log"):
             self._benchmark_contact_event_log = []
+        if not hasattr(self, "_benchmark_action_nodes"):
+            self._benchmark_action_nodes = []
+        if not hasattr(self, "_benchmark_held_object_ids"):
+            self._benchmark_held_object_ids = {"left": None, "right": None}
+        if not hasattr(self, "_benchmark_held_object_state_known"):
+            self._benchmark_held_object_state_known = {"left": False, "right": False}
         if not hasattr(self, "_benchmark_reachability_config"):
             self._benchmark_reachability_config = {
                 "enabled": True,
@@ -404,6 +419,9 @@ class Base_Task(gym.Env):
         self._benchmark_episode_record = None
         self._benchmark_object_catalog_cache = None
         self._benchmark_contact_event_log = []
+        self._benchmark_action_nodes = []
+        self._benchmark_held_object_ids = {"left": None, "right": None}
+        self._benchmark_held_object_state_known = {"left": False, "right": False}
         relation_config = kwags.get("benchmark_relations", {}) or {}
         reachability_config = relation_config.get("reachable_by", {}) or {}
         self._benchmark_reachability_config = {
@@ -970,6 +988,46 @@ class Base_Task(gym.Env):
             and np.all(center <= np.asarray(container_max) + tolerance)
         )
 
+    def _infer_benchmark_destination_object_id(self, target_pose, excluded_entity=None):
+        """Choose the container/support nearest a placement target pose.
+
+        This is privileged geometric provenance for expert actions, not a visual
+        prediction. Tasks may provide an explicit destination id in the future.
+        """
+        try:
+            point = np.asarray(transforms._toPose(target_pose).p, dtype=float)
+        except Exception:
+            return None
+        excluded_id = self._benchmark_entity_object_id(excluded_entity)
+        actor_by_id = {}
+        for entity in self.scene.get_all_actors():
+            object_id = getattr(entity, "per_scene_id", None)
+            if object_id is not None:
+                actor_by_id[int(object_id)] = entity
+        for articulation in self.scene.get_all_articulations():
+            links = articulation.get_links()
+            root = getattr(links[0], "entity", None) if links else None
+            object_id = getattr(root, "per_scene_id", None)
+            if object_id is not None:
+                actor_by_id[int(object_id)] = articulation
+
+        candidates = []
+        for entry in self._get_benchmark_object_catalog():
+            object_id = int(entry["object_id"])
+            if object_id == excluded_id or entry.get("is_robot"):
+                continue
+            if not (self._is_benchmark_container_entry(entry) or entry.get("is_furniture")):
+                continue
+            entity = actor_by_id.get(object_id)
+            aabb = self._get_benchmark_entity_aabb(entity) if entity is not None else None
+            if aabb is None:
+                continue
+            lower, upper = np.asarray(aabb[0]), np.asarray(aabb[1])
+            outside = np.maximum(np.maximum(lower - point, point - upper), 0.0)
+            distance = float(np.linalg.norm(outside))
+            candidates.append((distance, object_id))
+        return min(candidates)[1] if candidates else None
+
     def _build_benchmark_visibility_relations(self, object_catalog, actor_by_id):
         """Build object-to-camera visibility from already captured segmentation."""
         object_count = len(object_catalog)
@@ -1344,8 +1402,213 @@ class Base_Task(gym.Env):
             }
         )
 
+    @staticmethod
+    def _benchmark_entity_object_id(entity):
+        raw_entity = getattr(entity, "actor", entity)
+        object_id = getattr(raw_entity, "per_scene_id", None)
+        if object_id is None and hasattr(raw_entity, "get_links"):
+            links = raw_entity.get_links()
+            root = getattr(links[0], "entity", None) if links else None
+            object_id = getattr(root, "per_scene_id", None)
+        return None if object_id is None else int(object_id)
+
+    def _benchmark_articulation_by_object_id(self, object_id):
+        if object_id is None or not hasattr(self, "scene"):
+            return None
+        for articulation in self.scene.get_all_articulations():
+            if self._benchmark_entity_object_id(articulation) == int(object_id):
+                return articulation
+        return None
+
+
+    @staticmethod
+    def _benchmark_articulation_joint_value(articulation, joint_index):
+        if articulation is None or joint_index is None:
+            return None
+        qpos = np.asarray(articulation.get_qpos(), dtype=np.float64)
+        index = int(joint_index)
+        if index < 0 or index >= len(qpos):
+            return None
+        return float(qpos[index])
+
+    def _benchmark_held_object_id(self, arm):
+        arm = str(arm)
+        semantic_held_id = (
+            getattr(self, "_benchmark_held_object_ids", {}) or {}
+        ).get(arm)
+        semantic_state_known = (
+            getattr(self, "_benchmark_held_object_state_known", {}) or {}
+        ).get(arm, False)
+        if semantic_state_known:
+            return None if semantic_held_id is None else int(semantic_held_id)
+
+        held_name = (getattr(self, "_held_actors", {}) or {}).get(str(arm))
+        if not held_name:
+            return None
+        for entry in self._get_benchmark_object_catalog():
+            if entry.get("name") == held_name:
+                return int(entry["object_id"])
+        return None
+
+    @staticmethod
+    def _benchmark_action_conditions(action_type, target_id, destination_id, effector_id):
+        target = None if target_id is None else int(target_id)
+        destination = None if destination_id is None else int(destination_id)
+        effector = None if effector_id is None else int(effector_id)
+        pre, post = [], []
+        if action_type in {"approach", "approach_handle"} and target is not None:
+            pre.append({"relation": "reachable_by", "source": target, "destination": effector})
+            post.append({"predicate": "end_effector_near_target", "target": target, "effector": effector})
+        elif action_type == "grasp" and target is not None:
+            pre.append({"predicate": "end_effector_near_target", "target": target, "effector": effector})
+            post.append({"relation": "held_by", "source": target, "destination": effector})
+        elif action_type == "grasp_handle" and target is not None:
+            pre.append({"predicate": "end_effector_near_target", "target": target, "effector": effector})
+            post.append({"predicate": "handle_engaged", "target": target, "effector": effector})
+        elif action_type in {"lift", "transport", "place"} and target is not None:
+            pre.append({"relation": "held_by", "source": target, "destination": effector})
+            if action_type == "place" and destination is not None:
+                post.append({"relation_any_of": ["in", "on"], "source": target, "destination": destination})
+        elif action_type in {"open_articulation", "close_articulation"} and target is not None:
+            pre.append({"predicate": "articulation_operable", "target": target, "effector": effector})
+            post.append({"predicate": "articulation_joint_changed", "target": target})
+        elif action_type == "release" and target is not None:
+            pre.append({"relation": "held_by", "source": target, "destination": effector})
+            post.append({"predicate": "not_held_by", "target": target, "effector": effector})
+        elif action_type == "verify_success":
+            post.append({"predicate": "task_success"})
+        return pre, post
+
+    def _begin_benchmark_action(self, action):
+        """Create a temporal action node immediately before planner execution."""
+        self._ensure_benchmark_export_state()
+        args = dict(getattr(action, "args", {}) or {})
+        action_type = args.pop("benchmark_action", None)
+        if action_type is None:
+            action_type = "transport" if action.action == "move" else (
+                "grasp" if float(action.target_gripper_pos) <= 0.5 else "release"
+            )
+        phase = args.pop("benchmark_phase", "transition")
+        target_id = args.pop("benchmark_target_object_id", None)
+        destination_id = args.pop("benchmark_destination_object_id", None)
+        arm = str(action.arm_tag)
+        if target_id is None and action_type in {"lift", "transport", "place", "release"}:
+            target_id = self._benchmark_held_object_id(arm)
+        effector_id = (
+            self.BENCHMARK_LEFT_EE_OBJECT_ID if arm == "left"
+            else self.BENCHMARK_RIGHT_EE_OBJECT_ID
+        )
+        parameters = {"primitive": action.action}
+        if action.action == "move":
+            parameters["target_pose"] = list(action.target_pose)
+        else:
+            parameters["target_gripper_pos"] = float(action.target_gripper_pos)
+        parameters.update(self._export_jsonable(args))
+        articulation_joint_index = parameters.get("articulation_joint_index")
+        articulation = self._benchmark_articulation_by_object_id(target_id)
+        articulation_joint_before = self._benchmark_articulation_joint_value(
+            articulation, articulation_joint_index
+        )
+        preconditions, postconditions = self._benchmark_action_conditions(
+            action_type, target_id, destination_id, effector_id
+        )
+        action_id = len(self._benchmark_action_nodes)
+        self._benchmark_action_nodes.append({
+            "action_id": action_id,
+            "action_type": action_type,
+            "execution_phase": phase,
+            "arm": arm,
+            "start_frame": int(getattr(self, "FRAME_IDX", 0)),
+            "end_frame": int(getattr(self, "FRAME_IDX", 0)),
+            "status": "executing",
+            "target_object_id": target_id,
+            "destination_object_id": destination_id,
+            "effector_object_id": effector_id,
+            "parameters": parameters,
+            "preconditions": preconditions,
+            "postconditions": postconditions,
+            "provenance": "expert_planner_action",
+            "observed_effects": [],
+            "_articulation_joint_before": articulation_joint_before,
+            "_recorded_frame_count": 0,
+        })
+        return action_id
+
+    def _finish_benchmark_action(self, action_id, succeeded):
+        if action_id is None or action_id >= len(self._benchmark_action_nodes):
+            return
+        node = self._benchmark_action_nodes[action_id]
+        current_frame = int(getattr(self, "FRAME_IDX", 0))
+        node["_recorded_frame_count"] = max(0, current_frame - node["start_frame"])
+        node["end_frame"] = max(node["start_frame"], current_frame - 1)
+        node["status"] = "succeeded" if succeeded else "failed"
+        joint_before = node.pop("_articulation_joint_before", None)
+        joint_index = node.get("parameters", {}).get("articulation_joint_index")
+        articulation = self._benchmark_articulation_by_object_id(node.get("target_object_id"))
+        joint_after = self._benchmark_articulation_joint_value(articulation, joint_index)
+        if joint_before is not None and joint_after is not None:
+            node["observed_effects"].append({
+                "attribute": "joint_position",
+                "object": int(node["target_object_id"]),
+                "joint_index": int(joint_index),
+                "before": joint_before,
+                "after": joint_after,
+                "delta": joint_after - joint_before,
+            })
+        if not succeeded:
+            return
+
+        arm = node.get("arm")
+        if arm not in {"left", "right"}:
+            return
+        if node.get("action_type") == "grasp" and node.get("target_object_id") is not None:
+            self._benchmark_held_object_ids[arm] = int(node["target_object_id"])
+            self._benchmark_held_object_state_known[arm] = True
+        elif node.get("action_type") == "release":
+            self._benchmark_held_object_ids[arm] = None
+            self._benchmark_held_object_state_known[arm] = True
+
+    def _drop_unrecorded_benchmark_actions(self):
+        """Remove planner/search calls that produced no saved benchmark frame."""
+        kept = []
+        for node in self._benchmark_action_nodes:
+            if node.get("action_type") != "verify_success" and node.get("_recorded_frame_count", 0) <= 0:
+                continue
+            clean = deepcopy(node)
+            clean.pop("_recorded_frame_count", None)
+            clean["action_id"] = len(kept)
+            kept.append(clean)
+        self._benchmark_action_nodes = kept
+
+    def _append_benchmark_success_check_action(self, success):
+        if self._benchmark_action_nodes and self._benchmark_action_nodes[-1]["action_type"] == "verify_success":
+            self._benchmark_action_nodes[-1]["status"] = "succeeded" if bool(success) else "failed"
+            self._benchmark_action_nodes[-1]["postconditions"] = [
+                {"predicate": "task_success", "value": bool(success)}
+            ]
+            return
+        frame = max(0, int(getattr(self, "FRAME_IDX", 0)) - 1)
+        self._benchmark_action_nodes.append({
+            "action_id": len(self._benchmark_action_nodes),
+            "action_type": "verify_success",
+            "execution_phase": "success_check",
+            "arm": "none",
+            "start_frame": frame,
+            "end_frame": frame,
+            "status": "succeeded" if bool(success) else "failed",
+            "target_object_id": None,
+            "destination_object_id": None,
+            "effector_object_id": None,
+            "parameters": {},
+            "preconditions": [],
+            "postconditions": [{"predicate": "task_success", "value": bool(success)}],
+            "provenance": "task_success_check",
+        })
+
     def build_benchmark_episode_record(self, success=None):
         self._ensure_benchmark_export_state()
+        self._drop_unrecorded_benchmark_actions()
+        self._append_benchmark_success_check_action(success)
         export_ctx = getattr(self, "_benchmark_export_context", {}) or {}
         scene_info = self._export_jsonable(getattr(self, "info", {}) or {})
         collision_info = {}
@@ -1395,6 +1658,7 @@ class Base_Task(gym.Env):
         record["episode_id"] = episode_id
         record["scenario_metadata"] = scenario_metadata
         record["object_catalog"] = self._get_benchmark_object_catalog()
+        record["action_nodes"] = deepcopy(self._benchmark_action_nodes)
         record["metadata"] = {
             "task_name": self.task_name,
             "task_config": task_config,
@@ -1573,6 +1837,187 @@ class Base_Task(gym.Env):
                     dtype=object,
                 ),
                 dtype=string_dtype,
+            )
+
+            if "action_nodes" in export_group:
+                del export_group["action_nodes"]
+            action_group = export_group.create_group("action_nodes")
+            action_nodes = record.get("action_nodes", []) or []
+            action_group.create_dataset(
+                "action_ids",
+                data=np.array([node["action_id"] for node in action_nodes], dtype=np.int64),
+            )
+            for dataset_name, field in (
+                ("action_types", "action_type"),
+                ("execution_phases", "execution_phase"),
+                ("arms", "arm"),
+                ("statuses", "status"),
+                ("provenance", "provenance"),
+            ):
+                action_group.create_dataset(
+                    dataset_name,
+                    data=np.array([node.get(field, "") for node in action_nodes], dtype=object),
+                    dtype=string_dtype,
+                )
+            for field in ("start_frame", "end_frame"):
+                action_group.create_dataset(
+                    field,
+                    data=np.array([node[field] for node in action_nodes], dtype=np.int64),
+                )
+            for field in ("target_object_id", "destination_object_id", "effector_object_id"):
+                values = [node.get(field) for node in action_nodes]
+                action_group.create_dataset(
+                    field,
+                    data=np.array([0 if value is None else value for value in values], dtype=np.int64),
+                )
+                action_group.create_dataset(
+                    f"{field}_valid",
+                    data=np.array([value is not None for value in values], dtype=np.bool_),
+                )
+            for dataset_name, field in (
+                ("parameters_json", "parameters"),
+                ("preconditions_json", "preconditions"),
+                ("postconditions_json", "postconditions"),
+            ):
+                action_group.create_dataset(
+                    dataset_name,
+                    data=np.array([
+                        json.dumps(self._export_jsonable(node.get(field, {})), ensure_ascii=False, sort_keys=True)
+                        for node in action_nodes
+                    ], dtype=object),
+                    dtype=string_dtype,
+                )
+
+            relation_ids = []
+            if relation_state_group is not None and "object_ids" in relation_state_group:
+                relation_ids = relation_state_group["object_ids"][()].tolist()
+            relation_index = {int(object_id): idx for idx, object_id in enumerate(relation_ids)}
+            effector_index = {
+                self.BENCHMARK_LEFT_EE_OBJECT_ID: 0,
+                self.BENCHMARK_RIGHT_EE_OBJECT_ID: 1,
+            }
+            observed_effects = []
+            for node in action_nodes:
+                changes = deepcopy(node.get("observed_effects", []))
+                start, end = int(node["start_frame"]), int(node["end_frame"])
+                source_id = node.get("target_object_id")
+                destination_id = node.get("destination_object_id")
+                effector_id = node.get("effector_object_id")
+                source_idx = relation_index.get(source_id)
+                destination_idx = relation_index.get(destination_id)
+                action_type = node.get("action_type")
+                object_relations = ("in", "on") if action_type in {"place", "release"} else ()
+                bipartite_relations = {
+                    "approach": ("reachable_by",),
+                    "approach_handle": ("reachable_by",),
+                    "grasp": ("held_by",),
+                    "release": ("held_by",),
+                }.get(action_type, ())
+                for relation_name in object_relations:
+                    if (
+                        relation_state_group is None or relation_name not in relation_state_group
+                        or source_idx is None or destination_idx is None
+                    ):
+                        continue
+                    relation = relation_state_group[relation_name]
+                    relation_start = max(0, min(start, relation.shape[0] - 1))
+                    relation_end = max(relation_start, min(end, relation.shape[0] - 1))
+                    valid_name = "containment_valid" if relation_name == "in" else None
+                    if valid_name and valid_name in relation_state_group:
+                        valid = relation_state_group[valid_name]
+                        if not (
+                            valid[relation_start, source_idx, destination_idx]
+                            and valid[relation_end, source_idx, destination_idx]
+                        ):
+                            continue
+                    before = bool(relation[relation_start, source_idx, destination_idx])
+                    after = bool(relation[relation_end, source_idx, destination_idx])
+                    if before != after:
+                        changes.append({
+                            "relation": relation_name,
+                            "source": int(source_id),
+                            "destination": int(destination_id),
+                            "before": before,
+                            "after": after,
+                        })
+                for relation_name in bipartite_relations:
+                    ee_idx = effector_index.get(effector_id)
+                    if (
+                        relation_state_group is None or relation_name not in relation_state_group
+                        or source_idx is None or ee_idx is None
+                    ):
+                        continue
+                    relation = relation_state_group[relation_name]
+                    relation_start = max(0, min(start, relation.shape[0] - 1))
+                    relation_end = max(relation_start, min(end, relation.shape[0] - 1))
+                    valid_name = "reachable_by_valid" if relation_name == "reachable_by" else None
+                    if valid_name and valid_name in relation_state_group:
+                        valid = relation_state_group[valid_name]
+                        if not (
+                            valid[relation_start, source_idx, ee_idx]
+                            and valid[relation_end, source_idx, ee_idx]
+                        ):
+                            continue
+                    before = bool(relation[relation_start, source_idx, ee_idx])
+                    after = bool(relation[relation_end, source_idx, ee_idx])
+                    if before != after:
+                        changes.append({
+                            "relation": relation_name,
+                            "source": int(source_id),
+                            "destination": int(effector_id),
+                            "before": before,
+                            "after": after,
+                        })
+                observed_effects.append(changes)
+            action_group.create_dataset(
+                "observed_effects_json",
+                data=np.array([
+                    json.dumps(effect, ensure_ascii=False, sort_keys=True)
+                    for effect in observed_effects
+                ], dtype=object),
+                dtype=string_dtype,
+            )
+            action_group.create_dataset(
+                "canonical_action_names",
+                data=np.array(self.BENCHMARK_CANONICAL_ACTION_NAMES, dtype=object),
+                dtype=string_dtype,
+            )
+            action_group.create_dataset(
+                "execution_phase_names",
+                data=np.array(self.BENCHMARK_EXECUTION_PHASE_NAMES, dtype=object),
+                dtype=string_dtype,
+            )
+            frame_count = int(object_state_group["pose_world"].shape[0]) if object_state_group is not None else 0
+            active = np.zeros((frame_count, len(action_nodes)), dtype=np.bool_)
+            for action_idx, node in enumerate(action_nodes):
+                if frame_count == 0:
+                    continue
+                start = max(0, min(int(node["start_frame"]), frame_count - 1))
+                end = max(start, min(int(node["end_frame"]), frame_count - 1))
+                active[start:end + 1, action_idx] = True
+            action_group.create_dataset("active", data=active)
+
+            if "action_entity_edges" in export_group:
+                del export_group["action_entity_edges"]
+            edge_group = export_group.create_group("action_entity_edges")
+            edges = []
+            for node in action_nodes:
+                for field, role in (
+                    ("effector_object_id", "agent"),
+                    ("target_object_id", "target"),
+                    ("destination_object_id", "destination"),
+                ):
+                    object_id = node.get(field)
+                    if object_id is not None:
+                        edges.append((node["action_id"], int(object_id), role))
+            edge_group.create_dataset(
+                "action_id", data=np.array([edge[0] for edge in edges], dtype=np.int64)
+            )
+            edge_group.create_dataset(
+                "object_id", data=np.array([edge[1] for edge in edges], dtype=np.int64)
+            )
+            edge_group.create_dataset(
+                "roles", data=np.array([edge[2] for edge in edges], dtype=object), dtype=string_dtype
             )
 
     def check_stable(self):
@@ -2962,6 +3407,16 @@ class Base_Task(gym.Env):
                                                                  and right.arm_tag != "right"):  # check
                 raise ValueError(f"Invalid arm tag: {left.arm_tag} or {right.arm_tag}. Must be 'left' or 'right'.")
 
+            action_node_ids = [
+                self._begin_benchmark_action(action)
+                for action in (left, right)
+                if action is not None
+            ]
+
+            def finish_action_nodes(succeeded):
+                for action_node_id in action_node_ids:
+                    self._finish_benchmark_action(action_node_id, succeeded)
+
             if (left is not None and left.action == "move") and (right is not None
                                                                  and right.action == "move"):  # together move
                 self.together_move_to_pose(  # TODO
@@ -2971,7 +3426,9 @@ class Base_Task(gym.Env):
                     right_constraint_pose=right.args.get("constraint_pose"),
                 )
                 if self.plan_success is False:
+                    finish_action_nodes(False)
                     return False
+                finish_action_nodes(True)
                 continue  # TODO
             else:
                 control_seq = {
@@ -2990,6 +3447,7 @@ class Base_Task(gym.Env):
                     else:  # left.action == 'gripper'
                         control_seq["left_gripper"] = self.set_gripper(left_pos=left.target_gripper_pos, set_tag="left")
                     if self.plan_success is False:
+                        finish_action_nodes(False)
                         return False
 
                 if right is not None:
@@ -3003,10 +3461,12 @@ class Base_Task(gym.Env):
                         control_seq["right_gripper"] = self.set_gripper(right_pos=right.target_gripper_pos,
                                                                         set_tag="right")
                     if self.plan_success is False:
+                        finish_action_nodes(False)
                         return False
 
             self._log_planned_arm_joints(control_seq)
             self.take_dense_action(control_seq)
+            finish_action_nodes(True)
 
         return True
 
@@ -3226,24 +3686,36 @@ class Base_Task(gym.Env):
         gripper_pos=0.0,
         contact_point_id: list | float = None,
     ):
+        target_id = self._benchmark_entity_object_id(actor)
+        approach_meta = {
+            "benchmark_action": "approach",
+            "benchmark_phase": "forward_grasp",
+            "benchmark_target_object_id": target_id,
+        }
+        grasp_meta = {
+            "benchmark_action": "grasp",
+            "benchmark_phase": "forward_grasp",
+            "benchmark_target_object_id": target_id,
+        }
         if not self.plan_success:
             return None, []
         if self.need_plan == False:
             if pre_grasp_dis == grasp_dis:
                 return arm_tag, [
-                    Action(arm_tag, "move", target_pose=[0, 0, 0, 0, 0, 0, 0]),
-                    Action(arm_tag, "close", target_gripper_pos=gripper_pos),
+                    Action(arm_tag, "move", target_pose=[0, 0, 0, 0, 0, 0, 0], **approach_meta),
+                    Action(arm_tag, "close", target_gripper_pos=gripper_pos, **grasp_meta),
                 ]
             else:
                 return arm_tag, [
-                    Action(arm_tag, "move", target_pose=[0, 0, 0, 0, 0, 0, 0]),
+                    Action(arm_tag, "move", target_pose=[0, 0, 0, 0, 0, 0, 0], **approach_meta),
                     Action(
                         arm_tag,
                         "move",
                         target_pose=[0, 0, 0, 0, 0, 0, 0],
                         constraint_pose=[1, 1, 1, 0, 0, 0],
+                        **approach_meta,
                     ),
-                    Action(arm_tag, "close", target_gripper_pos=gripper_pos),
+                    Action(arm_tag, "close", target_gripper_pos=gripper_pos, **grasp_meta),
                 ]
 
         pre_grasp_pose, grasp_pose = self.choose_grasp_pose(
@@ -3255,19 +3727,20 @@ class Base_Task(gym.Env):
         )
         if pre_grasp_pose == grasp_pose:
             return arm_tag, [
-                Action(arm_tag, "move", target_pose=pre_grasp_pose),
-                Action(arm_tag, "close", target_gripper_pos=gripper_pos),
+                Action(arm_tag, "move", target_pose=pre_grasp_pose, **approach_meta),
+                Action(arm_tag, "close", target_gripper_pos=gripper_pos, **grasp_meta),
             ]
         else:
             return arm_tag, [
-                Action(arm_tag, "move", target_pose=pre_grasp_pose),
+                Action(arm_tag, "move", target_pose=pre_grasp_pose, **approach_meta),
                 Action(
                     arm_tag,
                     "move",
                     target_pose=grasp_pose,
                     constraint_pose=[1, 1, 1, 0, 0, 0],
+                    **approach_meta,
                 ),
-                Action(arm_tag, "close", target_gripper_pos=gripper_pos),
+                Action(arm_tag, "close", target_gripper_pos=gripper_pos, **grasp_meta),
             ]
 
     def get_place_pose(
@@ -3371,6 +3844,12 @@ class Base_Task(gym.Env):
     ):
         if not self.plan_success:
             return None, []
+        target_id = self._benchmark_entity_object_id(actor)
+        destination_id = self._infer_benchmark_destination_object_id(target_pose, actor)
+        common_meta = {
+            "benchmark_target_object_id": target_id,
+            "benchmark_destination_object_id": destination_id,
+        }
         if self.need_plan:
             place_pre_pose = self.get_place_pose(
                 actor,
@@ -3399,13 +3878,41 @@ class Base_Task(gym.Env):
             place_pose = [0, 0, 0, 0, 0, 0, 0]
 
         actions = [
-            Action(arm_tag, "move", target_pose=place_pre_pose),
-            Action(arm_tag, "move", target_pose=place_pose),
+            Action(
+                arm_tag, "move", target_pose=place_pre_pose,
+                benchmark_action="transport", benchmark_phase="backward_placement",
+                **common_meta,
+            ),
+            Action(
+                arm_tag, "move", target_pose=place_pose,
+                benchmark_action="place", benchmark_phase="final_descent",
+                **common_meta,
+            ),
             # Action(arm_tag, "move", target_pose=place_pose, constraint_pose=[1, 1, 1, 0, 0, 0]),
         ]
         if is_open:
-            actions.append(Action(arm_tag, "open", target_gripper_pos=1.0))
+            actions.append(Action(
+                arm_tag, "open", target_gripper_pos=1.0,
+                benchmark_action="release", benchmark_phase="final_descent",
+                **common_meta,
+            ))
         return arm_tag, actions
+
+    def _benchmark_action_target_metadata(
+        self, target_entity=None, interaction_part=None, articulation_joint_index=None,
+    ):
+        if target_entity is None:
+            return {}
+        target_id = (
+            int(target_entity) if isinstance(target_entity, (int, np.integer))
+            else self._benchmark_entity_object_id(target_entity)
+        )
+        metadata = {"benchmark_target_object_id": target_id}
+        if interaction_part is not None:
+            metadata["interaction_part"] = str(interaction_part)
+        if articulation_joint_index is not None:
+            metadata["articulation_joint_index"] = int(articulation_joint_index)
+        return metadata
 
     def move_by_displacement(
         self,
@@ -3416,6 +3923,10 @@ class Base_Task(gym.Env):
         quat: list = None,
         move_axis: Literal["world", "arm"] = "world",
         constraint_pose: list = None,
+        benchmark_action: str = None,
+        benchmark_target_entity=None,
+        interaction_part: str = None,
+        articulation_joint_index: int = None,
     ):
         if arm_tag == "left":
             origin_pose = np.array(self.robot.get_left_ee_pose(), dtype=np.float64)
@@ -3433,26 +3944,73 @@ class Base_Task(gym.Env):
         origin_pose += displacement
         if quat is not None:
             origin_pose[3:] = quat
-        return arm_tag, [Action(arm_tag, "move", target_pose=origin_pose)]
+        held_id = self._benchmark_held_object_id(arm_tag)
+        action_type = benchmark_action or ("lift" if z > 0 else "transport")
+        target_meta = self._benchmark_action_target_metadata(
+            benchmark_target_entity, interaction_part, articulation_joint_index
+        )
+        if "benchmark_target_object_id" not in target_meta:
+            target_meta["benchmark_target_object_id"] = held_id
+        return arm_tag, [Action(
+            arm_tag, "move", target_pose=origin_pose,
+            benchmark_action=action_type,
+            benchmark_phase="transition",
+            **target_meta,
+            displacement={"x": x, "y": y, "z": z, "move_axis": move_axis},
+        )]
 
     def move_to_pose(
         self,
         arm_tag: ArmTag,
         target_pose: list | np.ndarray | sapien.Pose,
+        benchmark_action: str = "transport",
+        benchmark_target_entity=None,
+        interaction_part: str = None,
+        articulation_joint_index: int = None,
     ):
-        return arm_tag, [Action(arm_tag, "move", target_pose=target_pose)]
+        target_meta = self._benchmark_action_target_metadata(
+            benchmark_target_entity, interaction_part, articulation_joint_index
+        )
+        if "benchmark_target_object_id" not in target_meta:
+            target_meta["benchmark_target_object_id"] = self._benchmark_held_object_id(arm_tag)
+        return arm_tag, [Action(
+            arm_tag, "move", target_pose=target_pose,
+            benchmark_action=benchmark_action, benchmark_phase="transition",
+            **target_meta,
+        )]
 
-    def close_gripper(self, arm_tag: ArmTag, pos: float = 0.0):
-        return arm_tag, [Action(arm_tag, "close", target_gripper_pos=pos)]
+    def close_gripper(
+        self, arm_tag: ArmTag, pos: float = 0.0, benchmark_action: str = "grasp",
+        benchmark_target_entity=None, interaction_part: str = None,
+        articulation_joint_index: int = None,
+    ):
+        target_meta = self._benchmark_action_target_metadata(
+            benchmark_target_entity, interaction_part, articulation_joint_index
+        )
+        return arm_tag, [Action(
+            arm_tag, "close", target_gripper_pos=pos,
+            benchmark_action=benchmark_action, benchmark_phase="forward_grasp",
+            **target_meta,
+        )]
 
     def open_gripper(self, arm_tag: ArmTag, pos: float = 1.0):
-        return arm_tag, [Action(arm_tag, "open", target_gripper_pos=pos)]
+        return arm_tag, [Action(
+            arm_tag, "open", target_gripper_pos=pos,
+            benchmark_action="release", benchmark_phase="final_descent",
+            benchmark_target_object_id=self._benchmark_held_object_id(arm_tag),
+        )]
 
     def back_to_origin(self, arm_tag: ArmTag):
         if arm_tag == "left":
-            return arm_tag, [Action(arm_tag, "move", self.robot.left_original_pose)]
+            return arm_tag, [Action(
+                arm_tag, "move", self.robot.left_original_pose,
+                benchmark_action="retreat", benchmark_phase="transition",
+            )]
         elif arm_tag == "right":
-            return arm_tag, [Action(arm_tag, "move", self.robot.right_original_pose)]
+            return arm_tag, [Action(
+                arm_tag, "move", self.robot.right_original_pose,
+                benchmark_action="retreat", benchmark_phase="transition",
+            )]
         return None, []
 
     def get_arm_pose(self, arm_tag: ArmTag):

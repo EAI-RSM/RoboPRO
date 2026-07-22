@@ -1,0 +1,49 @@
+
+\begin{frame}{Related Work: What the Field Already Provides}
+\small
+\begin{itemize}
+\item \textbf{Generalist VLA policies} such as RT-2, OpenVLA, Octo, and pi\_0 can map images and language to robot actions, but their scene and physics reasoning is mostly implicit.
+\item \textbf{Tool-augmented robot reasoning} such as SayCan, Code as Policies, VoxPoser, and MOKA shows that external tools can ground model decisions in affordances, geometry, or control APIs.
+\item \textbf{3D scene graph and GraphRAG methods} such as SayPlan, RoboEXP, KeySG, Structured Interfaces, FunGraph, and ArtiSG show that structured scene memory supports grounding, retrieval, functional reasoning, and action-conditioned exploration.
+\item \textbf{Safety and contact-rich manipulation work} such as SAFE, FailSafe, SafeManip, ForceVLA, and physics-driven data generation shows that success rate alone is insufficient; contact, force, stability, and temporal safety matter.
+\item \textbf{Simulation benchmarks} such as Open X-Embodiment, RoboCasa, RoboCAS, and RoboTwin provide scale and task diversity, but usually do not export graph-grounded physics, risk, belief, and tool-use supervision.
+\end{itemize}
+\end{frame}
+
+\begin{frame}{Proposal-Relevant Gaps}
+\small
+\textbf{Core gap.} Existing systems provide strong pieces, but they rarely combine persistent 4D scene memory, belief-aware retrieval, physics verification, and VLA tool calling in one framework.
+
+\vspace{0.6em}
+\begin{itemize}
+\item \textbf{Hallucination gap}: VLA decisions are often produced from model predictions alone; they are not consistently grounded by external physics and scene verification tools.
+\item \textbf{Scene-physics gap}: existing policies rarely expose explicit support, containment, occlusion, contact, and object-relationship structure to the action generator.
+\item \textbf{Safety-verification gap}: collision checking, stability analysis, and unsafe-contact detection are often separate from the learned policy or applied only after failure.
+\item \textbf{Belief gap}: partial observability and hidden scene states are usually not represented as explicit belief nodes that can guide retrieval and action revision.
+\item \textbf{Long-horizon memory gap}: many systems lack action history, state transitions, relation deltas, and causal effects needed for robust multi-step manipulation.
+\end{itemize}
+
+\vspace{0.4em}
+\textbf{Positioning.} Our proposal addresses these gaps with a 4D action-aware Task-driven Belief Graph, local graph retrieval, and physics-based tool calls before execution.
+\end{frame}
+
+\begin{frame}{References}
+\scriptsize
+\begin{itemize}
+\item Brohan et al., \textit{RT-2: Vision-Language-Action Models Transfer Web Knowledge to Robotic Control}, 2023.
+\item Kim et al., \textit{OpenVLA: An Open-Source Vision-Language-Action Model}, 2024.
+\item Octo Model Team et al., \textit{Octo: An Open-Source Generalist Robot Policy}, 2024.
+\item Black et al., \textit{pi\_0: A Vision-Language-Action Flow Model for General Robot Control}, 2024.
+\item Ahn et al., \textit{Do As I Can, Not As I Say: Grounding Language in Robotic Affordances}, 2022.
+\item Liang et al., \textit{Code as Policies: Language Model Programs for Embodied Control}, 2023.
+\item Huang et al., \textit{VoxPoser: Composable 3D Value Maps for Robotic Manipulation with Language Models}, 2023.
+\item Liu et al., \textit{MOKA: Open-World Robotic Manipulation through Mark-Based Visual Prompting}, 2024.
+\item Rana et al., \textit{SayPlan: Grounding Large Language Models using 3D Scene Graphs for Scalable Robot Task Planning}, 2023.
+\item Jiang et al., \textit{RoboEXP: Action-Conditioned Scene Graph via Interactive Exploration for Robotic Manipulation}, 2024.
+\item Ray et al., \textit{Structured Interfaces for Automated Reasoning with 3D Scene Graphs}, 2025.
+\item Werby et al., \textit{KeySG: Hierarchical Keyframe-Based 3D Scene Graphs}, 2025.
+\item Zhang et al., \textit{Open-Vocabulary Functional 3D Scene Graphs for Real-World Indoor Scenes}, 2025.
+\item Gu et al., \textit{ArtiSG: Functional 3D Scene Graph Construction via Human-demonstrated Articulated Objects Manipulation}, 2025.
+\item SAFE, FailSafe, SafeManip, ForceVLA, RoboCasa, RoboCAS, RoboTwin, and the local 3D Scene Graphs survey in \texttt{docs/references/arXiv-2606.19383v1}.
+\end{itemize}
+\end{frame}

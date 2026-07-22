@@ -54,8 +54,14 @@ VIZ_TRAIL ?= 25
 REL_HDF5_FILE ?=
 REL_FRAME ?= 0
 REL_OUTPUT_IMAGE ?=
-REL_WIDTH ?= 1400
-REL_HEIGHT ?= 900
+REL_OUTPUT_DIR ?=
+REL_SAMPLE_FRAMES ?= 0,74,124,182,191
+REL_WIDTH ?= 1600
+REL_HEIGHT ?= 1000
+REL_SHOW_EDGE_LABELS ?= 1
+REL_EXCLUDED_EDGES ?=
+REL_INCLUDED_EDGES ?=
+REL_ABSTRACT_LAYOUT ?= 0
 
 # Graph-rich relation validation flags. REACHABLE_BY_INTERVAL is measured in
 # exported frames; 1 evaluates every changed frame, 10 evaluates every tenth.
@@ -66,6 +72,14 @@ REACHABLE_BY_CACHE_UNCHANGED ?= 1
 REACHABLE_BY_POSE_DECIMALS ?= 3
 RELATION_OBSTACLE_DENSITY ?= 14
 RELATION_EPISODE_NUM ?= 1
+RELATION_SAVE_PATH ?= ./data/relation_validation_d14_actions_v2
+ACTION_VALIDATION_MATRIX ?= $(ROOT_DIR)/benchmark/bench_task_config/action_validation_suite.yml
+ACTION_VALIDATION_OUTPUT_ROOT ?= $(CUSTOMIZED_ROOT)/data/action_validation_suite_v1
+ACTION_VALIDATION_MODE ?= all
+ACTION_VALIDATION_TASKS ?=
+ACTION_VALIDATION_START_SEED ?= 0
+ACTION_VALIDATION_DRY_RUN ?= 0
+ACTION_VALIDATION_OBSTACLE_DENSITY ?= 10
 
 # Asset / install flags
 PYTHON_VERSION ?= 3.10
@@ -114,10 +128,10 @@ endef
 
 .PHONY: help check-prereqs bootstrap sync download-assets link-assets configure-curobo-assets \
 	patch-curobo-config setup render-test verify-scene verify-rollout collect-data \
-	relation-validation \
+	relation-validation action-validation-suite check-action-validation-suite \
 	precollect-seeds eval-direct eval-client policy-server eval-pi05-single eval-pi05-double \
 	collect-rollout-pi05 diag-kitchen-curobo inspect-benchmark-hdf5 visualize-benchmark-rollout \
-	visualize-relation-frame occluder-visibility reachability-map \
+	visualize-relation-frame visualize-relation-samples occluder-visibility reachability-map \
 	pickup-reachability analyze-occluder-rollout show-config
 
 help:
@@ -147,7 +161,9 @@ help:
 	'  make visualize-benchmark-rollout  Render a top-down verification MP4 from a benchmark HDF5 export.' \
 	'    Vars: VIZ_HDF5_FILE=path/to/file.hdf5 VIZ_OUTPUT_VIDEO=/tmp/rollout.mp4 VIZ_WIDTH=1280 VIZ_HEIGHT=720 VIZ_FPS=20 VIZ_TRAIL=25' \
 	'  make visualize-relation-frame Render one frame of canonical relation edges from a benchmark HDF5 export.' \
-	'    Vars: REL_HDF5_FILE=path/to/file.hdf5 REL_FRAME=0 REL_OUTPUT_IMAGE=/tmp/relation_frame.png REL_WIDTH=1400 REL_HEIGHT=900' \
+	'    Vars: REL_HDF5_FILE=path/to/file.hdf5 REL_FRAME=0 REL_OUTPUT_IMAGE= (default: <episode>/visualizations/scene_graph/) REL_WIDTH=1600 REL_HEIGHT=1000 REL_SHOW_EDGE_LABELS=1|0 REL_EXCLUDED_EDGES=[visible_to,near] REL_INCLUDED_EDGES=[in,held_by] REL_ABSTRACT_LAYOUT=1|0' \
+	'  make visualize-relation-samples Render several graph-rich scene/action snapshots with node and edge legends.' \
+	'    Vars: REL_HDF5_FILE=path/to/file.hdf5 REL_SAMPLE_FRAMES=0,74,124,182,191 REL_OUTPUT_DIR= (default: <episode>/visualizations/scene_graph/) REL_SHOW_EDGE_LABELS=1|0 REL_EXCLUDED_EDGES=[visible_to,near] REL_INCLUDED_EDGES=[in,held_by] REL_ABSTRACT_LAYOUT=1|0' \
 	'' \
 	'Occluder / reachability analysis (issue #35):' \
 	'  make occluder-visibility      Occluder visibility sweep (+rollout with ROLLOUT=1).' \
@@ -163,9 +179,14 @@ help:
 	'Data collection:' \
 	'  make collect-data             Run collect_data.sh for one task/config.' \
 	'  make relation-validation      Collect graph-rich dense-scene validation data.' \
-	'    Vars: TASK_NAME=put_sauce_can_in_basket GPU_ID=0 RELATION_EPISODE_NUM=1 RELATION_OBSTACLE_DENSITY=14' \
+	'    Vars: TASK_NAME=put_sauce_can_in_basket GPU_ID=0 RELATION_EPISODE_NUM=1 RELATION_OBSTACLE_DENSITY=14 RELATION_SAVE_PATH=./data/relation_validation_d14_actions_v2' \
 	'      REACHABLE_BY_ENABLED=1 REACHABLE_BY_INTERVAL=10 REACHABLE_BY_MOVABLE_ONLY=1' \
 	'      REACHABLE_BY_CACHE_UNCHANGED=1 REACHABLE_BY_POSE_DECIMALS=3' \
+	'  make action-validation-suite  Collect and check the schema-1.5 cross-task matrix.' \
+	'    Vars: GPU_ID=0 ACTION_VALIDATION_MODE=collect|check|all ACTION_VALIDATION_TASKS=id1,id2' \
+	'      ACTION_VALIDATION_OUTPUT_ROOT=customized_robotwin/data/action_validation_suite_v1' \
+	'      ACTION_VALIDATION_START_SEED=0 ACTION_VALIDATION_DRY_RUN=0|1 REACHABLE_BY_INTERVAL=10 ACTION_VALIDATION_OBSTACLE_DENSITY=10' \
+	'  make check-action-validation-suite  Check existing suite outputs without collecting.' \
 	'  make collect-rollout-pi05     Dual-env pi05 rollout collection.' \
 	'' \
 	'Policy eval:' \
@@ -291,7 +312,21 @@ relation-validation:
 		export ROBOPRO_REACHABLE_BY_POSE_DECIMALS="$(REACHABLE_BY_POSE_DECIMALS)"; \
 		export ROBOPRO_RELATION_OBSTACLE_DENSITY="$(RELATION_OBSTACLE_DENSITY)"; \
 		export ROBOPRO_RELATION_EPISODE_NUM="$(RELATION_EPISODE_NUM)"; \
+		export ROBOPRO_RELATION_SAVE_PATH="$(RELATION_SAVE_PATH)"; \
 		bash collect_data.sh "$(TASK_NAME)" "$(TASK_CONFIG)" "$(GPU_ID)")
+
+action-validation-suite:
+	$(call RUN_IN_CUSTOMIZED,\
+		cmd='$(PYTHON) ../benchmark/bench_script/run_action_validation_suite.py "$(ACTION_VALIDATION_MODE)" --matrix "$(ACTION_VALIDATION_MATRIX)" --output-root "$(abspath $(ACTION_VALIDATION_OUTPUT_ROOT))" --gpu "$(GPU_ID)" --start-seed "$(ACTION_VALIDATION_START_SEED)" --reachability-interval "$(REACHABLE_BY_INTERVAL)" --obstacle-density "$(ACTION_VALIDATION_OBSTACLE_DENSITY)"'; \
+		if [[ -n "$(ACTION_VALIDATION_TASKS)" ]]; then cmd+=" --tasks $(ACTION_VALIDATION_TASKS)"; fi; \
+		if [[ "$(ACTION_VALIDATION_DRY_RUN)" == "1" ]]; then cmd+=" --dry-run"; fi; \
+		eval "$$cmd")
+
+check-action-validation-suite:
+	$(call RUN_IN_CUSTOMIZED,\
+		cmd='$(PYTHON) ../benchmark/bench_script/run_action_validation_suite.py check --matrix "$(ACTION_VALIDATION_MATRIX)" --output-root "$(abspath $(ACTION_VALIDATION_OUTPUT_ROOT))"'; \
+		if [[ -n "$(ACTION_VALIDATION_TASKS)" ]]; then cmd+=" --tasks $(ACTION_VALIDATION_TASKS)"; fi; \
+		eval "$$cmd")
 
 precollect-seeds:
 	$(call RUN_IN_CUSTOMIZED,$(PYTHON) script/precollect_eval_seeds.py "$(TASK_NAME)" "$(TASK_CONFIG)")
@@ -408,12 +443,32 @@ visualize-relation-frame:
 	output_image="$(REL_OUTPUT_IMAGE)"; \
 	if [[ -z "$$output_image" ]]; then \
 		stem="$$(basename "$$hdf5_file" .hdf5)"; \
-		output_image="$(ROOT_DIR)/tmp/$${stem}_relation_frame_$(REL_FRAME).png"; \
+		episode_dir="$$(dirname "$$(dirname "$$hdf5_file")")"; \
+		output_image="$$episode_dir/visualizations/scene_graph/$${stem}_frame_$$(printf '%04d' $(REL_FRAME)).png"; \
 	fi; \
 	if [[ "$$output_image" != /* ]]; then output_image="$(ROOT_DIR)/$$output_image"; fi; \
 	cmd='$(PYTHON) ../benchmark/bench_script/visualize_relation_frame.py --file "'"$$hdf5_file"'" --frame "$(REL_FRAME)" --output "'"$$output_image"'"'; \
-	cmd+=" --width $(REL_WIDTH) --height $(REL_HEIGHT)"; \
+	cmd+=" --width $(REL_WIDTH) --height $(REL_HEIGHT) --show-edge-labels $(REL_SHOW_EDGE_LABELS) --excluded-edges '$(REL_EXCLUDED_EDGES)' --included-edges '$(REL_INCLUDED_EDGES)' --abstract-layout $(REL_ABSTRACT_LAYOUT)"; \
 	$(call RUN_IN_CUSTOMIZED,eval "$$cmd")
+
+visualize-relation-samples:
+	@if [[ -z "$(REL_HDF5_FILE)" ]]; then \
+		printf 'Set REL_HDF5_FILE=/abs/path/to/episode.hdf5\n' >&2; \
+		exit 1; \
+	fi
+	hdf5_file="$(REL_HDF5_FILE)"; \
+	if [[ "$$hdf5_file" != /* ]]; then hdf5_file="$(ROOT_DIR)/$$hdf5_file"; fi; \
+	output_dir="$(REL_OUTPUT_DIR)"; \
+	if [[ -z "$$output_dir" ]]; then output_dir="$$(dirname "$$(dirname "$$hdf5_file")")/visualizations/scene_graph"; fi; \
+	if [[ "$$output_dir" != /* ]]; then output_dir="$(ROOT_DIR)/$$output_dir"; fi; \
+	mkdir -p "$$output_dir"; \
+	IFS=',' read -ra frames <<< "$(REL_SAMPLE_FRAMES)"; \
+	for frame in "$${frames[@]}"; do \
+		output_image="$$output_dir/$$(basename "$$hdf5_file" .hdf5)_frame_$$(printf '%04d' "$$frame").png"; \
+		cmd='$(PYTHON) ../benchmark/bench_script/visualize_relation_frame.py --file "'"$$hdf5_file"'" --frame '"$$frame"' --output "'"$$output_image"'"'; \
+		cmd+=" --width $(REL_WIDTH) --height $(REL_HEIGHT) --show-edge-labels $(REL_SHOW_EDGE_LABELS) --excluded-edges '$(REL_EXCLUDED_EDGES)' --included-edges '$(REL_INCLUDED_EDGES)' --abstract-layout $(REL_ABSTRACT_LAYOUT)"; \
+		$(call RUN_IN_CUSTOMIZED,eval "$$cmd") || exit $$?; \
+	done
 
 occluder-visibility:
 	$(call RUN_IN_CUSTOMIZED,\

@@ -1544,24 +1544,36 @@ class Bench_base_task(Base_Task):
         contact_point_id: list | float = None,
     ):
         self._mark_intended_contact(actor)
+        target_id = self._benchmark_entity_object_id(actor)
+        approach_meta = {
+            "benchmark_action": "approach",
+            "benchmark_phase": "forward_grasp",
+            "benchmark_target_object_id": target_id,
+        }
+        grasp_meta = {
+            "benchmark_action": "grasp",
+            "benchmark_phase": "forward_grasp",
+            "benchmark_target_object_id": target_id,
+        }
         if not self.plan_success:
             return None, []
         if self.need_plan == False:
             if pre_grasp_dis == grasp_dis:
                 return arm_tag, [
-                    Action(arm_tag, "move", target_pose=[0, 0, 0, 0, 0, 0, 0]),
-                    Action(arm_tag, "close", target_gripper_pos=gripper_pos),
+                    Action(arm_tag, "move", target_pose=[0, 0, 0, 0, 0, 0, 0], **approach_meta),
+                    Action(arm_tag, "close", target_gripper_pos=gripper_pos, **grasp_meta),
                 ]
             else:
                 return arm_tag, [
-                    Action(arm_tag, "move", target_pose=[0, 0, 0, 0, 0, 0, 0]),
+                    Action(arm_tag, "move", target_pose=[0, 0, 0, 0, 0, 0, 0], **approach_meta),
                     Action(
                         arm_tag,
                         "move",
                         target_pose=[0, 0, 0, 0, 0, 0, 0],
                         constraint_pose=[1, 1, 1, 0, 0, 0],
+                        **approach_meta,
                     ),
-                    Action(arm_tag, "close", target_gripper_pos=gripper_pos),
+                    Action(arm_tag, "close", target_gripper_pos=gripper_pos, **grasp_meta),
                 ]
 
         pre_grasp_pose, grasp_pose = self.choose_grasp_pose(
@@ -1579,19 +1591,20 @@ class Bench_base_task(Base_Task):
 
         if pre_grasp_pose == grasp_pose:
             return arm_tag, [
-                Action(arm_tag, "move", target_pose=pre_grasp_pose),
-                Action(arm_tag, "close", target_gripper_pos=gripper_pos),
+                Action(arm_tag, "move", target_pose=pre_grasp_pose, **approach_meta),
+                Action(arm_tag, "close", target_gripper_pos=gripper_pos, **grasp_meta),
             ]
         else:
             return arm_tag, [
-                Action(arm_tag, "move", target_pose=pre_grasp_pose),
+                Action(arm_tag, "move", target_pose=pre_grasp_pose, **approach_meta),
                 Action(
                     arm_tag,
                     "move",
                     target_pose=grasp_pose,
                     constraint_pose=[1, 1, 1, 0, 0, 0],
+                    **approach_meta,
                 ),
-                Action(arm_tag, "close", target_gripper_pos=gripper_pos),
+                Action(arm_tag, "close", target_gripper_pos=gripper_pos, **grasp_meta),
             ]
 
     def get_curobo_target(self):

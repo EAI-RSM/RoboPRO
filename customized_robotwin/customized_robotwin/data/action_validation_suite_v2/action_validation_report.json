@@ -1,0 +1,171 @@
+{
+  "schema_version": "1.5.0",
+  "output_root": "/home/hamidreza/projects/RoboPRO/customized_robotwin/customized_robotwin/data/action_validation_suite_v2",
+  "tasks": [
+    {
+      "id": "fixed_right_arm",
+      "task_name": "put_sauce_can_in_cabinet",
+      "run_dir": "/home/hamidreza/projects/RoboPRO/customized_robotwin/customized_robotwin/data/action_validation_suite_v2/put_sauce_can_in_cabinet/relation_validation_d14",
+      "expected_gaps": [],
+      "episodes": [
+        {
+          "file": "/home/hamidreza/projects/RoboPRO/customized_robotwin/customized_robotwin/data/action_validation_suite_v2/put_sauce_can_in_cabinet/relation_validation_d14/data/episode0.hdf5",
+          "schema": "1.5.0",
+          "success": true,
+          "action_count": 9,
+          "action_types": [
+            "approach",
+            "approach",
+            "grasp",
+            "lift",
+            "retreat",
+            "lift",
+            "transport",
+            "release",
+            "verify_success"
+          ],
+          "arms": [
+            "right"
+          ],
+          "failed_action_count": 0,
+          "simultaneous_dual_arm": false,
+          "failures": []
+        }
+      ],
+      "failures": [],
+      "status": "PASS"
+    },
+    {
+      "id": "articulated_destination",
+      "task_name": "put_rubikscube_in_drawer",
+      "run_dir": "/home/hamidreza/projects/RoboPRO/customized_robotwin/customized_robotwin/data/action_validation_suite_v2/put_rubikscube_in_drawer/relation_validation_d14",
+      "expected_gaps": [],
+      "episodes": [
+        {
+          "file": "/home/hamidreza/projects/RoboPRO/customized_robotwin/customized_robotwin/data/action_validation_suite_v2/put_rubikscube_in_drawer/relation_validation_d14/data/episode0.hdf5",
+          "schema": "1.5.0",
+          "success": true,
+          "action_count": 7,
+          "action_types": [
+            "approach",
+            "approach",
+            "grasp",
+            "lift",
+            "place",
+            "release",
+            "verify_success"
+          ],
+          "arms": [
+            "right"
+          ],
+          "failed_action_count": 0,
+          "simultaneous_dual_arm": false,
+          "failures": []
+        }
+      ],
+      "failures": [],
+      "status": "PASS"
+    },
+    {
+      "id": "sequential_multi_arm",
+      "task_name": "set_up_table",
+      "run_dir": "/home/hamidreza/projects/RoboPRO/customized_robotwin/customized_robotwin/data/action_validation_suite_v2/set_up_table/relation_validation_d14",
+      "expected_gaps": [],
+      "episodes": [
+        {
+          "file": "/home/hamidreza/projects/RoboPRO/customized_robotwin/customized_robotwin/data/action_validation_suite_v2/set_up_table/relation_validation_d14/data/episode0.hdf5",
+          "schema": "1.5.0",
+          "success": true,
+          "action_count": 23,
+          "action_types": [
+            "approach",
+            "approach",
+            "grasp",
+            "transport",
+            "place",
+            "release",
+            "approach",
+            "approach",
+            "grasp",
+            "transport",
+            "transport",
+            "transport",
+            "release",
+            "retreat",
+            "approach",
+            "approach",
+            "grasp",
+            "lift",
+            "transport",
+            "place",
+            "release",
+            "transport",
+            "verify_success"
+          ],
+          "arms": [
+            "left",
+            "right"
+          ],
+          "failed_action_count": 0,
+          "simultaneous_dual_arm": false,
+          "failures": []
+        }
+      ],
+      "failures": [],
+      "status": "PASS"
+    },
+    {
+      "id": "recovery_continuation",
+      "task_name": "chain_heat_hamburger_ks",
+      "run_dir": "/home/hamidreza/projects/RoboPRO/customized_robotwin/customized_robotwin/data/action_validation_suite_v2/chain_heat_hamburger_ks/relation_validation_d14",
+      "expected_gaps": [
+        "planner_attempt_trace",
+        "articulation_action_vocabulary",
+        "terminal_failed_episode_retention"
+      ],
+      "episodes": [
+        {
+          "file": "/home/hamidreza/projects/RoboPRO/customized_robotwin/customized_robotwin/data/action_validation_suite_v2/chain_heat_hamburger_ks/relation_validation_d14/data/episode0.hdf5",
+          "schema": "1.5.0",
+          "success": true,
+          "action_count": 21,
+          "action_types": [
+            "approach",
+            "approach",
+            "grasp",
+            "lift",
+            "transport",
+            "transport",
+            "release",
+            "lift",
+            "retreat",
+            "grasp",
+            "lift",
+            "transport",
+            "transport",
+            "transport",
+            "transport",
+            "transport",
+            "transport",
+            "transport",
+            "transport",
+            "transport",
+            "verify_success"
+          ],
+          "arms": [
+            "left"
+          ],
+          "failed_action_count": 0,
+          "simultaneous_dual_arm": false,
+          "failures": [
+            "strict inspector failed: Action-node invariant failure(s): grounded manipulation actions have targets"
+          ]
+        }
+      ],
+      "failures": [
+        "episode0.hdf5: strict inspector failed: Action-node invariant failure(s): grounded manipulation actions have targets"
+      ],
+      "status": "XFAIL"
+    }
+  ]
+}

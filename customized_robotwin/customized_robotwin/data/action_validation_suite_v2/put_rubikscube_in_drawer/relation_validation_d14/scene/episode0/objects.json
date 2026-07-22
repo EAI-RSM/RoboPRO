@@ -1,0 +1,555 @@
+[
+ {
+  "per_scene_id": 83,
+  "name": "073_rubikscube",
+  "tags": [
+   "target"
+  ],
+  "pose_p": [
+   -0.0905,
+   0.215,
+   0.9302
+  ],
+  "pose_q": [
+   -0.0,
+   0.0001,
+   -0.0,
+   1.0
+  ],
+  "n_samples": 785
+ },
+ {
+  "per_scene_id": 84,
+  "name": "120_plant",
+  "tags": [
+   "clutter"
+  ],
+  "pose_p": [
+   0.4004,
+   0.0556,
+   0.7417
+  ],
+  "pose_q": [
+   0.3445,
+   0.3602,
+   0.616,
+   0.61
+  ],
+  "n_samples": 4895
+ },
+ {
+  "per_scene_id": 85,
+  "name": "023_tissue-box",
+  "tags": [
+   "clutter"
+  ],
+  "pose_p": [
+   -0.4111,
+   -0.1122,
+   0.741
+  ],
+  "pose_q": [
+   0.6939,
+   0.6941,
+   -0.1355,
+   -0.1356
+  ],
+  "n_samples": 4987
+ },
+ {
+  "per_scene_id": 86,
+  "name": "055_small-speaker",
+  "tags": [
+   "clutter"
+  ],
+  "pose_p": [
+   -0.3892,
+   0.0994,
+   0.7405
+  ],
+  "pose_q": [
+   0.4912,
+   0.4911,
+   -0.5087,
+   -0.5087
+  ],
+  "n_samples": 965
+ },
+ {
+  "per_scene_id": 87,
+  "name": "023_tissue-box",
+  "tags": [
+   "clutter"
+  ],
+  "pose_p": [
+   -0.0948,
+   -0.2638,
+   0.741
+  ],
+  "pose_q": [
+   0.5236,
+   0.5236,
+   -0.4752,
+   -0.4753
+  ],
+  "n_samples": 4987
+ },
+ {
+  "per_scene_id": 88,
+  "name": "012_plant-pot",
+  "tags": [
+   "clutter"
+  ],
+  "pose_p": [
+   0.0964,
+   -0.2948,
+   0.7412
+  ],
+  "pose_q": [
+   0.5996,
+   0.5997,
+   0.3748,
+   0.3747
+  ],
+  "n_samples": 3343
+ },
+ {
+  "per_scene_id": 89,
+  "name": "089_globe",
+  "tags": [
+   "clutter"
+  ],
+  "pose_p": [
+   0.4751,
+   -0.1327,
+   0.7417
+  ],
+  "pose_q": [
+   0.6889,
+   0.689,
+   0.1592,
+   0.1591
+  ],
+  "n_samples": 5163
+ },
+ {
+  "per_scene_id": 90,
+  "name": "099_fan",
+  "tags": [
+   "clutter"
+  ],
+  "pose_p": [
+   0.5026,
+   0.0875,
+   0.7413
+  ],
+  "pose_q": [
+   0.0417,
+   0.0417,
+   -0.7053,
+   -0.7064
+  ],
+  "n_samples": 5374
+ },
+ {
+  "per_scene_id": 91,
+  "name": "108_block",
+  "tags": [
+   "clutter"
+  ],
+  "pose_p": [
+   -0.2707,
+   0.0233,
+   0.7409
+  ],
+  "pose_q": [
+   0.6323,
+   0.6324,
+   -0.3164,
+   -0.3164
+  ],
+  "n_samples": 1520
+ },
+ {
+  "per_scene_id": 92,
+  "name": "108_block",
+  "tags": [
+   "clutter"
+  ],
+  "pose_p": [
+   0.4548,
+   -0.2885,
+   0.7409
+  ],
+  "pose_q": [
+   0.4523,
+   0.4523,
+   0.5435,
+   0.5435
+  ],
+  "n_samples": 1520
+ },
+ {
+  "per_scene_id": 93,
+  "name": "090_trophy",
+  "tags": [
+   "clutter"
+  ],
+  "pose_p": [
+   0.0569,
+   -0.158,
+   0.7417
+  ],
+  "pose_q": [
+   0.6904,
+   0.6902,
+   0.1533,
+   0.1533
+  ],
+  "n_samples": 2449
+ },
+ {
+  "per_scene_id": 94,
+  "name": "090_trophy",
+  "tags": [
+   "clutter"
+  ],
+  "pose_p": [
+   -0.0506,
+   0.0217,
+   0.7412
+  ],
+  "pose_q": [
+   0.4457,
+   0.4451,
+   -0.5488,
+   -0.5496
+  ],
+  "n_samples": 2449
+ },
+ {
+  "per_scene_id": 95,
+  "name": "048_stapler",
+  "tags": [
+   "clutter"
+  ],
+  "pose_p": [
+   -0.3053,
+   0.2977,
+   0.9015
+  ],
+  "pose_q": [
+   0.277,
+   0.2738,
+   0.6474,
+   0.6551
+  ],
+  "n_samples": 662
+ },
+ {
+  "per_scene_id": 96,
+  "name": "023_tissue-box",
+  "tags": [
+   "clutter"
+  ],
+  "pose_p": [
+   -0.4048,
+   0.3476,
+   0.9022
+  ],
+  "pose_q": [
+   0.1147,
+   0.1148,
+   0.6979,
+   0.6975
+  ],
+  "n_samples": 4987
+ },
+ {
+  "per_scene_id": 97,
+  "name": "048_stapler",
+  "tags": [
+   "clutter"
+  ],
+  "pose_p": [
+   -0.5033,
+   0.2229,
+   0.902
+  ],
+  "pose_q": [
+   0.7023,
+   0.7027,
+   -0.0807,
+   -0.0808
+  ],
+  "n_samples": 662
+ },
+ {
+  "per_scene_id": 98,
+  "name": "023_tissue-box",
+  "tags": [
+   "clutter"
+  ],
+  "pose_p": [
+   -0.2309,
+   0.2192,
+   0.9022
+  ],
+  "pose_q": [
+   0.6923,
+   0.6922,
+   0.1443,
+   0.1443
+  ],
+  "n_samples": 4987
+ },
+ {
+  "per_scene_id": 99,
+  "name": "055_small-speaker",
+  "tags": [
+   "clutter"
+  ],
+  "pose_p": [
+   0.0055,
+   0.3325,
+   0.9016
+  ],
+  "pose_q": [
+   0.1704,
+   0.1951,
+   -0.7274,
+   -0.6354
+  ],
+  "n_samples": 965
+ },
+ {
+  "per_scene_id": 100,
+  "name": "017_calculator",
+  "tags": [
+   "clutter"
+  ],
+  "pose_p": [
+   -0.3487,
+   0.2378,
+   1.1289
+  ],
+  "pose_q": [
+   0.1566,
+   0.1536,
+   0.6671,
+   0.7119
+  ],
+  "n_samples": 1275
+ },
+ {
+  "per_scene_id": 101,
+  "name": "017_calculator",
+  "tags": [
+   "clutter"
+  ],
+  "pose_p": [
+   -0.1301,
+   0.2226,
+   1.1305
+  ],
+  "pose_q": [
+   0.4372,
+   0.4384,
+   0.5555,
+   0.5551
+  ],
+  "n_samples": 1275
+ },
+ {
+  "per_scene_id": 102,
+  "name": "048_stapler",
+  "tags": [
+   "clutter"
+  ],
+  "pose_p": [
+   -0.2649,
+   0.3514,
+   1.1305
+  ],
+  "pose_q": [
+   0.7064,
+   0.7067,
+   -0.0294,
+   -0.0287
+  ],
+  "n_samples": 662
+ },
+ {
+  "per_scene_id": 103,
+  "name": "048_stapler",
+  "tags": [
+   "clutter"
+  ],
+  "pose_p": [
+   -0.048,
+   0.2197,
+   1.1304
+  ],
+  "pose_q": [
+   0.2964,
+   0.2964,
+   0.6421,
+   0.6419
+  ],
+  "n_samples": 662
+ },
+ {
+  "per_scene_id": 104,
+  "name": "023_tissue-box",
+  "tags": [
+   "clutter"
+  ],
+  "pose_p": [
+   -0.101,
+   0.3386,
+   1.131
+  ],
+  "pose_q": [
+   0.7038,
+   0.7039,
+   -0.0677,
+   -0.0677
+  ],
+  "n_samples": 4987
+ },
+ {
+  "per_scene_id": 1,
+  "name": "ground",
+  "tags": [
+   "furniture",
+   "skipped"
+  ],
+  "pose_p": [
+   0.0,
+   0.0,
+   0.0
+  ],
+  "pose_q": [
+   1.0,
+   0.0,
+   0.0,
+   0.0
+  ],
+  "n_samples": 0
+ },
+ {
+  "per_scene_id": 63,
+  "name": "wall",
+  "tags": [
+   "furniture",
+   "skipped"
+  ],
+  "pose_p": [
+   0.0,
+   1.0,
+   1.5
+  ],
+  "pose_q": [
+   1.0,
+   0.0,
+   0.0,
+   0.0
+  ],
+  "n_samples": 0
+ },
+ {
+  "per_scene_id": 64,
+  "name": "table",
+  "tags": [
+   "furniture"
+  ],
+  "pose_p": [
+   0.0,
+   0.0,
+   0.74
+  ],
+  "pose_q": [
+   1.0,
+   0.0,
+   0.0,
+   0.0
+  ],
+  "n_samples": 2807
+ },
+ {
+  "per_scene_id": 65,
+  "name": "121_wall-shelf",
+  "tags": [
+   "furniture"
+  ],
+  "pose_p": [
+   -0.24,
+   0.28,
+   1.01
+  ],
+  "pose_q": [
+   0.7071,
+   0.7071,
+   0.0,
+   0.0
+  ],
+  "n_samples": 744
+ },
+ {
+  "per_scene_id": 71,
+  "name": "042_wooden_box",
+  "tags": [
+   "clutter"
+  ],
+  "pose_p": [
+   0.48,
+   0.22,
+   0.813
+  ],
+  "pose_q": [
+   0.7071,
+   -0.7071,
+   0.0,
+   0.0
+  ],
+  "n_samples": 5176
+ },
+ {
+  "per_scene_id": 72,
+  "name": "122_file-holder",
+  "tags": [
+   "furniture"
+  ],
+  "pose_p": [
+   0.48,
+   0.23,
+   0.815
+  ],
+  "pose_q": [
+   0.7071,
+   0.7071,
+   0.0,
+   0.0
+  ],
+  "n_samples": 249
+ },
+ {
+  "per_scene_id": -1001,
+  "name": "036_cabinet",
+  "tags": [
+   "articulation"
+  ],
+  "pose_p": [
+   0.2297,
+   0.1866,
+   0.958
+  ],
+  "pose_q": [
+   1.0,
+   0.0,
+   0.0,
+   0.0
+  ],
+  "n_samples": 753
+ }
+]
