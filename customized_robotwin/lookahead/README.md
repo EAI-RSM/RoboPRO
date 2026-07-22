@@ -32,7 +32,10 @@ masks, event labels, language relabeling, …) without changing the outcome.
 | `search.py` | `SearchStrategy` ABC; `BeamSearch` (default), `MonteCarloSearch`, `FullTreeSearch`. `search(..., m=1) -> List[SearchResult]` returns the top-M distinct plans (best first), each carrying the winning path's **raw actions**. |
 | `plan.py` | `TaskSpec` / `Plan` dataclasses + JSON `save` / `load`. Self-contained, portable, inspectable; actions inline as nested lists. |
 | `pins.py` | `Pin` / `PinPolicy` / `PinViolation` — the configurable replay-time verification knob. |
-| `run_search.py` | CLI: build task → capture spec + provenance → search → **verify via from-start replay** → write plan. |
+| `run_search.py` | CLI: build task → capture spec + provenance → search → **verify via from-start replay** → write plan (`--dump-trace` also emits a `SearchTrace`). |
+| `trace.py` | `SearchTrace` (`lookahead_trace_v1`) + `save_trace`/`load_trace` — a **superset of `Plan`**: the committed spine plus every decision's K held-to-terminal candidate branches (raw actions + outcome tier). The policy-free artifact viz + Q-data consume; `committed_plan()` yields a replayable `Plan`. |
+| `viz.py` | Ghost-futures branching video. `capture_trace` (policy stage → `SearchTrace`), `render_trace` (deterministic replay of saved actions → frame bundle, **no policy**), `compose_scene_video` (composited MP4). |
+| `run_viz.py` | CLI: search+capture+render+composite, or `--trace <path>` to render a pre-done `SearchTrace` with no policy / no search. |
 | `tests/test_smoke.py` | Sim-free smoke tests against a mock task (no jax / no sapien). |
 
 The pure modules (`rollback`, `fitness`, `search`, `plan`, `pins`) have **no jax
@@ -174,6 +177,35 @@ python script/eval_policy.py --config policy/replay/deploy_policy.yml \
 Because RoboTwin does not store the episode seed on the task, the replay model
 selects the plan for a **configured seed** (`seed` in yml) or a single `plan_path`;
 if a future env exposes `task.seed`, `ReplayModel.select_for_task` honours it.
+
+### 3. Visualize the search (ghost futures)
+
+A `SearchTrace` (`run_search --dump-trace`, or produced by `run_viz`) saves the
+committed spine **plus** every decision's K candidate futures (held to terminal —
+raw actions + outcome tier), so the visualization consumes a **pre-done search
+output**, exactly like replay consumes a plan: no re-search, no policy inference.
+
+![ghost futures](https://github.com/EAI-RSM/RoboPRO/raw/lookahead-search/customized_robotwin/lookahead/docs/ghost_futures.gif)
+
+```bash
+cd customized_robotwin
+# search + capture + render + composite (beam width=1, K=6, depth = task step-limit / chunk)
+python -m lookahead.run_viz \
+    --task put_stapler_in_drawer --task_config bench_demo_office_clean --seed 40000 \
+    --candidate_policy pi05 --policy_config policy/pi05/deploy_policy.yml \
+    --width 1 --k 6 --out /work/mohammed/datasets/branching_video/lookahead
+# -> traces/<scene>.json (+.npz) · bundles/<scene>/frames.npz · futures_<scene>.mp4
+
+# render a PRE-DONE trace with NO policy / NO search:
+python -m lookahead.run_viz --trace <trace>.json --out <dir>
+```
+
+Playback follows the committed trajectory; at each decision point the video
+freezes and the K candidate futures are revealed one at a time as translucent
+ghosts, tinted by their held-to-terminal outcome (green = success, red =
+collision, gray = fail), the committed future revealed last with a "selected"
+tag. Ghost tiers use the **same fitness as the eval pipeline**
+(`get_collision_metrics`), so a red ghost is a real (impulse-based) collision.
 
 ## Candidate generation (policy-agnostic)
 

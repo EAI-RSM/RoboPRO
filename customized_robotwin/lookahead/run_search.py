@@ -16,6 +16,10 @@ Flow
    the searched terminal fingerprint / success.
 6. Write the :class:`~lookahead.plan.Plan` to
    ``<out>/<task>/<task_config>/seed<N>.json``.
+7. Optionally (``--dump-trace PATH``) expand the winner's per-decision candidate
+   fans into a :class:`~lookahead.trace.SearchTrace` — the policy-free artifact
+   that feeds the ghost-futures viz (``run_viz --trace``) and Q-data extraction
+   without ever re-running the search.
 
 Heavy sim / policy imports are deferred into function bodies so this module
 byte-compiles and imports without the RoboTwin / jax environment. Run it from
@@ -47,6 +51,8 @@ try:
     from . import plan as plan_mod
     from . import rollback as rb
     from . import search as search_mod
+    from . import trace as trace_mod
+    from . import viz as viz_mod
     from .candidates import PolicyCandidates, noise_propose
 except ImportError:  # pragma: no cover - executed only as a top-level script
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -55,6 +61,8 @@ except ImportError:  # pragma: no cover - executed only as a top-level script
     from lookahead import plan as plan_mod
     from lookahead import rollback as rb
     from lookahead import search as search_mod
+    from lookahead import trace as trace_mod
+    from lookahead import viz as viz_mod
     from lookahead.candidates import PolicyCandidates, noise_propose
 
 
@@ -137,6 +145,38 @@ def _parse_candidate_opts(pairs: Optional[list]) -> Dict[str, Any]:
         except (ValueError, SyntaxError):
             opts[key.strip()] = val
     return opts
+
+
+def resolve_instruction(task: Any, task_name: str, instruction: Optional[str],
+                        instruction_type: str = "unseen") -> Optional[str]:
+    """The language instruction for the candidate policy, resolved like the eval.
+
+    Priority: an explicit ``--instruction``; else ``task.get_instruction()`` when
+    the task exposes one AND it returns something; else GENERATE one exactly the
+    way the eval pipeline does (``eval_policy_collision._make_instruction``):
+    ``generate_episode_descriptions`` on the task's episode info. The bench OFFICE
+    tasks have no ``get_instruction`` and an empty ``info["info"]`` — the task
+    template still yields a valid instruction, so unattended runs never end up
+    with ``set_language`` skipped (a pi05 model without an instruction fails at
+    inference). Requires :func:`_ensure_robotwin_paths` to have run (it puts
+    ``./description/utils`` on ``sys.path``).
+    """
+    if instruction:
+        return instruction
+    if hasattr(task, "get_instruction"):
+        got = task.get_instruction()
+        if got:
+            return got
+    from generate_episode_instructions import generate_episode_descriptions
+    info = getattr(task, "info", None)
+    episode_info_list = [info.get("info", {}) if isinstance(info, dict) else {}]
+    results = generate_episode_descriptions(task_name, episode_info_list, 1)
+    pool = results[0].get(instruction_type) if results else None
+    if not pool:
+        raise ValueError(
+            f"no '{instruction_type}' instruction generated for task "
+            f"'{task_name}'; pass --instruction explicitly")
+    return str(np.random.choice(pool))
 
 
 def load_candidate(candidate_policy: str, usr_args: Dict[str, Any]):
@@ -228,12 +268,14 @@ def run(args: argparse.Namespace) -> str:
     # 2) load candidate policy + build the search components
     model, encode_obs, propose_fn = load_candidate(args.candidate_policy, usr_args)
     # the policy model needs its language set before inference (pi05 embeds the
-    # instruction in the observation window); prefer --instruction, else the task's.
-    instruction = args.instruction
-    if not instruction and hasattr(task, "get_instruction"):
-        instruction = task.get_instruction()
+    # instruction in the observation window); prefer --instruction, else the task's
+    # get_instruction, else generate one the way the eval does (office tasks have
+    # no get_instruction — see resolve_instruction).
+    instruction = resolve_instruction(task, args.task, args.instruction,
+                                      args.instruction_type)
     if hasattr(model, "set_language") and instruction:
         model.set_language(instruction)
+    print(f"[run_search] instruction: {instruction!r}", flush=True)
     # policy-agnostic candidate generation: use the policy's propose_candidates hook
     # if it exposes one, else the default noise proposer. Optional --candidate-opt
     # key=val pairs are bound opaquely onto the proposer (e.g. seed=1234).
@@ -257,6 +299,28 @@ def run(args: argparse.Namespace) -> str:
     print(f"[run_search] {args.task}/{args.task_config} seed{args.seed}: "
           f"strategy={args.strategy} top_m={top_m} got={len(results)} "
           f"best_success={results[0].success} best_score={results[0].score}", flush=True)
+
+    # 3b) optional: expand the winner's decision fans into a SearchTrace — the
+    # policy-free artifact viz / replay / Q-data consume WITHOUT re-searching.
+    # Runs in the live search scene (before close_env), from the restored root.
+    if args.dump_trace:
+        action_dim = int(results[0].actions.shape[1]) if results[0].actions.size else 0
+        spec = build_task_spec(args.task, args.task_config, args.seed, task_args,
+                               action_dim, chunk, repo_dir)
+        rb.restore(task, root)
+        trace = viz_mod.capture_trace(
+            task, candidates, fitness, results[0], horizon=args.depth, k=args.k,
+            task_spec=spec,
+            meta={"strategy": args.strategy,
+                  "strategy_params": {"width": args.width, "k": args.k,
+                                      "depth": args.depth},
+                  "fitness": args.fitness,
+                  "candidate_policy": args.candidate_policy,
+                  "candidate_hook": has_hook, "candidate_opt": opts or None,
+                  "instruction": instruction})
+        trace_mod.save(trace, args.dump_trace)
+        print(f"[run_search] wrote trace {args.dump_trace} "
+              f"(+ {os.path.basename(trace_mod._npz_path(args.dump_trace))})", flush=True)
     task.close_env()
 
     # 4+5) VERIFY each ranked plan by a fresh from-start replay, then write it.
@@ -334,7 +398,10 @@ def parse_args(argv=None) -> argparse.Namespace:
                    help="opaque key=val passed to the candidate proposer (repeatable), "
                         "e.g. seed=1234. Values are parsed as Python literals when possible.")
     p.add_argument("--instruction", default=None,
-                   help="language instruction for the candidate policy (else the task's)")
+                   help="language instruction for the candidate policy (else the task's "
+                        "get_instruction, else generated like the eval)")
+    p.add_argument("--instruction_type", default="unseen",
+                   help="instruction pool when generating (seen/unseen; default unseen)")
     p.add_argument("--strategy", default="beam", choices=sorted(search_mod.STRATEGY_REGISTRY))
     p.add_argument("--width", type=int, default=3, help="beam width B")
     p.add_argument("--k", type=int, default=6, help="candidates per node K")
@@ -346,6 +413,11 @@ def parse_args(argv=None) -> argparse.Namespace:
     p.add_argument("--top-m", "--top_m", dest="top_m", type=int, default=1,
                    help="number of top distinct plans to emit (rank-0 -> seed<N>.json, "
                         "rank-r -> seed<N>_rank<r>.json)")
+    p.add_argument("--dump-trace", "--dump_trace", dest="dump_trace", default=None,
+                   metavar="PATH",
+                   help="also expand the winner's per-decision candidate fans into a "
+                        "SearchTrace (JSON + companion .npz) at PATH — the policy-free "
+                        "artifact consumed by lookahead.run_viz --trace / Q-data")
     p.add_argument("--out", required=True, help="output dir root for plans")
     return p.parse_args(argv)
 
