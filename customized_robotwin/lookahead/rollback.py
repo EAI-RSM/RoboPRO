@@ -120,11 +120,17 @@ def snapshot(task: TaskAdapter) -> Dict[str, Any]:
     is an opaque SAPIEN handle (never serialised into a Plan — only the fingerprint
     is portable). Restoring this exact dict reproduces the scored state.
     """
-    return {
+    snap = {
         "physx": task.scene.get_physx_system().pack(),
         "drive": snapshot_drive_targets(task),
         "fingerprint": state_fingerprint(task),
     }
+    # Also capture the collision accumulator so get_collision_metrics() (the fitness's
+    # collision signal, identical to the eval pipeline's) is per-branch consistent:
+    # without this, restored siblings inherit each other's accumulated collisions.
+    if hasattr(task, "snapshot_collision_state"):
+        snap["collision"] = task.snapshot_collision_state()
+    return snap
 
 
 def restore(task: TaskAdapter, snap: Dict[str, Any]) -> None:
@@ -138,6 +144,8 @@ def restore(task: TaskAdapter, snap: Dict[str, Any]) -> None:
     task.scene.get_physx_system().unpack(snap["physx"])
     restore_drive_targets(task, snap["drive"])
     task.eval_success = False
+    if "collision" in snap and hasattr(task, "restore_collision_state"):
+        task.restore_collision_state(snap["collision"])
 
 
 # ------------------------------------------------------------------ rollout helpers

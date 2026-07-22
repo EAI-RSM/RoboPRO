@@ -1247,6 +1247,39 @@ class Bench_base_task(Base_Task):
                            "intended_to_static_object")},
         }
 
+    # Mutable per-rollout state that the displacement/contact collision accumulator
+    # advances every check_collisions() substep. Snapshotting + restoring these lets
+    # a branch-&-rollback search (lookahead) read get_collision_metrics() consistently
+    # per branch: after restoring a node, the accumulator reflects exactly the
+    # collisions along that node's path, so a re-rolled sibling neither inherits the
+    # sibling's collisions nor has its own suppressed by the once-per-event
+    # `_counted_*` sets. The stable id->name / id->entity maps hold SAPIEN handles and
+    # never change per branch, so they are deliberately excluded (not deep-copyable).
+    _COLLISION_STATE_ATTRS = (
+        "collision_metrics", "_static_last_toucher", "_static_last_touch_step",
+        "_counted_displaced_ids", "_displaced_categories", "_static_active_ref",
+        "_static_last_active_step", "_static_watch_last_seen", "_static_last_touch_pair",
+        "_counted_furniture_names", "_hit_furniture_names", "filtered_contacts_for_log",
+        "static_object_pose_prev", "static_object_pose_start",
+        "target_object_names", "destination_object_names", "_intended_contact_names",
+        "_metric_step", "_win_contact", "_win_collision",
+        "_win_contact_impulse", "_win_collision_impulse",
+        "_win_contact_pairs", "_win_collision_pairs", "_win_contact_pairs_seen",
+    )
+
+    def snapshot_collision_state(self):
+        """Deep-copy the mutable collision-accumulator state (for lookahead rollback)."""
+        import copy
+        return {a: copy.deepcopy(getattr(self, a))
+                for a in self._COLLISION_STATE_ATTRS if hasattr(self, a)}
+
+    def restore_collision_state(self, state):
+        """Restore state captured by :meth:`snapshot_collision_state` (deep-copied so
+        the stored snapshot stays pristine across repeated restores of the same node)."""
+        import copy
+        for a, v in state.items():
+            setattr(self, a, copy.deepcopy(v))
+
     # =========================================================== Proximity Tracking ===========================================================
 
     def _init_proximity_tracking(self, config):

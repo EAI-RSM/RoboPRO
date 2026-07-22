@@ -135,17 +135,20 @@ class Fitness(ABC):
 class OracleFitness(Fitness):
     """Privileged sim oracle: ``(tier_rank, dist_to_goal)`` minimised.
 
-    Ported from ``motivation_run.oracle_key`` / ``outcome_features``:
-
-    * ``tier`` in {HARD, SOFT, COLLIDED_FAIL, FAIL} from ``check_success`` + a
-      clutter-displacement collision proxy.
+    * ``tier`` in {HARD, SOFT, COLLIDED_FAIL, FAIL} from ``check_success`` +
+      collision. Collision is the repo's EXACT metric,
+      ``get_collision_metrics()["is_collision"]`` -- the same signal the eval
+      pipeline uses -- so ``HARD`` (success & not collided) is identical to the
+      eval's ``hard_success``. The clutter-displacement proxy is used only as a
+      fallback when collision metrics are not enabled on the task.
     * primary key = tier rank (HARD < SOFT < any fail),
     * tiebreak = Euclidean distance from the target to the destination xy.
 
     Parameters
     ----------
     disp_thresh:
-        Clutter-displacement threshold (m) above which a branch is "collided".
+        Fallback-only clutter-displacement threshold (m) above which a branch is
+        "collided" when the repo collision metric is unavailable.
     use_dist_tiebreak:
         When True (default) and a target+destination exist, ties within a tier are
         broken by proximity to the goal. When False, or on target-less tasks, the
@@ -163,12 +166,31 @@ class OracleFitness(Fitness):
         baseline = ctx.get("baseline_clutter", {})
         des_xy = ctx.get("des_xy", None)
 
-        # collision proxy is only meaningful when we have a baseline to compare to
-        if baseline:
+        # Collision: use the repo's EXACT metric -- get_collision_metrics()["is_collision"]
+        # -- the identical definition the eval pipeline scores with, so search pruning and
+        # eval scoring agree (HARD tier == eval hard_success). Requires the task to have
+        # collision metrics enabled (the lookahead search env sets enable_collision_metrics
+        # and the rollback snapshots/restores the accumulator so it is per-branch correct).
+        # Falls back to the clutter-displacement proxy only when the repo metric is
+        # unavailable (e.g. unit tests / target-less setups with no collision metrics).
+        cm = None
+        if (getattr(task, "enable_collision_metrics", False)
+                and hasattr(task, "get_collision_metrics")
+                and hasattr(task, "robot_link_names")):
+            try:
+                cm = task.get_collision_metrics()
+            except Exception:  # noqa: BLE001 - fall back to the proxy on any failure
+                cm = None
+        if cm is not None:
+            collided = bool(cm["is_collision"])
+            collision_count = int(cm["total_collision_count"])
+            max_disp = None
+        elif baseline:
             max_disp = _max_clutter_disp(task, baseline, exclude)
             collided = max_disp > self.disp_thresh
+            collision_count = None
         else:
-            max_disp, collided = 0.0, False
+            max_disp, collided, collision_count = 0.0, False, None
 
         tp = _target_pose(task)
         if tp is not None and des_xy is not None:
@@ -178,9 +200,11 @@ class OracleFitness(Fitness):
 
         return {
             "success": success,
-            "collided": bool(collided),
-            "tier": tier_of(success, collided),
-            "max_clutter_disp": float(max_disp),
+            "collided": bool(collided),          # get_collision_metrics (eval-identical) when available
+            "is_collision": bool(collided),
+            "tier": tier_of(success, collided),  # HARD == success & not is_collision == eval hard_success
+            "collision_count": collision_count,
+            "max_clutter_disp": None if max_disp is None else float(max_disp),
             "dist_to_goal": dist,
             "target_pose": None if tp is None else tp.tolist(),
         }
