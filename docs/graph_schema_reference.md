@@ -107,8 +107,10 @@ rather than assume catalog row order.
 node has:
 
 - `action_ids`, `action_types`, and `execution_phases`;
-- inclusive `start_frame` and `end_frame`;
+- inclusive `start_frame` and `end_frame`, plus `recorded_frame_count`;
 - `arms`, terminal `statuses`, and `provenance`;
+  `expert_planner_attempt` denotes issued planning/search attempts and
+  `expert_executed_action` denotes replayed execution;
 - target, destination, and effector IDs with explicit `_valid` masks;
 - `parameters_json`, `preconditions_json`, and `postconditions_json`;
 - `observed_effects_json`; and
@@ -138,10 +140,11 @@ Canonical action types include the object-manipulation sequence `approach`,
 articulation entity. `parameters_json` identifies the interaction part and joint
 index; handle parts are not yet independent catalog nodes.
 
-Contact events, risk assessments, belief nodes, candidate actions, and rejected
-actions are research-roadmap concepts. They are not canonical node types in the
-current `1.5.0` graph export. Filtered contact events are exported as an
-auxiliary event table, not as graph nodes.
+Contact events, risk assessments, belief nodes, unissued candidate alternatives,
+and rejected-plan lineage are research-roadmap concepts. Issued planner attempts
+are retained as action nodes, including failed attempts, with zero
+`recorded_frame_count` and no `active` frames. Filtered contact events are
+exported as an auxiliary event table, not as graph nodes.
 
 ## Implemented state-relation edges
 
@@ -309,24 +312,43 @@ Absence means unimplemented or unknown, not false.
 
 ## Collection caveats
 
-1. Action nodes describe actions actually issued by the expert. Candidate,
-   rejected, revised, and recovery actions are not exported.
+1. Executed planner attempts are retained, including failed attempts and attempts
+   that produced no saved frame. Candidate alternatives that were never issued,
+   rejected-plan lineage, and full failed-episode packaging remain future work.
 2. Action intervals use saved benchmark frames, not every physics or controller
    substep; adjacent primitives may share boundary observations.
-3. Placement destinations are inferred from container or support geometry nearest
-   the expert target pose unless the task supplies an explicit destination ID.
-4. `lift` versus generic `transport` comes from annotated helper calls and
-   displacement direction, not a learned motion classifier.
-5. Reachability collection may filter to movable targets, decimate changed
-   frames, and cache unchanged scenes. Validity datasets preserve the
+3. Tasks should supply explicit placement destinations in crowded scenes.
+   Geometric fallback is permitted only when it has one uniquely nearest
+   container/support candidate; ties raise an exception.
+4. `move_by_displacement` uses an explicit action type when supplied. Otherwise
+   it infers `lift`/`transport` only for a known held object and raises when the
+   semantics are ambiguous.
+5. Reachability collection may filter to movable targets and decimate frames.
+   Cache reuse requires matching scene poses, articulation qpos, robot qpos,
+   held-object state, and query objects. Validity datasets preserve the
    distinction between negative and unevaluated values.
-6. Current expert tasks may use the left and right arms sequentially in one
+6. Raw contacts require contact-point evidence. Contacts on articulation links
+   map to the cataloged articulation root until links become first-class nodes.
+7. Current expert tasks may use the left and right arms sequentially in one
    episode, and schema `1.5.0` can represent overlapping action intervals.
    However, the repository currently has no expert scenario or task config that
    issues simultaneous high-level actions to both arms. Simultaneous bimanual
    collection, synchronization semantics, shared-object participation, and
    cross-arm causal effects are a future extension; absence of overlapping arms
    in current data must not be interpreted as a negative capability label.
+
+## Compatibility and integrity policy
+
+Consumers must gate on both `schema_version` and the declared implemented
+relation/action datasets; a matching version string alone is not permission to
+assume an optional feature exists. Object tensor axes must be resolved through
+`relation_state/object_ids`, not catalog row positions. Ambiguous acceptance-name lookups or duplicate IDs,
+`relation_state/object_ids`, not catalog row positions. Ambiguous
+acceptance-name lookups or duplicate IDs,
+ambiguous grounding, malformed solver results, and unexpected episode counts
+are data errors and must raise or fail validation. They must never be rewritten
+as false labels. Expected-failure tasks require explicit failure-message
+patterns; an unexpected pass is also a suite failure.
 
 ## Cross-task action validation suite
 

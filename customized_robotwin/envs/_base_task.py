@@ -989,15 +989,10 @@ class Base_Task(gym.Env):
         )
 
     def _infer_benchmark_destination_object_id(self, target_pose, excluded_entity=None):
-        """Choose the container/support nearest a placement target pose.
-
-        This is privileged geometric provenance for expert actions, not a visual
-        prediction. Tasks may provide an explicit destination id in the future.
-        """
-        try:
-            point = np.asarray(transforms._toPose(target_pose).p, dtype=float)
-        except Exception:
-            return None
+        """Resolve placement provenance from geometry, rejecting ambiguous scenes."""
+        point = np.asarray(transforms._toPose(target_pose).p, dtype=float)
+        if point.shape != (3,) or not np.all(np.isfinite(point)):
+            raise ValueError(f"Invalid placement target point: {point!r}")
         excluded_id = self._benchmark_entity_object_id(excluded_entity)
         actor_by_id = {}
         for entity in self.scene.get_all_actors():
@@ -1005,9 +1000,7 @@ class Base_Task(gym.Env):
             if object_id is not None:
                 actor_by_id[int(object_id)] = entity
         for articulation in self.scene.get_all_articulations():
-            links = articulation.get_links()
-            root = getattr(links[0], "entity", None) if links else None
-            object_id = getattr(root, "per_scene_id", None)
+            object_id = self._benchmark_entity_object_id(articulation)
             if object_id is not None:
                 actor_by_id[int(object_id)] = articulation
 
@@ -1024,17 +1017,32 @@ class Base_Task(gym.Env):
                 continue
             lower, upper = np.asarray(aabb[0]), np.asarray(aabb[1])
             outside = np.maximum(np.maximum(lower - point, point - upper), 0.0)
-            distance = float(np.linalg.norm(outside))
-            candidates.append((distance, object_id))
-        return min(candidates)[1] if candidates else None
+            candidates.append((float(np.linalg.norm(outside)), object_id))
+        if not candidates:
+            raise ValueError(
+                f"No placement destination candidate contains or neighbors target point {point.tolist()}"
+            )
+        best_distance = min(distance for distance, _ in candidates)
+        best_ids = sorted(
+            object_id for distance, object_id in candidates
+            if np.isclose(distance, best_distance, rtol=0.0, atol=1e-6)
+        )
+        if len(best_ids) != 1:
+            raise ValueError(
+                "Ambiguous placement destination at "
+                f"{point.tolist()}: equally ranked object ids {best_ids}; "
+                "pass benchmark_destination_entity explicitly"
+            )
+        return best_ids[0]
+
 
     def _build_benchmark_visibility_relations(self, object_catalog, actor_by_id):
         """Build object-to-camera visibility from already captured segmentation."""
         object_count = len(object_catalog)
         try:
             segmentation = self.cameras.get_segmentation_raw(level="actor")
-        except Exception:
-            segmentation = {}
+        except Exception as exc:
+            raise RuntimeError("Actor segmentation capture failed while computing visible_to") from exc
 
         camera_names = sorted(segmentation)
         visible_to = np.zeros((object_count, len(camera_names)), dtype=np.bool_)
@@ -1051,8 +1059,10 @@ class Base_Task(gym.Env):
                     continue
                 try:
                     target_ids = self._resolve_target_seg_ids(entity)
-                except (TypeError, AttributeError, ValueError):
-                    continue
+                except (TypeError, AttributeError, ValueError) as exc:
+                    raise RuntimeError(
+                        f"Cannot resolve segmentation ids for catalog object {entry['object_id']}"
+                    ) from exc
                 count = int(np.isin(seg_img, list(target_ids)).sum())
                 visible_pixel_count[object_idx, camera_idx] = count
                 visible_to[object_idx, camera_idx] = count > 0
@@ -1102,7 +1112,26 @@ class Base_Task(gym.Env):
                 continue
             pose_values = np.concatenate((np.asarray(pose.p), np.asarray(pose.q)))
             scene_signature.append((int(object_id), *np.round(pose_values, decimals=decimals).tolist()))
-        scene_signature = tuple(scene_signature)
+        articulation_state = []
+        for articulation in self.scene.get_all_articulations():
+            root_id = self._benchmark_entity_object_id(articulation)
+            qpos = np.asarray(articulation.get_qpos(), dtype=float).reshape(-1)
+            articulation_state.append(
+                (root_id, *np.round(qpos, decimals=decimals).tolist())
+            )
+        robot_state = []
+        for side in ("left", "right"):
+            entity = getattr(self.robot, f"{side}_entity", None)
+            if entity is None or not hasattr(entity, "get_qpos"):
+                raise RuntimeError(f"Robot {side}_entity qpos is unavailable for reachability provenance")
+            qpos = np.asarray(entity.get_qpos(), dtype=float).reshape(-1)
+            robot_state.append((side, *np.round(qpos, decimals=decimals).tolist()))
+        held_state = tuple(
+            (side, self._benchmark_held_object_id(side)) for side in ("left", "right")
+        )
+        scene_signature = (
+            tuple(scene_signature), tuple(articulation_state), tuple(robot_state), held_state
+        )
 
         cache = getattr(self, "_benchmark_reachability_cache", None)
         if (
@@ -1121,13 +1150,18 @@ class Base_Task(gym.Env):
         for effector_idx, method_name in enumerate(("left_check_ik_batch", "right_check_ik_batch")):
             method = getattr(self.robot, method_name, None)
             if method is None:
-                continue
+                raise RuntimeError(f"Robot does not provide required reachability method {method_name}")
             try:
                 results = np.asarray(method(query_poses, relax_orientation=True), dtype=np.bool_).reshape(-1)
-            except Exception:
-                continue
+            except Exception as exc:
+                raise RuntimeError(
+                    f"{method_name} failed while computing reachable_by at frame {frame_idx}"
+                ) from exc
             if len(results) != len(query_indices):
-                continue
+                raise ValueError(
+                    f"{method_name} returned {len(results)} result(s) for "
+                    f"{len(query_indices)} reachability queries"
+                )
             reachable_by[query_indices, effector_idx] = results
             reachable_by_valid[query_indices, effector_idx] = True
 
@@ -1138,31 +1172,31 @@ class Base_Task(gym.Env):
             "reachable_by_valid": reachable_by_valid.copy(),
         }
         return reachable_by, reachable_by_valid, True
-
     def _get_benchmark_effector_state(self, arm_tag: str) -> tuple[np.ndarray | None, bool]:
         if not hasattr(self, "robot"):
-            return None, False
+            raise RuntimeError("Robot is unavailable while computing held_by")
 
         pose_method_name = f"get_{arm_tag}_tcp_pose"
         closed_method_name = f"is_{arm_tag}_gripper_close"
         pose_method = getattr(self.robot, pose_method_name, None)
         closed_method = getattr(self.robot, closed_method_name, None)
         if pose_method is None or closed_method is None:
-            return None, False
+            raise RuntimeError(f"Robot does not expose required {arm_tag} effector state methods")
 
         try:
             tcp_pose = np.array(pose_method()[:3], dtype=np.float64)
             is_closed = bool(closed_method())
-        except Exception:
-            return None, False
-
+        except Exception as exc:
+            raise RuntimeError(f"Failed to read {arm_tag} effector state") from exc
         return tcp_pose, is_closed
+
 
     def _build_benchmark_relation_state_snapshot(self) -> dict:
         object_catalog = self._get_benchmark_object_catalog()
         actor_by_id = {}
         aabb_by_id = {}
         index_by_id = {}
+        articulation_root_by_link_id = {}
 
         for idx, entry in enumerate(object_catalog):
             object_id = int(entry["object_id"])
@@ -1186,6 +1220,11 @@ class Base_Task(gym.Env):
                 continue
             object_id = int(object_id)
             actor_by_id[object_id] = articulation
+            for link in articulation.get_links():
+                link_entity = getattr(link, "entity", link)
+                link_id = getattr(link_entity, "per_scene_id", None)
+                if link_id is not None:
+                    articulation_root_by_link_id[int(link_id)] = object_id
             aabb_by_id[object_id] = self._get_benchmark_entity_aabb(articulation)
 
         object_ids = np.array([int(entry["object_id"]) for entry in object_catalog], dtype=np.int64)
@@ -1212,6 +1251,15 @@ class Base_Task(gym.Env):
         right_contact = np.zeros((object_count,), dtype=np.bool_)
 
         for scene_contact in self.scene.get_contacts():
+            points = list(scene_contact.points)
+            if not points:
+                continue
+            if not any(
+                float(point.separation) <= 1e-4
+                or float(np.linalg.norm(np.asarray(point.impulse, dtype=float))) > 0.0
+                for point in points
+            ):
+                continue
             entity0 = scene_contact.bodies[0].entity
             entity1 = scene_contact.bodies[1].entity
             name0 = entity0.name
@@ -1224,6 +1272,9 @@ class Base_Task(gym.Env):
             if object_id1 is not None:
                 object_id1 = int(object_id1)
 
+
+            object_id0 = articulation_root_by_link_id.get(object_id0, object_id0)
+            object_id1 = articulation_root_by_link_id.get(object_id1, object_id1)
             if object_id0 in index_by_id and object_id1 in index_by_id and object_id0 != object_id1:
                 idx0 = index_by_id[object_id0]
                 idx1 = index_by_id[object_id1]
@@ -1527,7 +1578,10 @@ class Base_Task(gym.Env):
             "parameters": parameters,
             "preconditions": preconditions,
             "postconditions": postconditions,
-            "provenance": "expert_planner_action",
+            "provenance": (
+                "expert_planner_attempt" if bool(getattr(self, "need_plan", False))
+                else "expert_executed_action"
+            ),
             "observed_effects": [],
             "_articulation_joint_before": articulation_joint_before,
             "_recorded_frame_count": 0,
@@ -1568,21 +1622,23 @@ class Base_Task(gym.Env):
             self._benchmark_held_object_ids[arm] = None
             self._benchmark_held_object_state_known[arm] = True
 
-    def _drop_unrecorded_benchmark_actions(self):
-        """Remove planner/search calls that produced no saved benchmark frame."""
-        kept = []
+    def _finalize_benchmark_actions(self):
+        """Retain every planner attempt, including zero-frame and failed attempts."""
+        finalized = []
         for node in self._benchmark_action_nodes:
-            if node.get("action_type") != "verify_success" and node.get("_recorded_frame_count", 0) <= 0:
-                continue
             clean = deepcopy(node)
-            clean.pop("_recorded_frame_count", None)
-            clean["action_id"] = len(kept)
-            kept.append(clean)
-        self._benchmark_action_nodes = kept
+            clean["recorded_frame_count"] = int(clean.pop("_recorded_frame_count", 0))
+            clean["action_id"] = len(finalized)
+            finalized.append(clean)
+        self._benchmark_action_nodes = finalized
+
 
     def _append_benchmark_success_check_action(self, success):
         if self._benchmark_action_nodes and self._benchmark_action_nodes[-1]["action_type"] == "verify_success":
             self._benchmark_action_nodes[-1]["status"] = "succeeded" if bool(success) else "failed"
+            self._benchmark_action_nodes[-1]["recorded_frame_count"] = max(
+                1, int(self._benchmark_action_nodes[-1].get("recorded_frame_count", 0))
+            )
             self._benchmark_action_nodes[-1]["postconditions"] = [
                 {"predicate": "task_success", "value": bool(success)}
             ]
@@ -1595,6 +1651,7 @@ class Base_Task(gym.Env):
             "arm": "none",
             "start_frame": frame,
             "end_frame": frame,
+            "recorded_frame_count": 1,
             "status": "succeeded" if bool(success) else "failed",
             "target_object_id": None,
             "destination_object_id": None,
@@ -1607,7 +1664,7 @@ class Base_Task(gym.Env):
 
     def build_benchmark_episode_record(self, success=None):
         self._ensure_benchmark_export_state()
-        self._drop_unrecorded_benchmark_actions()
+        self._finalize_benchmark_actions()
         self._append_benchmark_success_check_action(success)
         export_ctx = getattr(self, "_benchmark_export_context", {}) or {}
         scene_info = self._export_jsonable(getattr(self, "info", {}) or {})
@@ -1859,7 +1916,7 @@ class Base_Task(gym.Env):
                     data=np.array([node.get(field, "") for node in action_nodes], dtype=object),
                     dtype=string_dtype,
                 )
-            for field in ("start_frame", "end_frame"):
+            for field in ("start_frame", "end_frame", "recorded_frame_count"):
                 action_group.create_dataset(
                     field,
                     data=np.array([node[field] for node in action_nodes], dtype=np.int64),
@@ -1990,6 +2047,8 @@ class Base_Task(gym.Env):
             frame_count = int(object_state_group["pose_world"].shape[0]) if object_state_group is not None else 0
             active = np.zeros((frame_count, len(action_nodes)), dtype=np.bool_)
             for action_idx, node in enumerate(action_nodes):
+                if int(node.get("recorded_frame_count", 0)) <= 0:
+                    continue
                 if frame_count == 0:
                     continue
                 start = max(0, min(int(node["start_frame"]), frame_count - 1))
@@ -3840,12 +3899,19 @@ class Base_Task(gym.Env):
         pre_dis: float = 0.1,
         dis: float = 0.02,
         is_open: bool = True,
+        benchmark_destination_entity=None,
         **args,
     ):
         if not self.plan_success:
             return None, []
         target_id = self._benchmark_entity_object_id(actor)
-        destination_id = self._infer_benchmark_destination_object_id(target_pose, actor)
+        destination_id = (
+            self._benchmark_entity_object_id(benchmark_destination_entity)
+            if benchmark_destination_entity is not None
+            else self._infer_benchmark_destination_object_id(target_pose, actor)
+        )
+        if benchmark_destination_entity is not None and destination_id is None:
+            raise ValueError("Explicit benchmark_destination_entity has no object id")
         common_meta = {
             "benchmark_target_object_id": target_id,
             "benchmark_destination_object_id": destination_id,
@@ -3945,7 +4011,15 @@ class Base_Task(gym.Env):
         if quat is not None:
             origin_pose[3:] = quat
         held_id = self._benchmark_held_object_id(arm_tag)
-        action_type = benchmark_action or ("lift" if z > 0 else "transport")
+        if benchmark_action is not None:
+            action_type = benchmark_action
+        elif held_id is not None:
+            action_type = "lift" if z > 0 else "transport"
+        else:
+            raise ValueError(
+                "move_by_displacement cannot infer an action without an explicitly supplied "
+                "benchmark_action or a known held object"
+            )
         target_meta = self._benchmark_action_target_metadata(
             benchmark_target_entity, interaction_part, articulation_joint_index
         )
