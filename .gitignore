@@ -78,6 +78,8 @@ usecase_roadmap.tex
 related_works.tex
 
 # Validation outputs (generated, not tracked)
+customized_robotwin/**/data/action_validation_suite*/
+customized_robotwin/**/data/relation_validation*/
 scripts/validation/results/
 docs/objaverse_preview/
 docs/references/
