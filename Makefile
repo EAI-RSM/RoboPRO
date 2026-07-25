@@ -78,6 +78,7 @@ ACTION_VALIDATION_OUTPUT_ROOT ?= $(CUSTOMIZED_ROOT)/data/action_validation_suite
 ACTION_VALIDATION_MODE ?= all
 ACTION_VALIDATION_TASKS ?=
 ACTION_VALIDATION_START_SEED ?= 0
+ACTION_VALIDATION_TASK_TIMEOUT ?= 1800
 ACTION_VALIDATION_DRY_RUN ?= 0
 ACTION_VALIDATION_OBSTACLE_DENSITY ?= 10
 
@@ -317,7 +318,7 @@ relation-validation:
 
 action-validation-suite:
 	$(call RUN_IN_CUSTOMIZED,\
-		cmd='$(PYTHON) ../benchmark/bench_script/run_action_validation_suite.py "$(ACTION_VALIDATION_MODE)" --matrix "$(ACTION_VALIDATION_MATRIX)" --output-root "$(abspath $(ACTION_VALIDATION_OUTPUT_ROOT))" --gpu "$(GPU_ID)" --start-seed "$(ACTION_VALIDATION_START_SEED)" --reachability-interval "$(REACHABLE_BY_INTERVAL)" --obstacle-density "$(ACTION_VALIDATION_OBSTACLE_DENSITY)"'; \
+		cmd='$(PYTHON) ../benchmark/bench_script/run_action_validation_suite.py "$(ACTION_VALIDATION_MODE)" --matrix "$(ACTION_VALIDATION_MATRIX)" --output-root "$(abspath $(ACTION_VALIDATION_OUTPUT_ROOT))" --gpu "$(GPU_ID)" --start-seed "$(ACTION_VALIDATION_START_SEED)" --task-timeout "$(ACTION_VALIDATION_TASK_TIMEOUT)" --reachability-interval "$(REACHABLE_BY_INTERVAL)" --obstacle-density "$(ACTION_VALIDATION_OBSTACLE_DENSITY)"'; \
 		if [[ -n "$(ACTION_VALIDATION_TASKS)" ]]; then cmd+=" --tasks $(ACTION_VALIDATION_TASKS)"; fi; \
 		if [[ "$(ACTION_VALIDATION_DRY_RUN)" == "1" ]]; then cmd+=" --dry-run"; fi; \
 		eval "$$cmd")

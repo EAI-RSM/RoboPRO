@@ -57,6 +57,14 @@ def _print_tree(node, prefix=""):
             print(f"{prefix}{key}  shape={item.shape} dtype={item.dtype}")
 
 
+def _record_checks(checks: dict, failures: list[str], indent: str = "    ") -> None:
+    """Print checks and retain every failed boolean invariant."""
+    for key, value in checks.items():
+        print(f"{indent}{key}: {value}")
+        if isinstance(value, (bool, np.bool_)) and not bool(value):
+            failures.append(key)
+
+
 def _print_attrs(root: h5py.File):
     if not root.attrs:
         print("No top-level attrs found.")
@@ -66,12 +74,12 @@ def _print_attrs(root: h5py.File):
         print(f"  {key}: {_decode_attr(root.attrs[key])}")
 
 
-def _summarize_benchmark_support(root: h5py.File):
+def _summarize_benchmark_support(root: h5py.File) -> None:
     if "benchmark_support" not in root:
-        print("No benchmark_support group found.")
-        return
+        raise ValueError("Required benchmark_support group is missing")
 
     support = root["benchmark_support"]
+    failures: list[str] = []
     print("\nbenchmark_support:")
     raw_contact = None
     grasped_by_code = None
@@ -143,8 +151,7 @@ def _summarize_benchmark_support(root: h5py.File):
             moved = np.abs(np.diff(pose_world[:, :, :3], axis=0)).sum(axis=2)
             checks["objects with any movement"] = int((moved > 1e-6).any(axis=0).sum())
 
-        for key, value in checks.items():
-            print(f"    {key}: {value}")
+        _record_checks(checks, failures)
 
         if pose_world is not None and object_ids:
             preview_count = min(len(object_ids), 5)
@@ -190,8 +197,7 @@ def _summarize_benchmark_support(root: h5py.File):
             checks["same L across positions/chain_index"] = positions_world.shape[1] == len(chain_index)
         if positions_world is not None and parent_index is not None:
             checks["same L across positions/parent_index"] = positions_world.shape[1] == len(parent_index)
-        for key, value in checks.items():
-            print(f"    {key}: {value}")
+        _record_checks(checks, failures)
 
         if link_names and side_code is not None:
             preview_count = min(len(link_names), 10)
@@ -360,8 +366,7 @@ def _summarize_benchmark_support(root: h5py.File):
             checks["catalog object_ids match relation object_ids"] = catalog_ids == object_ids
         if on_matrix is not None and supports_matrix is not None:
             checks["supports is transpose of on (frame0)"] = np.array_equal(supports_matrix[0], on_matrix[0].T)
-        for key, value in checks.items():
-            print(f"    {key}: {value}")
+        _record_checks(checks, failures)
 
     if "action_nodes" in support:
         actions = support["action_nodes"]
@@ -371,6 +376,11 @@ def _summarize_benchmark_support(root: h5py.File):
         phases = _decode_string_array(actions["execution_phases"]) if "execution_phases" in actions else []
         arms = _decode_string_array(actions["arms"]) if "arms" in actions else []
         statuses = _decode_string_array(actions["statuses"]) if "statuses" in actions else []
+        provenance = _decode_string_array(actions["provenance"]) if "provenance" in actions else []
+        recorded_frame_count = (
+            actions["recorded_frame_count"][()]
+            if "recorded_frame_count" in actions else np.zeros(0, dtype=np.int64)
+        )
         starts = actions["start_frame"][()] if "start_frame" in actions else np.zeros(0, dtype=np.int64)
         ends = actions["end_frame"][()] if "end_frame" in actions else np.zeros(0, dtype=np.int64)
         active = actions["active"][()] if "active" in actions else None
@@ -384,12 +394,27 @@ def _summarize_benchmark_support(root: h5py.File):
                 f"arm={arms[idx]} frames={int(starts[idx])}..{int(ends[idx])} status={statuses[idx]}"
             )
         checks = {}
-        parallel_lengths = [len(values) for values in (action_types, phases, arms, statuses, starts, ends)]
+        parallel_lengths = [
+            len(values) for values in (
+                action_types, phases, arms, statuses, provenance,
+                starts, ends, recorded_frame_count,
+            )
+        ]
         checks["all action fields share A"] = all(length == count for length in parallel_lengths)
         checks["action_ids are contiguous"] = np.array_equal(action_ids, np.arange(count))
         checks["action types are canonical"] = set(action_types).issubset(set(canonical))
         checks["execution phases are canonical"] = set(phases).issubset(set(phase_names))
         checks["statuses are terminal"] = set(statuses).issubset({"succeeded", "failed"})
+        checks["action provenance is canonical"] = set(provenance).issubset({
+            "expert_planner_attempt", "expert_executed_action", "task_success_check",
+        })
+        planner_attempt = np.asarray(
+            [value == "expert_planner_attempt" for value in provenance], dtype=np.bool_
+        )
+        checks["planner attempts own no recorded frames"] = bool(
+            len(recorded_frame_count) == count
+            and np.all(recorded_frame_count[planner_attempt] == 0)
+        )
         frame_count = (
             support["object_state"]["pose_world"].shape[0]
             if "object_state" in support and "pose_world" in support["object_state"] else 0
@@ -402,6 +427,8 @@ def _summarize_benchmark_support(root: h5py.File):
             checks["active mask shape is (T,A)"] = active.shape == (frame_count, count)
             expected_active = np.zeros((frame_count, count), dtype=np.bool_)
             for idx, (start, end) in enumerate(zip(starts, ends)):
+                if len(recorded_frame_count) != count or recorded_frame_count[idx] <= 0:
+                    continue
                 if frame_count:
                     expected_active[int(start):int(end) + 1, idx] = True
             checks["active mask matches intervals"] = np.array_equal(active, expected_active)
@@ -467,16 +494,7 @@ def _summarize_benchmark_support(root: h5py.File):
             checks["action edges reference catalog objects"] = all(int(value) in catalog_ids for value in edge_objects)
             checks["action edge roles are canonical"] = set(edge_roles).issubset({"agent", "target", "destination"})
             print(f"    action_entity_edges: {len(edge_actions)}")
-        for key, value in checks.items():
-            print(f"    {key}: {value}")
-        failed_checks = [
-            key for key, value in checks.items()
-            if isinstance(value, (bool, np.bool_)) and not bool(value)
-        ]
-        if failed_checks:
-            raise SystemExit(
-                "Action-node invariant failure(s): " + ", ".join(failed_checks)
-            )
+        _record_checks(checks, failures)
 
     if "collision_metric_contact_events" in support:
         events = support["collision_metric_contact_events"]
@@ -503,6 +521,9 @@ def _summarize_benchmark_support(root: h5py.File):
             print(f"    frame0 held_by edges: {int(np.count_nonzero(held_by[0]))}")
         if part_of is not None and part_of.shape[0] > 0:
             print(f"    frame0 part_of edges: {int(np.count_nonzero(part_of[0]))}")
+
+    if failures:
+        raise ValueError("Benchmark invariant failure(s): " + ", ".join(failures))
 
 
 def _list_cameras(root: h5py.File) -> list[str]:

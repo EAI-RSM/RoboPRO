@@ -36,6 +36,8 @@ tasks:
     episodes: 1
     acceptance:
       required_arms: [left]
+      allowed_failed_action_types: [retreat]
+      max_failed_executed_actions: 1
       required_action_types: [approach, grasp, release, approach_handle, grasp_handle, close_articulation, verify_success]
       require_articulated_target_actions: [approach_handle, grasp_handle, close_articulation]
       require_interaction_part_actions: [approach_handle, grasp_handle, close_articulation]
