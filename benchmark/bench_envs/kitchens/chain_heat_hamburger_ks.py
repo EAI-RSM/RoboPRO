@@ -113,10 +113,14 @@ class chain_heat_hamburger_ks(KitchenS_base_task):
             self.plan_success = True
 
         self.move(self.open_gripper(arm_tag, pos=1.0))
-        self.move(self.move_by_displacement(arm_tag=arm_tag, y=-0.20))
+        self.move(self.move_by_displacement(
+            arm_tag=arm_tag, y=-0.20, benchmark_action="retreat",
+        ))
         if not self.plan_success:
             self.plan_success = True
-        self.move(self.move_by_displacement(arm_tag=arm_tag, z=0.10))
+        self.move(self.move_by_displacement(
+            arm_tag=arm_tag, z=0.10, benchmark_action="retreat",
+        ))
         self.move(self.back_to_origin(arm_tag))
 
     # -----------------------------------------------------------------
@@ -155,12 +159,12 @@ class chain_heat_hamburger_ks(KitchenS_base_task):
             arm_tag, hover_pose, benchmark_action="approach_handle", **articulation_meta,
         ))
 
-        push_pose = [hx - 0.10, hy - 0.15, hz] + grasp_q
-        self.move(self.move_to_pose(
-            arm_tag, push_pose, benchmark_action="approach_handle", **articulation_meta,
-        ))
         self.move(self.close_gripper(
             arm_tag, pos=0.0, benchmark_action="grasp_handle", **articulation_meta,
+        ))
+        push_pose = [hx - 0.10, hy - 0.15, hz] + grasp_q
+        self.move(self.move_to_pose(
+            arm_tag, push_pose, benchmark_action="close_articulation", **articulation_meta,
         ))
 
         limits = self.microwave.get_qlimits()

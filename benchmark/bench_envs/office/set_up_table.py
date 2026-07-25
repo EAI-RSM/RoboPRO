@@ -162,14 +162,21 @@ class set_up_table(Office_base_task):
 
         # Pull the drawer
         for _ in range(3):
-            self.move(self.move_by_displacement(arm_tag=arm_tag1, y=0.0633))
+            self.move(self.move_by_displacement(
+                arm_tag=arm_tag1, y=0.0633,
+                benchmark_action="open_articulation",
+                benchmark_target_entity=self.cabinet,
+                articulation_joint_index=0,
+            ))
         
         self.move(self.open_gripper(arm_tag=arm_tag1))
         
         if arm_tag1 != arm_tag2:
             self.move(self.back_to_origin(arm_tag1))
         else:
-            self.move(self.move_by_displacement(arm_tag=arm_tag1, y=-0.04))
+            self.move(self.move_by_displacement(
+                arm_tag=arm_tag1, y=-0.04, benchmark_action="retreat",
+            ))
 
         # target_obj_2 ------------------------------------------------------------
         self.move(self.grasp_actor(self.target_obj_2, arm_tag=arm_tag2, pre_grasp_dis=0.04, grasp_dis=0.02))
@@ -187,7 +194,9 @@ class set_up_table(Office_base_task):
                 local_up_axis=[0,1,0]
             ))
         
-        self.move(self.move_by_displacement(arm_tag=arm_tag2, y=-0.05))
+        self.move(self.move_by_displacement(
+            arm_tag=arm_tag2, y=-0.05, benchmark_action="retreat",
+        ))
 
         # Record information about the objects and arm used in the task
         # self.info["info"] = {
