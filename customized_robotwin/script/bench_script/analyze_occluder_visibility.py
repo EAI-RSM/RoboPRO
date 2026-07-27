@@ -2479,7 +2479,8 @@ def make_occluder_task():
                 cfg = sfc.SeedMetricConfig(
                     obstacles=os.environ.get("SEED_OBSTACLES", "all").strip().lower(),
                     res=float(os.environ.get("SEED_RES", "0.02")),
-                    zres=float(os.environ.get("SEED_ZRES", "0.03")))
+                    zres=float(os.environ.get("SEED_ZRES", "0.03")),
+                    zmax=float(os.environ.get("SEED_ZMAX", "1.23")))
                 seed, res = sfc.build_seed(self, planner, tag, ik, grasp_q, start_q, None,
                                            start_xyz, goal_xyz, cfg=cfg, action_horizon=H)
                 if seed is None:

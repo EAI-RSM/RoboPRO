@@ -45,7 +45,11 @@ class SeedMetricConfig:
     ymax: float = 0.35
     res: float = 0.01
     zmin: float = 0.78           # ~grasp height (table ~0.74)
-    zmax: float = 1.4            # above the occluder top
+    # Ceiling of the climb-over grid. 1.23 leaves headroom over the olive-oil top while cutting
+    # ~30% of the z-slices vs the old 1.4. It must stay ABOVE the tallest obstacle: a route that
+    # needs to pass over something higher than zmax cannot connect, and shows up as a build miss
+    # rather than as a long way round.
+    zmax: float = 1.23
     zres: float = 0.03
     # metric knobs
     gate_tau: float = 0.35       # rad; joint-continuity edge gate (the mandatory 2.5D gate)

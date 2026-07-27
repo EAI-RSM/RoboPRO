@@ -30,7 +30,7 @@
 # weighted equally by construction:
 #   curated   olive-oil occluders always spawned, in a RANDOMIZED formation: the whole
 #             formation is rotated by a random theta in [0, 2pi), the count is drawn per
-#             scene from OCCLUDER_COUNTS (default 2,3,4,5), and each occluder draws its
+#             scene from OCCLUDER_COUNTS (default 2,3,4), and each occluder draws its
 #             own radius from OFFSET (default the range 0.1-0.25) -- so scenes vary in
 #             density, spacing and which side the gap is on, instead of always presenting
 #             one bottle straight in front. Clutter at CURATED_CLUTTER_DENSITY (default 0).
@@ -49,7 +49,7 @@
 #   MODES                     which modes to run          (default "direct seed")
 #   SCENES                    which scenes to run         (default "curated standard")
 #   OFFSET                    occluder radius/range        (default 0.1-0.25)
-#   OCCLUDER_COUNTS           counts a curated scene draws (default 2,3,4,5)
+#   OCCLUDER_COUNTS           counts a curated scene draws (default 2,3,4)
 #   RANDOM_RING_ROTATION      1/0, random formation theta  (default 1)
 #   CURATED_CLUTTER_DENSITY   clutter on curated          (default 0)
 #   STANDARD_CLUTTER_DENSITY  clutter on standard         (default 8)
@@ -58,6 +58,7 @@
 #   SEED_VISUALS              1/0, save route figures     (default 1)
 #   SEED_OBSTACLES            all | occluders             (default all)
 #   SEED_RES / SEED_ZRES      clearance grid res (m)      (default 0.02 / 0.03)
+#   SEED_ZMAX                 clearance grid ceiling (m)  (default 1.23)
 #   DEBUG                     1 -> ROBOTWIN_LOG_MOVE      (default 0)
 # Frozen curobo knobs -- identical in all cells, so the ONLY variable is the mode:
 #   CUROBO_MAX_ATTEMPTS(24) CUROBO_TRAJOPT_SEEDS(16) CUROBO_BATCH_GRAPH_SEEDS(1)
@@ -78,7 +79,7 @@ SCENES="${SCENES:-curated standard}"
 # cells a VARIETY of configurations rather than one repeated layout; set OFFSET=0.2,
 # OCCLUDER_COUNTS=1, RANDOM_RING_ROTATION=0 to get the old single-bottle-in-front scene.
 OFFSET="${OFFSET:-0.1-0.25}"
-OCCLUDER_COUNTS="${OCCLUDER_COUNTS:-2,3,4,5}"
+OCCLUDER_COUNTS="${OCCLUDER_COUNTS:-2,3,4}"
 RANDOM_RING_ROTATION="${RANDOM_RING_ROTATION:-1}"
 # Both scenes draw from the SAME seed range, so each scene gets NUM_SEEDS attempts and
 # the two are equally weighted. Seed acceptance is scene-dependent (a scene is rejected
@@ -148,6 +149,9 @@ export SEED_OBSTACLES="${SEED_OBSTACLES:-all}"
 # timing probe still says minutes per scene; lower it for a more faithful eps*.
 export SEED_RES="${SEED_RES:-0.02}"
 export SEED_ZRES="${SEED_ZRES:-0.03}"
+# Ceiling of the climb-over grid. Must stay above the tallest obstacle or a route that needs
+# to pass over it cannot connect, which reads as a build miss.
+export SEED_ZMAX="${SEED_ZMAX:-1.23}"
 if [[ "$DEBUG" == "1" ]]; then
   export ROBOTWIN_LOG_MOVE=1
   echo "DEBUG=1 -> verbose per-move planning trace enabled in cell logs"
