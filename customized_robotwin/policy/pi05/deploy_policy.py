@@ -12,8 +12,11 @@ sys.path.append(parent_directory)
 
 # Encode observation for the model
 def encode_obs(observation):
+    # cam_high is fed from the COUNTERTOP (overhead) camera to match how the
+    # RoboPRO checkpoint was trained (repack maps cam_high <- observation.images.countertop).
+    # NOTE: head_camera is a distinct (forward) camera in this env and is NOT what the model expects.
     input_rgb_arr = [
-        observation["observation"]["head_camera"]["rgb"],
+        observation["observation"]["countertop_camera"]["rgb"],
         observation["observation"]["right_camera"]["rgb"],
         observation["observation"]["left_camera"]["rgb"],
     ]

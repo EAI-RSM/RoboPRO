@@ -579,6 +579,40 @@ _CONFIGS = [
         batch_size=64,
         fsdp_devices=1,  # refer line 359
     ),
+    # RoboPRO top-cam pi05 checkpoint (mzxuan/robopro_jax_30000, step 30000).
+    # Reproduced verbatim from the checkpoint's shipped train_config.py so the
+    # loader (pi_model.PI0 -> get_config) matches how the weights were trained.
+    # NOTE: cam_high is fed from the COUNTERTOP (overhead) camera; arm joints
+    # trained as delta + grippers absolute, AbsoluteActions => returned actions
+    # are ABSOLUTE joint targets.
+    TrainConfig(
+        name="pi05_robopro_top_cam_jax",
+        model=pi0_config.Pi0Config(pi05=True),
+        data=LeRobotAlohaDataConfig(
+            repo_id="roboreal_lerobot",
+            repack_transforms=_transforms.Group(inputs=[
+                _transforms.RepackTransform({
+                    "images": {
+                        "cam_high": "observation.images.countertop",
+                        "cam_left_wrist": "observation.images.left",
+                        "cam_right_wrist": "observation.images.right",
+                    },
+                    "state": "observation.state",
+                    "actions": "action",
+                    "prompt": "prompt",
+                })
+            ]),
+            base_config=DataConfig(
+                prompt_from_task=True,
+            ),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+        lr_schedule=_optimizer.CosineDecaySchedule(decay_steps=30_000),
+        num_train_steps=30_000,
+        batch_size=192,     # 3 GPUs = 64/GPU (must be divisible by device count)
+        num_workers=16,
+        fsdp_devices=1,
+    ),
     # pi0_base by lora
     TrainConfig(
         name="pi0_base_aloha_robotwin_lora",

@@ -7,9 +7,11 @@ seed: null
 instruction_type: unseen
 
 # Add Parameters You Need
-train_config_name: pi05_aloha_full_base
-model_name: roboreal_all_80tasks
-checkpoint_id: 20000
+# RoboPRO JAX checkpoint (mzxuan/robopro_jax_30000, step 30000).
+# Resolves to checkpoints/pi05_robopro_top_cam_jax/robopro/30000/
+train_config_name: pi05_robopro_top_cam_jax
+model_name: robopro
+checkpoint_id: 30000
 pi0_step: 50
 
 # Rollout collection parameters (used by collect_rollout_client.py)
