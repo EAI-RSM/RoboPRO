@@ -2175,7 +2175,7 @@ def make_occluder_task():
         def _plan_pose_with_local_waypoint_retry(self, arm_tag, target_pose, qpos, stage_label,
                                                 start_pose=None, retries=1, constraint_pose=None,
                                                 approach_axis=None, local_attempts=LOCAL_WAYPOINT_ATTEMPTS,
-                                                relax_orientation=False):
+                                                relax_orientation=False, seed_traj=None):
             """Plan one target; if direct planning fails, try the adaptive
             waypoint-shrink retry (see _plan_pose_with_shrinking_waypoint).
 
@@ -2189,9 +2189,11 @@ def make_occluder_task():
             last_reason = "unknown"
             plan_func = self._arm_plan_func(arm_tag)
             for _ in range(max(1, int(retries))):
+                # ROBOPRO Phase 3: the external seed (if any) warm-starts only the DIRECT attempt; the
+                # shrinking-waypoint fallback below stays unseeded (it's the safety net). None => stock.
                 result = plan_func(target_pose, last_qpos=qpos0,
                                    constraint_pose=constraint_pose, approach_axis=approach_axis,
-                                   relax_orientation=relax_orientation)
+                                   relax_orientation=relax_orientation, seed_traj=seed_traj)
                 if result.get("status") == "Success":
                     return True, None, self._roll_qpos_forward(arm_tag, qpos0, result), [(stage_label, result)]
                 last_reason = result.get("fail_reason", "unknown")
@@ -2275,6 +2277,106 @@ def make_occluder_task():
                                         "clearance_z": clearance_z,
                                     }
 
+        def _approach_mode(self):
+            """Grasp-approach experiment mode (ROBOPRO Phase 3): 'off' | 'direct' | 'seed'.
+              off    = stock around-box waypoint (default; scene-specific heuristic).
+              direct = waypoints OFF, plan pre_grasp straight from rest, NO seed (generalization baseline).
+              seed   = waypoints OFF, direct pre_grasp WITH the clearance-route seed (the method).
+            Set via env APPROACH_MODE; legacy SEED_FROM_CLEARANCE=1 is honored as 'seed'."""
+            m = os.environ.get("APPROACH_MODE", "").strip().lower()
+            if m in ("off", "direct", "seed"):
+                return m
+            if os.environ.get("SEED_FROM_CLEARANCE", "") == "1":
+                return "seed"
+            return "off"
+
+        def _get_approach_seed(self, arm_tag):
+            """ROBOPRO Phase 3: the clearance-metric route as a curobo trajopt seed for the grasp approach,
+            computed ONCE per (scene, arm) and cached. Returns a CPU seed tensor (1,1,H,dof) or None
+            (=> the direct plan runs unseeded). Only builds in 'seed' mode.
+
+            The route depends on scene+arm+grasp orientation, not on the candidate's gap/z_lift/... so one
+            seed is reused across candidates; 2b welds each plan's exact start config on. Any failure
+            (wrong mode, no route, exception) returns None and the direct plan proceeds without a seed."""
+            if self._approach_mode() != "seed":
+                return None
+            if not hasattr(self, "_approach_seed_cache"):
+                self._approach_seed_cache = {}
+            tag = str(arm_tag)
+            # cache key = (arm, SCENE signature). The scene signature (target + occluder world poses)
+            # makes the cache per-SCENE -- without it the env-level cache reused the FIRST scene's seed for
+            # every later episode (stale-seed correctness bug; also why only one visual set was ever saved).
+            import numpy as _np
+            try:
+                _sig = [tuple(_np.round(_np.asarray(self.target_obj.get_pose().p, float), 3))]
+                for _o in (getattr(self, "occluders", None) or []):
+                    _sig.append(tuple(_np.round(_np.asarray(_o.get_pose().p, float), 3)))
+                scene_sig = tuple(_sig)
+            except Exception:
+                scene_sig = None
+            key = (tag, scene_sig)
+            if key in self._approach_seed_cache:
+                return self._approach_seed_cache[key]
+
+            seed = None
+            try:
+                import numpy as _np
+                import seed_from_clearance as sfc
+                import clearance_metric_3d as cm
+                planner = self.robot.left_planner if tag == "left" else self.robot.right_planner
+                grasp_q, grasp_pose = cm.grasp_orientation(self, tag, topdown=False)
+                if grasp_pose is None:
+                    print(f"[seed] arm={tag}: no grasp pose -> no seed")
+                    self._approach_seed_cache[key] = None
+                    return None
+                ee = self.robot.get_left_ee_pose() if tag == "left" else self.robot.get_right_ee_pose()
+                start_xyz = _np.asarray(ee[:3], dtype=float)
+                goal_xyz = _np.asarray(grasp_pose[:3], dtype=float)
+                # real current arm config in curobo active-joint order (the exact tstep-0 weld)
+                full_q = (self.robot.left_entity.get_qpos() if tag == "left"
+                          else self.robot.right_entity.get_qpos())
+                idx = [planner.all_joints.index(n) for n in planner.active_joints_name]
+                start_q = _np.asarray([full_q[i] for i in idx], dtype=float)
+                ik = cm._build_ik_solver(planner)
+                H = int(planner.motion_gen.trajopt_solver.action_horizon)
+                seed, res = sfc.build_seed(self, planner, tag, ik, grasp_q, start_q, None,
+                                           start_xyz, goal_xyz, action_horizon=H)
+                if seed is None:
+                    print(f"[seed] arm={tag}: build_seed produced NO route ({res.reason}) -> stock fallback "
+                          f"({res.seconds:.1f}s)")
+                else:
+                    print(f"[seed] arm={tag}: route {len(res.route_qs)} voxels, eps={res.eps_gated:.3f}m -> "
+                          f"seed {tuple(seed.shape)} ({res.seconds:.1f}s)")
+                    # save the metric's route visuals for THIS rollout INSIDE the rollout's own output
+                    # folder (self._rollout_out_dir, set per episode in run()), in a dedicated
+                    # seed_route_visuals/episode<N>_<arm>/ subfolder so it doesn't mix with the rollout's
+                    # other files. Falls back to a standalone dir if no rollout out_dir is set. Own try --
+                    # a viz failure must NOT null the seed.
+                    try:
+                        if os.environ.get("SEED_VISUALS", "1") != "0":
+                            from datetime import datetime as _now
+                            from pathlib import Path as _P
+                            ep = getattr(self, "_rollout_ep", None)
+                            out_root = getattr(self, "_rollout_out_dir", None)
+                            if out_root is not None:
+                                epname = (f"episode{ep}_{tag}" if ep is not None
+                                          else f"{_now.now().strftime('%H%M%S')}_{tag}")
+                                sub = _P(out_root) / "seed_route_visuals" / epname
+                            else:
+                                base = os.environ.get("SEED_VISUALS_DIR") or str(
+                                    _P(cm.RESULTS_DIR).parent / "seed_visuals")
+                                sub = _P(base) / f"{_now.now().strftime('%Y%m%d-%H%M%S')}_{tag}"
+                            sfc.save_route_visuals(
+                                res, sub, seed_label=(str(ep) if ep is not None
+                                                      else _now.now().strftime('%H%M%S')), arm=tag)
+                    except Exception as _ve:
+                        print(f"[seed-viz] skipped ({_ve})")
+            except Exception as e:  # never let seeding break the expert
+                print(f"[seed] arm={tag}: build_seed FAILED ({e}); stock fallback (no seed)")
+                seed = None
+            self._approach_seed_cache[key] = seed
+            return seed
+
         def _plan_grasp_side(self, arm_tag, candidate, cache):
             """Waypoint -> pre_grasp -> grasp -> lift, cached per (cp_id, gap, z_lift,
             orient, y_offset) -- this doesn't depend on clearance_z, but
@@ -2303,51 +2405,90 @@ def make_occluder_task():
             if key in cache:
                 return cache[key]
 
+            cp_id = candidate["contact_point_id"]
             start_qpos = self.robot.left_entity.get_qpos() if str(arm_tag) == "left" else self.robot.right_entity.get_qpos()
-            qpos = np.array(start_qpos, dtype=np.float64, copy=True)
             trajectories = {}
-            if candidate["grasp_waypoint"] is not None:
-                ok, fail_reason, qpos, waypoint_trajectory = self._plan_pose_with_local_waypoint_retry(
-                    arm_tag, candidate["grasp_waypoint"], qpos, "waypoint")
-                if not ok:
-                    result = (False, "waypoint", fail_reason, None, None, None)
+
+            # ROBOPRO Phase 3: grasp-approach MODE (env APPROACH_MODE; SEED_FROM_CLEARANCE=1 => "seed"):
+            #   off    -> stock around-box waypoint (default; the scene-specific one-occluder heuristic).
+            #   direct -> NO waypoint: plan pre_grasp straight from rest, NO seed  (generalization baseline).
+            #   seed   -> NO waypoint: plan pre_grasp straight from rest, WITH the clearance-route seed.
+            # direct vs seed differ ONLY by the seed (so any success delta is attributable to the seed), and
+            # NEITHER falls back to the around-box waypoint -- a miss fails the candidate, so the baseline/
+            # method numbers are not contaminated by the heuristic. Bypassing the waypoint captures no
+            # "waypoint" trajectory, so play_once's None-guarded replay simply skips it.
+            mode = self._approach_mode()
+            pre_grasp_pose = grasp_pose = grasp_side_start_qpos = None
+            qpos = np.array(start_qpos, dtype=np.float64, copy=True)
+            if mode != "off":
+                seed = self._get_approach_seed(arm_tag) if mode == "seed" else None
+                # same grasp-pose selection real execution uses (rotation search + batch-plan check),
+                # both determined from the REST qpos, unchained -- mirroring the stock path below.
+                pre_grasp_pose = self.get_grasp_pose(self.target_obj, arm_tag, contact_point_id=cp_id,
+                                                     pre_dis=0.1, last_qpos=start_qpos)
+                if pre_grasp_pose is None:
+                    result = (False, "pre_grasp", "no_reachable_rotation", None, None, None)
                     cache[key] = result
                     return result
-                trajectories["waypoint"] = waypoint_trajectory
-            grasp_side_start_qpos = qpos  # pre_grasp/grasp poses are both determined from here (unchained)
+                grasp_pose = self.get_grasp_pose(self.target_obj, arm_tag, contact_point_id=cp_id,
+                                                 pre_dis=0.0, last_qpos=start_qpos)
+                if grasp_pose is None:
+                    result = (False, "grasp", "no_reachable_rotation", None, None, None)
+                    cache[key] = result
+                    return result
+                grasp_side_start_qpos = start_qpos
+                ok, fail_reason, qpos, pre_grasp_trajectory = self._plan_pose_with_local_waypoint_retry(
+                    arm_tag, pre_grasp_pose, qpos, "pre_grasp", start_pose=None, seed_traj=seed)
+                if not ok:
+                    result = (False, "pre_grasp", fail_reason, None, None, None)
+                    cache[key] = result
+                    return result
+                trajectories["pre_grasp"] = pre_grasp_trajectory
+            else:
+                # ---- stock waypoint-based approach (default; unchanged) ----
+                qpos = np.array(start_qpos, dtype=np.float64, copy=True)
+                if candidate["grasp_waypoint"] is not None:
+                    ok, fail_reason, qpos, waypoint_trajectory = self._plan_pose_with_local_waypoint_retry(
+                        arm_tag, candidate["grasp_waypoint"], qpos, "waypoint")
+                    if not ok:
+                        result = (False, "waypoint", fail_reason, None, None, None)
+                        cache[key] = result
+                        return result
+                    trajectories["waypoint"] = waypoint_trajectory
+                grasp_side_start_qpos = qpos  # pre_grasp/grasp poses are both determined from here (unchained)
 
-            # Validate the SAME grasp-pose selection real execution uses
-            # (get_grasp_pose -> choose_best_pose's rotation search + batch-plan
-            # check, now that choose_best_pose's shortest-plan logic is fixed)
-            # instead of the geometric approximation -- a candidate that "passes"
-            # here can no longer diverge from what grasp_actor_from_table() actually
-            # executes. choose_grasp_pose's own check_pose tests pre_grasp/grasp
-            # independently from the SAME starting qpos (it doesn't chain through
-            # pre_grasp's landed state) -- mirrored here for consistency.
-            cp_id = candidate["contact_point_id"]
-            pre_grasp_pose = self.get_grasp_pose(self.target_obj, arm_tag, contact_point_id=cp_id,
-                                                 pre_dis=0.1, last_qpos=grasp_side_start_qpos)
-            if pre_grasp_pose is None:
-                result = (False, "pre_grasp", "no_reachable_rotation", None, None, None)
-                cache[key] = result
-                return result
-            grasp_pose = self.get_grasp_pose(self.target_obj, arm_tag, contact_point_id=cp_id,
-                                             pre_dis=0.0, last_qpos=grasp_side_start_qpos)
-            if grasp_pose is None:
-                result = (False, "grasp", "no_reachable_rotation", None, None, None)
-                cache[key] = result
-                return result
+                # Validate the SAME grasp-pose selection real execution uses
+                # (get_grasp_pose -> choose_best_pose's rotation search + batch-plan
+                # check, now that choose_best_pose's shortest-plan logic is fixed)
+                # instead of the geometric approximation -- a candidate that "passes"
+                # here can no longer diverge from what grasp_actor_from_table() actually
+                # executes. choose_grasp_pose's own check_pose tests pre_grasp/grasp
+                # independently from the SAME starting qpos (it doesn't chain through
+                # pre_grasp's landed state) -- mirrored here for consistency.
+                pre_grasp_pose = self.get_grasp_pose(self.target_obj, arm_tag, contact_point_id=cp_id,
+                                                     pre_dis=0.1, last_qpos=grasp_side_start_qpos)
+                if pre_grasp_pose is None:
+                    result = (False, "pre_grasp", "no_reachable_rotation", None, None, None)
+                    cache[key] = result
+                    return result
+                grasp_pose = self.get_grasp_pose(self.target_obj, arm_tag, contact_point_id=cp_id,
+                                                 pre_dis=0.0, last_qpos=grasp_side_start_qpos)
+                if grasp_pose is None:
+                    result = (False, "grasp", "no_reachable_rotation", None, None, None)
+                    cache[key] = result
+                    return result
 
-            # Now plan+capture the ACTUAL trajectories to replay, CHAINED (pre_grasp
-            # then grasp from wherever pre_grasp lands), matching physical execution.
-            ok, fail_reason, qpos, pre_grasp_trajectory = self._plan_pose_with_local_waypoint_retry(
-                arm_tag, pre_grasp_pose, qpos, "pre_grasp", start_pose=candidate.get("grasp_waypoint"))
-            if not ok:
-                result = (False, "pre_grasp", fail_reason, None, None, None)
-                cache[key] = result
-                return result
-            trajectories["pre_grasp"] = pre_grasp_trajectory
+                # Now plan+capture the ACTUAL trajectories to replay, CHAINED (pre_grasp
+                # then grasp from wherever pre_grasp lands), matching physical execution.
+                ok, fail_reason, qpos, pre_grasp_trajectory = self._plan_pose_with_local_waypoint_retry(
+                    arm_tag, pre_grasp_pose, qpos, "pre_grasp", start_pose=candidate.get("grasp_waypoint"))
+                if not ok:
+                    result = (False, "pre_grasp", fail_reason, None, None, None)
+                    cache[key] = result
+                    return result
+                trajectories["pre_grasp"] = pre_grasp_trajectory
 
+            # ---- common tail: grasp + lift, from wherever pre_grasp landed (seeded or stock) ----
             ok, fail_reason, qpos, grasp_trajectory = self._plan_pose_with_local_waypoint_retry(
                 arm_tag, grasp_pose, qpos, "grasp", start_pose=pre_grasp_pose)
             if not ok:
@@ -2652,6 +2793,10 @@ def run(args):
                         f"num_occluders={args.num_occluders if show else 0}  "
                         f"bucket_measured={res['bucket']}\n\n")
                     rollout_log.flush()
+                    # expose this episode's output folder + number to the seed-route visuals
+                    # (_get_approach_seed writes into out_dir/seed_route_visuals/episode<N>_<arm>/)
+                    env._rollout_out_dir = out_dir
+                    env._rollout_ep = ep_counter
                     with contextlib.redirect_stdout(_Tee(sys.stdout, rollout_log)), \
                          contextlib.redirect_stderr(_Tee(sys.stderr, rollout_log)):
                         rollout_result = run_rollout(env, "put_mouse_on_pad", args.base_config, seed,

@@ -205,6 +205,7 @@ try:
             approach_offset=0.05,
             tstep_fraction=0.8,
             near_contact=False,
+            seed_traj=None,
         ):
             world_base_pose = np.concatenate([
                 np.array(self.robot_origion_pose.p),
@@ -298,6 +299,11 @@ try:
                     reach_vec_weight=motion_gen.tensor_args.to_device(
                         [0.0, 0.0, 0.0, 1.0, 1.0, 1.0]),
                 )
+
+            # ROBOPRO (Phase 1b): forward an optional external trajopt seed (e.g. a clearance-metric
+            # route, in active_joints_name order). None => stock behavior. motion_gen normalizes
+            # device/dtype/shape and fills the remaining seed slots with its own linear seeds.
+            plan_config.seed_traj = seed_traj
 
             result = motion_gen.plan_single(start_joint_states, goal_pose_of_ee, plan_config)
 

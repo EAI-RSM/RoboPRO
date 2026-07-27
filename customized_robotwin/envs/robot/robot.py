@@ -481,9 +481,15 @@ class Robot:
         approach_offset=0.05,
         tstep_fraction=0.8,
         near_contact=False,
+        seed_traj=None,
     ):
         if constraint_pose is not None:
             constraint_pose = self.get_constraint_pose(constraint_pose, arm_tag="left")
+        # ROBOPRO (Phase 3): an external trajopt seed must cross the plan_path multiprocessing pipe
+        # (communication_flag) as a CPU tensor -- CUDA tensors aren't picklable. motion_gen re-moves
+        # it to CUDA. None => stock behavior.
+        if seed_traj is not None and hasattr(seed_traj, "detach"):
+            seed_traj = seed_traj.detach().cpu()
         if last_qpos is None:
             now_qpos = self.left_entity.get_qpos()
         else:
@@ -503,6 +509,7 @@ class Robot:
                 "approach_offset": approach_offset,
                 "tstep_fraction": tstep_fraction,
                 "near_contact": near_contact,
+                "seed_traj": seed_traj,
             })
             return self.left_conn.recv()
         else:
@@ -516,6 +523,7 @@ class Robot:
                 approach_offset=approach_offset,
                 tstep_fraction=tstep_fraction,
                 near_contact=near_contact,
+                seed_traj=seed_traj,
             )
 
     def right_plan_path(
@@ -530,9 +538,12 @@ class Robot:
         approach_offset=0.05,
         tstep_fraction=0.8,
         near_contact=False,
+        seed_traj=None,
     ):
         if constraint_pose is not None:
             constraint_pose = self.get_constraint_pose(constraint_pose, arm_tag="right")
+        if seed_traj is not None and hasattr(seed_traj, "detach"):
+            seed_traj = seed_traj.detach().cpu()   # CPU for the pipe; motion_gen re-moves to CUDA
         if last_qpos is None:
             now_qpos = self.right_entity.get_qpos()
         else:
@@ -551,6 +562,7 @@ class Robot:
                 "approach_offset": approach_offset,
                 "tstep_fraction": tstep_fraction,
                 "near_contact": near_contact,
+                "seed_traj": seed_traj,
             })
             return self.right_conn.recv()
         else:
@@ -564,6 +576,7 @@ class Robot:
                 approach_offset=approach_offset,
                 tstep_fraction=tstep_fraction,
                 near_contact=near_contact,
+                seed_traj=seed_traj,
             )
 
     # The data of gripper has been normalized
@@ -802,6 +815,7 @@ def planner_process_worker(conn, args):
                     approach_offset=msg.get("approach_offset", 0.05),
                     tstep_fraction=msg.get("tstep_fraction", 0.8),
                     near_contact=msg.get("near_contact", False),
+                    seed_traj=msg.get("seed_traj", None),   # ROBOPRO Phase 3: external trajopt seed
                 )
                 conn.send(result)
 
