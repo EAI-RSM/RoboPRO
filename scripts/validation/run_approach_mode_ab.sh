@@ -28,9 +28,12 @@
 #
 # SCENES: the cells run on two scene types, the same NUM_SEEDS each, so the two are
 # weighted equally by construction:
-#   curated   the olive-oil occluder ring is always spawned (occluder offset OFFSET),
-#             clutter at CURATED_CLUTTER_DENSITY (default 0). This is the scene the
-#             clearance metric was built for.
+#   curated   olive-oil occluders always spawned, in a RANDOMIZED formation: the whole
+#             formation is rotated by a random theta in [0, 2pi), the count is drawn per
+#             scene from OCCLUDER_COUNTS (default 2,3,4,5), and each occluder draws its
+#             own radius from OFFSET (default the range 0.1-0.25) -- so scenes vary in
+#             density, spacing and which side the gap is on, instead of always presenting
+#             one bottle straight in front. Clutter at CURATED_CLUTTER_DENSITY (default 0).
 #   standard  no occluder; STANDARD_CLUTTER_DENSITY random objects at random positions
 #             and yaws from the office obstacle pool (default 8). Generalization test.
 #
@@ -45,7 +48,9 @@
 #   SEED_START                first seed                  (default 0)
 #   MODES                     which modes to run          (default "direct seed")
 #   SCENES                    which scenes to run         (default "curated standard")
-#   OFFSET                    occluder offset, curated    (default 0.2)
+#   OFFSET                    occluder radius/range        (default 0.1-0.25)
+#   OCCLUDER_COUNTS           counts a curated scene draws (default 2,3,4,5)
+#   RANDOM_RING_ROTATION      1/0, random formation theta  (default 1)
 #   CURATED_CLUTTER_DENSITY   clutter on curated          (default 0)
 #   STANDARD_CLUTTER_DENSITY  clutter on standard         (default 8)
 #   BASE_CONFIG               bench task config           (default bench_demo_office_clean)
@@ -68,7 +73,12 @@ NUM_SEEDS="${NUM_SEEDS:-50}"
 SEED_START="${SEED_START:-0}"
 MODES="${MODES:-direct seed}"
 SCENES="${SCENES:-curated standard}"
-OFFSET="${OFFSET:-0.2}"
+# Curated-scene occluder formation. The range and the count menu are what make the curated
+# cells a VARIETY of configurations rather than one repeated layout; set OFFSET=0.2,
+# OCCLUDER_COUNTS=1, RANDOM_RING_ROTATION=0 to get the old single-bottle-in-front scene.
+OFFSET="${OFFSET:-0.1-0.25}"
+OCCLUDER_COUNTS="${OCCLUDER_COUNTS:-2,3,4,5}"
+RANDOM_RING_ROTATION="${RANDOM_RING_ROTATION:-1}"
 # Both scenes draw from the SAME seed range, so each scene gets NUM_SEEDS attempts and
 # the two are equally weighted. Seed acceptance is scene-dependent (a scene is rejected
 # for instability / a blocked pad), so the number of accepted seeds can still differ
@@ -116,7 +126,8 @@ echo " Phase 4: APPROACH_MODE A/B  (does the clearance seed help?)"
 echo "   modes        : $MODES"
 echo "   scenes       : $SCENES"
 echo "   seeds        : $NUM_SEEDS per cell (from $SEED_START) -- equal across scenes"
-echo "   curated      : occluder ON, offset=$OFFSET, clutter=$CURATED_CLUTTER_DENSITY"
+echo "   curated      : occluders ON, n in {$OCCLUDER_COUNTS}, radii=$OFFSET,"
+echo "                  ring rotation=$([[ "$RANDOM_RING_ROTATION" == "1" ]] && echo random || echo fixed), clutter=$CURATED_CLUTTER_DENSITY"
 echo "   standard     : occluder OFF, clutter=$STANDARD_CLUTTER_DENSITY (random objects/positions)"
 echo "   base_config  : $BASE_CONFIG"
 echo "   frozen knobs : MAX_ATTEMPTS=$CUROBO_MAX_ATTEMPTS TRAJOPT_SEEDS=$CUROBO_TRAJOPT_SEEDS"
@@ -142,20 +153,28 @@ fi
 run_cell () {
   local scene="$1" mode="$2"
   local logf="$LOG_DIR/${scene}_${mode}.log"
-  local occ_prob clutter
+  local occ_prob clutter counts rot_flag
+  # The randomized formation only applies where occluders spawn. On the standard scene the
+  # count menu and radius range are inert (no occluder), so they are pinned to the plain
+  # values to keep that cell's log unambiguous about what it ran.
   case "$scene" in
-    curated)  occ_prob=0; clutter="$CURATED_CLUTTER_DENSITY" ;;   # occluder always spawned
-    standard) occ_prob=1; clutter="$STANDARD_CLUTTER_DENSITY" ;;  # occluder never spawned
+    curated)  occ_prob=0; clutter="$CURATED_CLUTTER_DENSITY"; counts="$OCCLUDER_COUNTS"
+              rot_flag=$([[ "$RANDOM_RING_ROTATION" == "1" ]] \
+                         && echo "--random-ring-rotation" || echo "--no-random-ring-rotation") ;;
+    standard) occ_prob=1; clutter="$STANDARD_CLUTTER_DENSITY"; counts=1
+              rot_flag="--no-random-ring-rotation" ;;
     *) echo "!!! unknown scene '$scene' -- skipping"; return ;;
   esac
   echo ""
-  echo ">>> [$(date +%T)] START  scene=$scene APPROACH_MODE=$mode (clutter=$clutter)"
+  echo ">>> [$(date +%T)] START  scene=$scene APPROACH_MODE=$mode (clutter=$clutter"
+  [[ "$scene" == "curated" ]] && echo "        occluders=$counts  radii=$OFFSET  $rot_flag"
   # -u: stdout is redirected to a file, so without it Python block-buffers and the cell
   # log stays EMPTY for hours on a 50-seed run. Unbuffered keeps `tail -f` live.
   if APPROACH_MODE="$mode" "$PYTHON" -u script/bench_script/analyze_occluder_visibility.py \
         --base-config "$BASE_CONFIG" --seed-start "$SEED_START" --num-seeds "$NUM_SEEDS" \
         --rollout --out-dir "$OUT_ROOT/$scene" --run-type "$mode" \
         --offsets "$OFFSET" --clutter-densities "$clutter" --no-occluder-prob "$occ_prob" \
+        --num-occluders "$counts" "$rot_flag" \
         >"$logf" 2>&1; then
     echo "<<< [$(date +%T)] DONE   $scene/$mode   (log: $logf)"
   else

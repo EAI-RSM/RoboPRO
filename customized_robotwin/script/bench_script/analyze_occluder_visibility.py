@@ -149,27 +149,94 @@ OCCLUDER_QPOS = [0.66, 0.66, -0.25, -0.25]   # same upright orientation the stoc
 
 
 def occluder_ring_xy(cx, cy, radius, n, angle0=0.0, xlim=None, ylim=None):
-    """(x, y) centres of `n` occluders equally spaced on a circle of `radius` around the
-    target at (cx, cy) -- the ring cuts the circle into n equal 2*pi/n slices. Angle is
-    measured from the FRONT (-y, the robot/camera side) and rotates toward +x, so:
+    """(x, y) centres of `n` occluders equally spaced IN ANGLE around the target at (cx, cy)
+    -- the formation cuts the circle into n equal 2*pi/n slices. Angle is measured from the
+    FRONT (-y, the robot/camera side) and rotates toward +x, so:
       * n=1, angle0=0 -> one occluder directly in front (the original single-box layout),
       * the +x quarter-turn position reproduces the old side_occluder_sign=+1 box.
+
+    `radius` is either a scalar (a true circle, the original behaviour) or a per-occluder
+    sequence of length >= n, in which case occluder k sits at its OWN radius -- the angles
+    stay evenly spaced but the formation is no longer a circle. That is what lets a scene
+    mix near and far occluders instead of presenting one uniform wall.
+
     If xlim/ylim (each a (lo, hi) pair) are given, any position whose CENTRE falls outside
     them is DROPPED -- the formation keeps the same equal spacing, just with fewer bottles
-    where the ring would leave the table, instead of failing the whole scene.
+    where it would leave the table, instead of failing the whole scene.
     Returns [] for n<=0. Deterministic; the caller adds any per-actor yaw jitter."""
     pts = []
     n = int(n)
+    scalar = np.isscalar(radius)
     for k in range(max(0, n)):
+        r = float(radius) if scalar else float(radius[k])
         theta = angle0 + 2.0 * np.pi * k / n
-        x = cx + radius * np.sin(theta)
-        y = cy - radius * np.cos(theta)
+        x = cx + r * np.sin(theta)
+        y = cy - r * np.cos(theta)
         if xlim is not None and not (xlim[0] <= x <= xlim[1]):
             continue
         if ylim is not None and not (ylim[0] <= y <= ylim[1]):
             continue
         pts.append((x, y))
     return pts
+
+
+def parse_offset_specs(text):
+    """Parse --offsets into a list of specs. Each comma-separated token is either
+
+      "0.2"        a FIXED ring radius (every occluder at 0.2) -- the original behaviour, or
+      "0.1-0.25"   a RANGE: every occluder independently draws its own radius from
+                   U[0.1, 0.25], so one scene can hold both near and far occluders.
+
+    Returns [(lo, hi, nominal), ...]; lo == hi for a fixed token. `nominal` is the value used
+    to LABEL and group the spec (the midpoint of a range), so --group-by offset still buckets
+    a range into one group instead of scattering every scene into its own."""
+    specs = []
+    for tok in str(text).split(","):
+        tok = tok.strip()
+        if not tok:
+            continue
+        if "-" in tok[1:]:                      # [1:] so a leading minus is not a separator
+            i = tok.index("-", 1)
+            lo, hi = float(tok[:i]), float(tok[i + 1:])
+            if hi < lo:
+                lo, hi = hi, lo
+            specs.append((lo, hi, 0.5 * (lo + hi)))
+        else:
+            v = float(tok)
+            specs.append((v, v, v))
+    if not specs:
+        raise SystemExit("--offsets parsed to nothing")
+    return specs
+
+
+def parse_count_choices(text):
+    """Parse --num-occluders into the list of counts a scene may draw from.
+    "1" -> always 1 (original behaviour); "2,3,4,5" -> one of those, drawn per scene."""
+    vals = [int(t.strip()) for t in str(text).split(",") if t.strip()]
+    if not vals or any(v < 0 for v in vals):
+        raise SystemExit(f"--num-occluders must be one or more non-negative ints, got {text!r}")
+    return vals
+
+
+def draw_ring_config(seed, spec, count_choices, random_rotation):
+    """The occluder formation for one (seed, offset-spec), drawn DETERMINISTICALLY.
+
+    Determinism is the whole point: the formation is decided once and must come out identical
+    in the pad-distance pre-check, the Pass-1 measurement build and the Pass-2 rollout build,
+    or the scene that gets measured is not the scene that gets rolled out. Everything is drawn
+    from one RNG keyed on (seed, spec nominal), matching how the existing occluder coin flip
+    is keyed.
+
+    Returns (angle0, n, radii): ring rotation in radians (0 unless random_rotation), the
+    occluder count drawn from count_choices, and the per-occluder radii list."""
+    lo, hi, nominal = spec
+    rng = np.random.default_rng(int(seed) * 1000 + int(round(nominal * 100)) + 7919)
+    n = int(count_choices[rng.integers(len(count_choices))]) if len(count_choices) > 1 \
+        else int(count_choices[0])
+    angle0 = float(rng.uniform(0.0, 2.0 * np.pi)) if random_rotation else 0.0
+    radii = [float(rng.uniform(lo, hi)) for _ in range(max(0, n))] if hi > lo \
+        else [float(lo)] * max(0, n)
+    return angle0, n, radii
 
 # Two-step (around-the-box) planning: curobo won't reliably route around a tall obstacle
 # between start and goal, so before the grasp (and before the place) we send the gripper
@@ -534,6 +601,7 @@ def make_occluder_task():
         occluder_offset = 0.2         # ring radius in metres (target at centre)
         num_occluders = 1
         occluder_angle0 = 0.0         # radians; angle of occluder k=0, measured from -y (front)
+        occluder_radii = None         # per-occluder radii (list); None -> occluder_offset for all
         target_model = TARGET_MODEL
         target_id = TARGET_ID
         target_xlim = TARGET_XLIM
@@ -572,10 +640,15 @@ def make_occluder_task():
             self.occluder = None
             if self.spawn_occluder and self.num_occluders > 0:
                 mp = self.target_obj.get_pose().p
+                # Per-occluder radii when the caller supplied them (--offsets given a range),
+                # else the single scalar radius. The scalar path keeps every external tool
+                # that only sets env.occluder_offset (reachability / gripper / swept volume)
+                # working unchanged.
+                radii = getattr(self, "occluder_radii", None) or self.occluder_offset
                 # Drop any ring position whose centre would leave the tabletop -- keep the
                 # formation with fewer bottles rather than spawning one off the table.
                 ring = occluder_ring_xy(float(mp[0]), float(mp[1]),
-                                        self.occluder_offset, self.num_occluders,
+                                        radii, self.num_occluders,
                                         self.occluder_angle0,
                                         xlim=TABLE_XLIM, ylim=TABLE_YLIM)
                 for ox, oy in ring:
@@ -2709,13 +2782,18 @@ def run(args):
     if args.save_images:
         img_dir.mkdir(parents=True, exist_ok=True)
     jsonl_path = out_dir / "records.jsonl"
-    offsets = [float(o) for o in args.offsets.split(",")]
+    offset_specs = parse_offset_specs(args.offsets)
+    count_choices = parse_count_choices(args.num_occluders)
     clutter_densities = [int(d) for d in args.clutter_densities.split(",")]
     rollout = getattr(args, "rollout", False)
     ep_counter = 0   # unique episode id per rollout (-> video/episode{N}.mp4)
 
     env = make_occluder_task()()
-    print(f"seeds from {args.seed_start}, want {args.num_seeds} STABLE  offsets={offsets}  "
+    spec_desc = ", ".join(f"{lo:.2f}" if lo == hi else f"{lo:.2f}-{hi:.2f}"
+                          for lo, hi, _ in offset_specs)
+    print(f"seeds from {args.seed_start}, want {args.num_seeds} STABLE  offsets=[{spec_desc}]  "
+          f"n_occluders={count_choices}  ring_rotation="
+          f"{'random' if args.random_ring_rotation else 'fixed(front)'}  "
           f"clutter_densities={clutter_densities}  rollout={rollout}  camera={CAMERA}")
     print(f"writing -> {jsonl_path}\n")
 
@@ -2767,31 +2845,39 @@ def run(args):
             # ---- Pass 1: build + measure every (offset, density); gate stability ----
             seed_items = []       # buffered per-build results, committed only if the seed passes
             seed_ok = True
-            for off in offsets:
+            for spec in offset_specs:
                 if not seed_ok:
                     break
+                off = spec[2]                  # nominal label for this spec (midpoint of a range)
                 # per-build coin flip: drop the occluder with prob no_occluder_prob
                 # (keyed on seed+offset so the decision is shared across densities)
                 show = bool(np.random.default_rng(int(seed) * 1000 + int(round(off * 100))).random()
                             >= args.no_occluder_prob)
+                # The formation (rotation, count, per-occluder radii) is drawn ONCE here and
+                # then re-asserted verbatim on the env for both the measurement build and the
+                # rollout build -- re-deriving it anywhere would risk measuring one scene and
+                # rolling out another.
+                angle0, n_occ, radii = draw_ring_config(seed, spec, count_choices,
+                                                        args.random_ring_rotation)
                 # Reject scenes where ANY occluder that WILL spawn (off-table ring positions
                 # are dropped by the same xlim/ylim filter load_actors uses) lands too close
                 # to / on the destination pad. Rejects the WHOLE seed (redraw) so the
                 # trajectory count is still met.
                 if show:
-                    ring_xys = occluder_ring_xy(clean_pose[0], clean_pose[1], off,
-                                                args.num_occluders,
-                                                xlim=TABLE_XLIM, ylim=TABLE_YLIM)
+                    ring_xys = occluder_ring_xy(clean_pose[0], clean_pose[1], radii, n_occ,
+                                                angle0, xlim=TABLE_XLIM, ylim=TABLE_YLIM)
                     pad_dist = min((float(np.linalg.norm(np.array(xy) - np.array(PAD_XY)))
                                     for xy in ring_xys), default=float("inf"))
                     if pad_dist < OCC_PAD_MIN_DIST:
-                        print(f"[seed {seed}] a ring occluder@off={off} is {pad_dist:.3f}m from "
+                        print(f"[seed {seed}] a ring occluder@off={off:.2f} is {pad_dist:.3f}m from "
                               f"pad (< {OCC_PAD_MIN_DIST:.3f}m); rejecting seed, drawing another.")
                         seed_ok = False
                         break
                 env.spawn_occluder = show
                 env.occluder_offset = off
-                env.num_occluders = args.num_occluders
+                env.num_occluders = n_occ
+                env.occluder_angle0 = angle0
+                env.occluder_radii = list(radii)
                 for cd in clutter_densities:
                     try:
                         env.setup_demo(**build_cfg("put_mouse_on_pad", args.base_config, seed,
@@ -2818,14 +2904,20 @@ def run(args):
                         break
                     safe_close()
 
+                    # "offset" stays the spec's NOMINAL value so --group-by offset buckets a
+                    # range into one group; occluder_radii/angle0 carry what was actually
+                    # spawned, which is the truth for anything reading the geometry back.
                     rec = {"seed": int(seed), "offset": float(off), "full_px": int(full_px),
                            "visible_px": int(res["visible_pixel_count"]),
                            "visible_fraction": float(res["visible_fraction"]),
                            "bucket": res["bucket"], "in_fov": bool(res["in_fov"]),
                            "pose_match": pose_ok, "occluder_shown": show,
-                           "num_occluders": int(args.num_occluders) if show else 0,
+                           "num_occluders": int(n_occ) if show else 0,
+                           "occluder_radii": ([round(r, 4) for r in radii] if show else []),
+                           "occluder_angle0": (round(float(angle0), 4) if show else None),
                            "clutter_density": int(cd)}
                     seed_items.append({"off": off, "cd": cd, "show": show,
+                                       "n_occ": n_occ, "angle0": angle0, "radii": list(radii),
                                        "rec": rec, "res": res})
 
             if not seed_ok or not seed_items:
@@ -2840,7 +2932,9 @@ def run(args):
                 if rollout:
                     env.spawn_occluder = show
                     env.occluder_offset = off
-                    env.num_occluders = args.num_occluders
+                    env.num_occluders = item["n_occ"]
+                    env.occluder_angle0 = item["angle0"]
+                    env.occluder_radii = list(item["radii"])
                     # One log file per rollout under <out-dir>/log/episode{N}.log: the
                     # usual stdout/stderr (play_once + run_rollout diagnostics) tee'd to
                     # both console and file, plus the expert's per-phase timing appended.
@@ -2853,7 +2947,9 @@ def run(args):
                     rollout_log.write(
                         f"# rollout episode{ep_counter}  seed={seed} offset={off:.3f} "
                         f"clutter_density={cd} occluder_shown={show} "
-                        f"num_occluders={args.num_occluders if show else 0}  "
+                        f"num_occluders={item['n_occ'] if show else 0} "
+                        f"radii={[round(r, 3) for r in item['radii']] if show else []} "
+                        f"angle0={item['angle0']:.3f}  "
                         f"bucket_measured={res['bucket']}\n\n")
                     rollout_log.flush()
                     # expose this episode's output folder + number to the seed-route visuals
@@ -2949,11 +3045,20 @@ def main():
     ap.add_argument("--seed-start", type=int, default=0)
     ap.add_argument("--num-seeds", type=int, default=50)
     ap.add_argument("--offsets", default="0.2",
-                    help="occluder ring radius/radii in m (target at centre); one figure group "
-                         "per value. e.g. 0.15,0.20,0.25")
-    ap.add_argument("--num-occluders", type=int, default=1,
-                    help="number of occluders equally spaced (2*pi/n apart) around the ring "
-                         "(default 1 = single box directly in front of the target)")
+                    help="occluder radius/radii in m (target at centre); one figure group per "
+                         "token. A token is either a FIXED value (0.20 -- every occluder at that "
+                         "radius, the original behaviour) or a RANGE (0.10-0.25 -- each occluder "
+                         "independently draws its own radius from that interval, so one scene can "
+                         "mix near and far occluders). e.g. 0.15,0.20,0.25 or 0.10-0.25")
+    ap.add_argument("--num-occluders", default="1",
+                    help="how many occluders to spawn, equally spaced in angle. A single value "
+                         "(1 = the original single box in front) or a comma-separated menu "
+                         "(2,3,4,5) from which each scene draws one, for a variety of "
+                         "configurations.")
+    ap.add_argument("--random-ring-rotation", action=argparse.BooleanOptionalAction, default=False,
+                    help="rotate the whole formation by a random theta in [0, 2pi) per scene, so "
+                         "the occluders are not always anchored with one directly in front of the "
+                         "target. Off by default (theta=0), which keeps the historical layout.")
     ap.add_argument("--clutter-densities", default="0",
                     help="table clutter density/densities to sweep in the measurement scene, "
                          "comma-separated (0=off). e.g. 0,8,15")
