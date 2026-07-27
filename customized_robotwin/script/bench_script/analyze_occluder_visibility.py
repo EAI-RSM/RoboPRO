@@ -794,7 +794,14 @@ def make_occluder_task():
                     break
                 tried_cp_ids.add(cp_id)
 
-                if candidate_plan["grasp_waypoint"] is not None:
+                # Belt-and-braces: _candidate_specs already emits grasp_waypoint=None outside
+                # 'off' mode. If one ever leaks through again, the `else` below would live-plan
+                # and EXECUTE the around-box heuristic, silently putting it back into the
+                # waypoint-free modes and invalidating the A/B. Skip it loudly instead.
+                if candidate_plan["grasp_waypoint"] is not None and self._approach_mode() != "off":
+                    print("\033[93m[waypoint] BUG: a grasp_waypoint survived in "
+                          f"APPROACH_MODE={self._approach_mode()}; skipping it\033[0m")
+                elif candidate_plan["grasp_waypoint"] is not None:
                     wp_trajectory = candidate_plan.get("grasp_waypoint_trajectory")
                     if wp_trajectory is not None:
                         self._replay_planned_sequence(arm_tag, wp_trajectory)
@@ -2349,8 +2356,23 @@ def make_occluder_task():
                 lift_pose = list(grasp_pose)
                 lift_pose[2] += GRASP_LIFT_HEIGHT
                 occluder_present = self.spawn_occluder and getattr(self, "occluder", None) is not None
+                # ROBOPRO Phase 3 fix: in 'direct'/'seed' the around-box waypoint must not exist
+                # AT ALL, not merely go unplanned. play_once branches on the waypoint POSE and
+                # live-re-plans it whenever the pose is present but its trajectory is None
+                # (see its `else: self._plan_and_replay_pose(...)`), so leaving the pose set made
+                # those modes still execute the heuristic waypoint, and then snap back to rest
+                # when the from-rest pre_grasp trajectory was replayed from a different qpos.
+                # Emitting None here kills it on every return path -- verified candidates AND the
+                # deepest-progress fallback, which never reaches _plan_candidate's tail.
+                waypoints_off = self._approach_mode() != "off"
                 gaps = SIDE_WAYPOINT_GAPS if occluder_present else (SIDE_WAYPOINT_GAPS[1],)
-                z_lifts = SIDE_WAYPOINT_Z_LIFTS if occluder_present else (0.0,)
+                # z_lift/orient/y_offset only ever shape the waypoint, so with no waypoint they
+                # would expand the candidate list into exact duplicates -- each with its own
+                # _plan_grasp_side cache key, so each re-running get_grasp_pose's 10-rotation
+                # batch-plan for nothing. `gap` is NOT collapsed: it also feeds _box_side_x and
+                # so the placement subgoals, which stay just as varied as before.
+                z_lifts = ((0.0,) if waypoints_off else
+                           (SIDE_WAYPOINT_Z_LIFTS if occluder_present else (0.0,)))
                 orients = WAYPOINT_ORIENTATIONS if occluder_present else ("grasp_aligned",)
                 y_offsets = WAYPOINT_Y_OFFSETS if occluder_present else (0.0,)
                 for gap in gaps:
@@ -2358,9 +2380,10 @@ def make_occluder_task():
                     for z_lift in z_lifts:
                         for orient in orients:
                             for y_offset in y_offsets:
-                                grasp_waypoint = self._around_box_waypoint(
-                                    arm_tag, grasp_pre_pose, gap=gap, z_lift=z_lift,
-                                    orient=orient, y_offset=y_offset)
+                                grasp_waypoint = None if waypoints_off else \
+                                    self._around_box_waypoint(
+                                        arm_tag, grasp_pre_pose, gap=gap, z_lift=z_lift,
+                                        orient=orient, y_offset=y_offset)
                                 for clearance_z in PLACE_CLEARANCE_ZS:
                                     placement_subgoals = self._backward_subgoal_poses(
                                         arm_tag,
@@ -2557,8 +2580,12 @@ def make_occluder_task():
             #   seed   -> NO waypoint: plan pre_grasp straight from rest, WITH the clearance-route seed.
             # direct vs seed differ ONLY by the seed (so any success delta is attributable to the seed), and
             # NEITHER falls back to the around-box waypoint -- a miss fails the candidate, so the baseline/
-            # method numbers are not contaminated by the heuristic. Bypassing the waypoint captures no
-            # "waypoint" trajectory, so play_once's None-guarded replay simply skips it.
+            # method numbers are not contaminated by the heuristic. The waypoint is suppressed at the
+            # SOURCE (_candidate_specs emits grasp_waypoint=None outside 'off'). Skipping its PLAN here
+            # is not enough on its own: play_once branches on the waypoint POSE and live-re-plans it
+            # whenever the pose is present but its trajectory is None, which is how the heuristic kept
+            # executing in these modes -- followed by a snap back to rest when the from-rest pre_grasp
+            # trajectory was replayed from the waypoint's qpos.
             mode = self._approach_mode()
             pre_grasp_pose = grasp_pose = grasp_side_start_qpos = None
             qpos = np.array(start_qpos, dtype=np.float64, copy=True)

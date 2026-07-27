@@ -150,9 +150,20 @@ so the baseline is untouched and A/B is clean. Split into Chunk A (plumbing) + C
   `planner.plan_path(seed_traj=)`. Seed warm-starts the DIRECT attempt only; shrink-retry fallback
   stays unseeded. Syntax-checked. **DONE.**
 - [x] **3a (Chunk B).** `_plan_grasp_side`: when flag on + cached seed, a **seeded direct plan to
-  `pre_grasp`** (bypassing the around-box waypoint) runs first; on success the waypoint is skipped (no
-  "waypoint" trajectory captured → play_once's None-guarded replay skips it); on any miss `seeded_direct`
+  `pre_grasp`** (bypassing the around-box waypoint) runs first; on any miss `seeded_direct`
   stays False and the stock waypoint path runs. **DONE.**
+  > **CORRECTION (2026-07-27).** The original claim here — "no 'waypoint' trajectory captured →
+  > play_once's None-guarded replay skips it" — was **WRONG**, and it was a live bug. `play_once`
+  > branches on the waypoint **POSE**, and when the pose is present with a `None` trajectory it falls
+  > through to `_plan_and_replay_pose`, which live-plans *and executes* the around-box waypoint. So
+  > `direct`/`seed` still ran the heuristic, then **snapped back to rest** when the from-rest
+  > `pre_grasp` trajectory was replayed from the waypoint's qpos (`_replay_planned_move` plays joint
+  > positions back directly and never re-plans). Visible as: gripper moves forward, jumps back to
+  > start, then moves normally. **Fixed** by suppressing the waypoint at the source —
+  > `_candidate_specs` emits `grasp_waypoint=None` outside `off` — which also covers the
+  > deepest-progress *fallback* candidate, that never reaches `_plan_candidate`'s tail. `play_once`
+  > additionally warns and skips if a pose ever leaks through again. Any `direct`/`seed` rollouts
+  > from before this fix are NOT valid A/B data: their "waypoints off" cells had waypoints on.
 - [x] **3b (Chunk B).** Stock waypoint path + `_local_waypoint_retry` preserved verbatim under
   `if not seeded_direct` (byte-identical when flag off); replay/capture untouched; grasp+lift tail shared.
   **DONE.**
