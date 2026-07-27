@@ -318,6 +318,16 @@ try:
 
             # output
             res_result = dict()
+            # ROBOPRO (Phase 4): curobo's own effort counters for THIS plan, on both the
+            # success and failure branches. `attempts` = how many times _plan_attempts
+            # re-ran the whole solve (it falls back to the graph planner after
+            # graph_attempts and gives up at max_attempts); `trajopt_attempts` = trajopt
+            # retries within an attempt. This is the A/B's second headline metric: a good
+            # seed should reach success in FEWER attempts, which is visible even when the
+            # success rate itself doesn't move.
+            res_result["attempts"] = int(getattr(result, "attempts", 0) or 0)
+            res_result["trajopt_attempts"] = int(getattr(result, "trajopt_attempts", 0) or 0)
+            res_result["seeded"] = seed_traj is not None
             if result.success.item() == False:
                 res_result["status"] = "Fail"
                 res_result["fail_reason"] = str(result.status)

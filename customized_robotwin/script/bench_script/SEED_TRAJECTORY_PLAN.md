@@ -196,7 +196,29 @@ two variables: waypoint→direct AND no-seed→seed).
   `ROBOPRO_SEED_ROUNDTRIP` 0b self-check). Env-guarded/zero-impact meanwhile.
 
 ### Phase 4 — validate (research, user-driven)
-- [ ] **4.** A/B on the occluder seeds: seeded-vs-today success rate + trajopt-attempt count.
+- [x] **4-harness.** Measurement + driver + summary built (engineering half):
+  - **Instrumentation** (per-episode, into `records.jsonl`): `approach_mode`;
+    `rollout_seconds` (wall-clock, successes *and* failures); `rollout_plan_effort` —
+    curobo's `attempts`/`trajopt_attempts` per plan, recorded on the DIRECT attempt only so
+    the count stays comparable across modes (the shrink-retry fallback is excluded);
+    `rollout_seed_stats` — per-build seed outcome (`built`, `reason`, `seconds`,
+    `route_voxels`, `eps_gated`; cache hits tagged `reason="cached"` so build cost isn't
+    double-counted). `planner.plan_path` now returns `attempts`/`trajopt_attempts`/`seeded`
+    on both the success and failure branches.
+  - **Driver** `scripts/validation/run_approach_mode_ab.sh` — runs `off`/`direct`/`seed`
+    over the same seed set with frozen curobo knobs, one process + one log per cell, then
+    summarizes. Refuses to start if the vendored curobo lost the `seed_traj` patch (that
+    would make the `seed` cell silently measure `direct`).
+  - **Summary** `scripts/validation/summarize_approach_mode_ab.py` — per-cell Wilson CI,
+    usable-samples/hour, failure-stage breakdown, **seed firing rate**, paired McNemar for
+    `direct→seed` (the seed's effect) and `off→direct` (what the waypoint was worth), and a
+    3-panel figure. `--selftest` verifies loader/stats/figure on synthetic records.
+  - **Firing rate is the gate:** a miss falls back to an unseeded plan silently, so a null
+    `direct→seed` is unreadable unless the seed actually fired. The summary prints it first
+    and warns when it is 0 or under 50%.
+- [ ] **4-run.** Run the A/B and interpret it (user): `NUM_SEEDS=50 bash
+  scripts/validation/run_approach_mode_ab.sh`. Expect the `seed` cell to be the slowest —
+  it pays a clearance-metric build per (scene, arm); that cost is reported, not hidden.
 
 ---
 

@@ -629,6 +629,14 @@ def make_occluder_task():
             self.rollout_grasp_attempts = []
             self.rollout_retention_checks = []
             self.rollout_descent_slices = []
+            # ROBOPRO Phase 4 (APPROACH_MODE A/B): per-plan curobo effort and per-build
+            # seed outcomes for this episode. rollout_plan_effort answers "did the seed
+            # let curobo converge in fewer attempts"; rollout_seed_stats answers "how
+            # often did the seed actually fire" (seeding is opportunistic -- IK is
+            # nondeterministic, so build_seed sometimes returns no route for inputs that
+            # worked a moment earlier). Both reset per-episode; env is reused across seeds.
+            self.rollout_plan_effort = []
+            self.rollout_seed_stats = []
             # Per-phase wall-clock timing: each checkpoint(name) records how long the
             # expert spent since the previous checkpoint. Read by run() and written
             # into the per-rollout log file. Reset per-episode (env reused across seeds).
@@ -2172,6 +2180,27 @@ def make_occluder_task():
                           f"{float(np.linalg.norm(goal[:3] - current_pose[:3])):.3f}m")
             return False, last_reason, qpos0, trajectories
 
+        def _record_plan_effort(self, stage_label, arm_tag, result):
+            """ROBOPRO Phase 4: log curobo's effort for ONE plan_path call so the
+            APPROACH_MODE A/B can report attempts, not just success rate. Recorded for
+            the DIRECT attempt only (the stage the experiment varies); the
+            shrinking-waypoint fallback is deliberately not counted here so 'attempts'
+            stays comparable across modes. Read by run() into records.jsonl. Never raises
+            -- this is measurement, it must not be able to fail a rollout."""
+            try:
+                if not hasattr(self, "rollout_plan_effort"):
+                    self.rollout_plan_effort = []
+                self.rollout_plan_effort.append({
+                    "stage": stage_label,
+                    "arm": str(arm_tag),
+                    "status": result.get("status"),
+                    "attempts": int(result.get("attempts", 0) or 0),
+                    "trajopt_attempts": int(result.get("trajopt_attempts", 0) or 0),
+                    "seeded": bool(result.get("seeded", False)),
+                })
+            except Exception:
+                pass
+
         def _plan_pose_with_local_waypoint_retry(self, arm_tag, target_pose, qpos, stage_label,
                                                 start_pose=None, retries=1, constraint_pose=None,
                                                 approach_axis=None, local_attempts=LOCAL_WAYPOINT_ATTEMPTS,
@@ -2194,6 +2223,7 @@ def make_occluder_task():
                 result = plan_func(target_pose, last_qpos=qpos0,
                                    constraint_pose=constraint_pose, approach_axis=approach_axis,
                                    relax_orientation=relax_orientation, seed_traj=seed_traj)
+                self._record_plan_effort(stage_label, arm_tag, result)
                 if result.get("status") == "Success":
                     return True, None, self._roll_qpos_forward(arm_tag, qpos0, result), [(stage_label, result)]
                 last_reason = result.get("fail_reason", "unknown")
@@ -2316,6 +2346,8 @@ def make_occluder_task():
                 scene_sig = None
             key = (tag, scene_sig)
             if key in self._approach_seed_cache:
+                self._note_seed_stat(tag, self._approach_seed_cache[key] is not None,
+                                     "cached", 0.0, None, None)
                 return self._approach_seed_cache[key]
 
             seed = None
@@ -2327,6 +2359,7 @@ def make_occluder_task():
                 grasp_q, grasp_pose = cm.grasp_orientation(self, tag, topdown=False)
                 if grasp_pose is None:
                     print(f"[seed] arm={tag}: no grasp pose -> no seed")
+                    self._note_seed_stat(tag, False, "no_grasp_pose", 0.0, None, None)
                     self._approach_seed_cache[key] = None
                     return None
                 ee = self.robot.get_left_ee_pose() if tag == "left" else self.robot.get_right_ee_pose()
@@ -2344,9 +2377,12 @@ def make_occluder_task():
                 if seed is None:
                     print(f"[seed] arm={tag}: build_seed produced NO route ({res.reason}) -> stock fallback "
                           f"({res.seconds:.1f}s)")
+                    self._note_seed_stat(tag, False, res.reason, res.seconds, None, None)
                 else:
                     print(f"[seed] arm={tag}: route {len(res.route_qs)} voxels, eps={res.eps_gated:.3f}m -> "
                           f"seed {tuple(seed.shape)} ({res.seconds:.1f}s)")
+                    self._note_seed_stat(tag, True, None, res.seconds,
+                                         len(res.route_qs), res.eps_gated)
                     # save the metric's route visuals for THIS rollout INSIDE the rollout's own output
                     # folder (self._rollout_out_dir, set per episode in run()), in a dedicated
                     # seed_route_visuals/episode<N>_<arm>/ subfolder so it doesn't mix with the rollout's
@@ -2373,9 +2409,30 @@ def make_occluder_task():
                         print(f"[seed-viz] skipped ({_ve})")
             except Exception as e:  # never let seeding break the expert
                 print(f"[seed] arm={tag}: build_seed FAILED ({e}); stock fallback (no seed)")
+                self._note_seed_stat(tag, False, f"exception:{type(e).__name__}", None, None, None)
                 seed = None
             self._approach_seed_cache[key] = seed
             return seed
+
+        def _note_seed_stat(self, arm_tag, built, reason, seconds, voxels, eps):
+            """ROBOPRO Phase 4: record one _get_approach_seed outcome so the A/B can
+            report the seed's FIRING RATE (the 2a smoke test showed IK is
+            nondeterministic, so an identical scene can build a route on one run and not
+            the next -- a miss is absorbed silently by the unseeded plan, which would
+            otherwise make 'seed' mode look like it did nothing). reason='cached' marks a
+            cache hit rather than a fresh build, so build cost isn't double-counted.
+            Read by run() into records.jsonl. Never raises."""
+            try:
+                if not hasattr(self, "rollout_seed_stats"):
+                    self.rollout_seed_stats = []
+                self.rollout_seed_stats.append({
+                    "arm": str(arm_tag), "built": bool(built), "reason": reason,
+                    "seconds": (float(seconds) if seconds is not None else None),
+                    "route_voxels": (int(voxels) if voxels is not None else None),
+                    "eps_gated": (float(eps) if eps is not None else None),
+                })
+            except Exception:
+                pass
 
         def _plan_grasp_side(self, arm_tag, candidate, cache):
             """Waypoint -> pre_grasp -> grasp -> lift, cached per (cp_id, gap, z_lift,
@@ -2797,12 +2854,18 @@ def run(args):
                     # (_get_approach_seed writes into out_dir/seed_route_visuals/episode<N>_<arm>/)
                     env._rollout_out_dir = out_dir
                     env._rollout_ep = ep_counter
+                    _t_rollout = time.perf_counter()
                     with contextlib.redirect_stdout(_Tee(sys.stdout, rollout_log)), \
                          contextlib.redirect_stderr(_Tee(sys.stderr, rollout_log)):
                         rollout_result = run_rollout(env, "put_mouse_on_pad", args.base_config, seed,
                                                      dr_measure(cd), out_dir, ep_counter)
                     success = bool(rollout_result["success"])
                     rec["rollout_success"] = success
+                    # Wall-clock for THIS rollout (successes and failures alike -- a failure
+                    # costs time too). Lets the summary report usable-samples/hour, which is
+                    # what actually matters when the seed buys success rate but costs a
+                    # clearance-metric build per scene.
+                    rec["rollout_seconds"] = float(time.perf_counter() - _t_rollout)
                     rec["attached_trajectory_slowdown"] = ATTACHED_TRAJECTORY_SLOWDOWN
                     rec["rollout_ep"] = ep_counter
                     artifact_info = rollout_result.get("artifact_info") or {}
@@ -2823,6 +2886,12 @@ def run(args):
                     rec["rollout_grasp_attempts"] = getattr(env, "rollout_grasp_attempts", None)
                     rec["rollout_retention_checks"] = getattr(env, "rollout_retention_checks", None)
                     rec["rollout_descent_slices"] = getattr(env, "rollout_descent_slices", None)
+                    # ROBOPRO Phase 4 (APPROACH_MODE A/B). approach_mode is stamped on every
+                    # record so a results folder is self-describing and the summary can refuse
+                    # to compare cells that were not actually run in different modes.
+                    rec["approach_mode"] = env._approach_mode()
+                    rec["rollout_plan_effort"] = getattr(env, "rollout_plan_effort", None)
+                    rec["rollout_seed_stats"] = getattr(env, "rollout_seed_stats", None)
                     # Physics collision metrics for THIS episode (accumulated by
                     # check_collisions during play_once; reset per build by
                     # _init_collision_metrics; survives close_env like the fields
