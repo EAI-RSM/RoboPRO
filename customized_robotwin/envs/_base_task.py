@@ -15,6 +15,10 @@ import torch, random
 import cv2
 
 from .utils import *
+from .utils.policy_action_contract import (
+    CONTRACT_VERSION as POLICY_ACTION_CONTRACT_VERSION,
+    action_node_to_tool_call, provider_registry, resolve_provider, tool_schema,
+)
 import math
 from .robot import Robot
 from .camera import Camera
@@ -203,7 +207,7 @@ DEFAULT_VISIBILITY_BUCKETS = [
 
 class Base_Task(gym.Env):
     BENCHMARK_SCHEMA_NAME = "robopro_benchmark_support"
-    BENCHMARK_SCHEMA_VERSION = "1.5.0"
+    BENCHMARK_SCHEMA_VERSION = "1.6.0"
     BENCHMARK_EXPORTER_NAME = "robopro_benchmark_export"
     BENCHMARK_ROBOT_OBJECT_ID = -1
     BENCHMARK_LEFT_EE_OBJECT_ID = -2
@@ -280,6 +284,8 @@ class Base_Task(gym.Env):
             self._benchmark_contact_event_log = []
         if not hasattr(self, "_benchmark_action_nodes"):
             self._benchmark_action_nodes = []
+        if not hasattr(self, "_benchmark_action_provider"):
+            self._benchmark_action_provider = resolve_provider("rule_based")
         if not hasattr(self, "_benchmark_held_object_ids"):
             self._benchmark_held_object_ids = {"left": None, "right": None}
         if not hasattr(self, "_benchmark_held_object_state_known"):
@@ -441,6 +447,13 @@ class Base_Task(gym.Env):
         # immediately before replay/export, so every family uses the settings
         # recorded in scenario_metadata.config_snapshot_json.
         resolved_config = config_snapshot or {}
+        provider_config = resolved_config.get("policy_action_provider", {}) or {}
+        if isinstance(provider_config, str):
+            provider_config = {"name": provider_config}
+        self._benchmark_action_provider = resolve_provider(
+            provider_config.get("name", "rule_based"),
+            provider_config.get("config_ref"),
+        )
         relation_config = resolved_config.get("benchmark_relations", {}) or {}
         reachability_config = relation_config.get("reachable_by", {}) or {}
         self._benchmark_reachability_config = {
@@ -1705,6 +1718,10 @@ class Base_Task(gym.Env):
             "enable_collision_metrics": bool(getattr(self, "enable_collision_metrics", False)),
             "instruction_text": getattr(self, "instruction", None),
             "config_snapshot": self._export_jsonable(export_ctx.get("config_snapshot") or {}),
+            "action_provider": self._benchmark_action_provider["name"],
+            "action_provider_kind": self._benchmark_action_provider["kind"],
+            "action_representation": self._benchmark_action_provider["action_representation"],
+            "policy_action_contract_version": POLICY_ACTION_CONTRACT_VERSION,
         }
 
         record = scene_info
@@ -1869,6 +1886,29 @@ class Base_Task(gym.Env):
                 else:
                     scenario_group.create_dataset(key, data=str(value), dtype=string_dtype)
 
+            if "policy_action_contract" in export_group:
+                del export_group["policy_action_contract"]
+            contract_group = export_group.create_group("policy_action_contract")
+            provider = self._benchmark_action_provider
+            contract_group.create_dataset("version", data=POLICY_ACTION_CONTRACT_VERSION, dtype=string_dtype)
+            contract_group.create_dataset("provider_name", data=provider["name"], dtype=string_dtype)
+            contract_group.create_dataset("provider_kind", data=provider["kind"], dtype=string_dtype)
+            contract_group.create_dataset(
+                "action_representation", data=provider["action_representation"], dtype=string_dtype
+            )
+            contract_group.create_dataset(
+                "provider_config_json",
+                data=json.dumps(self._export_jsonable(provider), sort_keys=True), dtype=string_dtype,
+            )
+            contract_group.create_dataset(
+                "provider_registry_json",
+                data=json.dumps(self._export_jsonable(provider_registry()), sort_keys=True), dtype=string_dtype,
+            )
+            contract_group.create_dataset(
+                "tool_schema_json",
+                data=json.dumps(self._export_jsonable(tool_schema()), sort_keys=True), dtype=string_dtype,
+            )
+
             if "object_catalog" in export_group:
                 del export_group["object_catalog"]
             object_group = export_group.create_group("object_catalog")
@@ -2031,6 +2071,19 @@ class Base_Task(gym.Env):
                 data=np.array([
                     json.dumps(effect, ensure_ascii=False, sort_keys=True)
                     for effect in observed_effects
+                ], dtype=object),
+                dtype=string_dtype,
+            )
+            tool_calls = []
+            for node, effects in zip(action_nodes, observed_effects):
+                tool_call = action_node_to_tool_call(node, self._benchmark_action_provider)
+                tool_call["result"]["observed_effects"] = effects
+                tool_calls.append(tool_call)
+            action_group.create_dataset(
+                "tool_calls_json",
+                data=np.array([
+                    json.dumps(call, ensure_ascii=False, sort_keys=True)
+                    for call in tool_calls
                 ], dtype=object),
                 dtype=string_dtype,
             )

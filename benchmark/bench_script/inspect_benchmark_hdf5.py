@@ -79,6 +79,12 @@ def _summarize_benchmark_support(root: h5py.File) -> None:
         raise ValueError("Required benchmark_support group is missing")
 
     support = root["benchmark_support"]
+    schema_version = str(_decode_attr(root.attrs.get("schema_version", "0.0.0")))
+    try:
+        schema_tuple = tuple(int(part) for part in schema_version.split(".")[:3])
+    except ValueError:
+        schema_tuple = (0, 0, 0)
+    requires_policy_contract = schema_tuple >= (1, 6, 0)
     failures: list[str] = []
     print("\nbenchmark_support:")
     raw_contact = None
@@ -483,6 +489,52 @@ def _summarize_benchmark_support(root: h5py.File) -> None:
             checks["executed actions have effectors"] = bool(
                 len(effector_valid) == count and np.all(effector_valid[effector_required])
             )
+
+        if requires_policy_contract:
+            checks["policy_action_contract group exists"] = "policy_action_contract" in support
+            checks["tool_calls_json exists"] = "tool_calls_json" in actions
+        contract_provider = None
+        if "policy_action_contract" in support:
+            contract = support["policy_action_contract"]
+            required_contract_fields = {
+                "version", "provider_name", "provider_kind", "action_representation",
+                "provider_config_json", "provider_registry_json", "tool_schema_json",
+            }
+            checks["policy contract fields complete"] = required_contract_fields.issubset(contract.keys())
+            if "provider_name" in contract:
+                contract_provider = _decode_attr(contract["provider_name"][()])
+                checks["provider metadata is consistent"] = (
+                    contract_provider == _decode_attr(root.attrs.get("action_provider", ""))
+                )
+            for field in ("provider_config_json", "provider_registry_json", "tool_schema_json"):
+                if field in contract:
+                    try:
+                        json.loads(_decode_attr(contract[field][()]))
+                        checks[f"{field} is valid JSON"] = True
+                    except (TypeError, ValueError, json.JSONDecodeError):
+                        checks[f"{field} is valid JSON"] = False
+        if "tool_calls_json" in actions:
+            try:
+                tool_calls = [json.loads(value) for value in _decode_string_array(actions["tool_calls_json"])]
+                checks["tool calls share A"] = len(tool_calls) == count
+                checks["tool calls use ACT decision"] = all(call.get("decision") == "ACT" for call in tool_calls)
+                checks["tool calls match provider"] = (
+                    contract_provider is not None
+                    and all(call.get("provider") == contract_provider for call in tool_calls)
+                )
+                checks["tool call names are canonical"] = all(
+                    call.get("tool", {}).get("name") == "execute_high_level_action"
+                    for call in tool_calls
+                )
+                checks["tool calls align with action nodes"] = bool(
+                    len(tool_calls) == count and all(
+                        call.get("tool", {}).get("arguments", {}).get("action_type") == action_types[idx]
+                        and call.get("tool", {}).get("arguments", {}).get("arm") == arms[idx]
+                        for idx, call in enumerate(tool_calls)
+                    )
+                )
+            except (TypeError, ValueError, json.JSONDecodeError):
+                checks["tool_calls_json is valid JSON"] = False
 
         if "action_entity_edges" in support:
             edges = support["action_entity_edges"]

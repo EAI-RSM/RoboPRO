@@ -1,7 +1,7 @@
 # RoboPRO Graph Schema Reference
 
 This is the authoritative implementation-facing reference for the graph-rich
-RoboPRO benchmark export. It describes schema version `1.5.0` as written by the
+RoboPRO benchmark export. It describes schema version `1.6.0` as written by the
 current exporter. Research ideas that are not yet exported are listed separately
 under [Reserved and planned relations](#reserved-and-planned-relations).
 
@@ -34,7 +34,8 @@ benchmark_support/
 ├── object_catalog/          persistent entity identities and attributes
 ├── object_state/            per-frame entity state
 ├── relation_state/          per-frame state-relation edges
-├── action_nodes/            temporally extended expert actions
+├── action_nodes/            temporal actions plus tool_calls_json
+├── policy_action_contract/  provider, registry, and tool schema
 ├── action_entity_edges/     action-to-entity participant edges
 ├── collision_metric_contact_events/  filtered auxiliary contact events
 └── scenario_metadata/       task and collection context
@@ -44,7 +45,7 @@ The export identifies itself with:
 
 ```text
 schema_name    = robopro_benchmark_support
-schema_version = 1.5.0
+schema_version = 1.6.0
 ```
 
 ## Node types
@@ -113,7 +114,7 @@ node has:
   `expert_executed_action` denotes replayed execution;
 - target, destination, and effector IDs with explicit `_valid` masks;
 - `parameters_json`, `preconditions_json`, and `postconditions_json`;
-- `observed_effects_json`; and
+- `observed_effects_json` and provider-neutral `tool_calls_json`; and
 - `active[T,A]`, the per-frame action incidence matrix.
 
 Example action node:
@@ -139,6 +140,10 @@ Canonical action types include the object-manipulation sequence `approach`,
 `open_articulation`, and `close_articulation`. Articulation actions target the
 articulation entity. `parameters_json` identifies the interaction part and joint
 index; handle parts are not yet independent catalog nodes.
+
+Schema `1.6.0` also maps each action node to an `ACT` tool-call envelope. The
+resolved provider, provider registry, and JSON tool schema are stored in
+`policy_action_contract`; see [Policy-facing action contract](policy_action_contract.md).
 
 Contact events, risk assessments, belief nodes, unissued candidate alternatives,
 and rejected-plan lineage are research-roadmap concepts. Issued planner attempts
@@ -341,10 +346,8 @@ Absence means unimplemented or unknown, not false.
 
 Consumers must gate on both `schema_version` and the declared implemented
 relation/action datasets; a matching version string alone is not permission to
-assume an optional feature exists. Object tensor axes must be resolved through
-`relation_state/object_ids`, not catalog row positions. Ambiguous acceptance-name lookups or duplicate IDs,
-`relation_state/object_ids`, not catalog row positions. Ambiguous
-acceptance-name lookups or duplicate IDs,
+assume an optional feature exists. Object tensor axes must be resolved through `relation_state/object_ids`, not
+catalog row positions. Ambiguous acceptance-name lookups, duplicate IDs,
 ambiguous grounding, malformed solver results, and unexpected episode counts
 are data errors and must raise or fail validation. They must never be rewritten
 as false labels. Expected-failure tasks require explicit failure-message

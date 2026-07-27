@@ -11,6 +11,10 @@ from sapien.render import clear_cache
 from collections import OrderedDict
 import pdb
 from envs import *
+from envs.utils.policy_action_contract import (
+    CONTRACT_VERSION as POLICY_ACTION_CONTRACT_VERSION,
+    provider_registry, resolve_provider, tool_schema,
+)
 import yaml
 import importlib
 import json
@@ -83,6 +87,18 @@ def _apply_relation_collection_env_overrides(args):
     save_path = os.getenv("ROBOPRO_RELATION_SAVE_PATH")
     if save_path not in (None, ""):
         args["save_path"] = save_path
+
+    provider_name = os.getenv("ROBOPRO_ACTION_PROVIDER", "rule_based")
+    provider_config_ref = os.getenv("ROBOPRO_ACTION_PROVIDER_CONFIG")
+    provider = resolve_provider(provider_name, provider_config_ref)
+    if provider["kind"] != "expert_planner":
+        raise ValueError(
+            f"collect_data.py executes the rule-based expert, not {provider['name']!r}; "
+            "use the policy rollout collector for model providers"
+        )
+    args["policy_action_provider"] = {
+        "name": provider["name"], "config_ref": provider["config_ref"]
+    }
 
     office_arrangement = os.getenv("ROBOPRO_OFFICE_ARRANGEMENT")
     if office_arrangement not in (None, ""):
@@ -218,6 +234,26 @@ def _stamp_provenance_attrs(hdf5_path, args, seed=None, success=None, timestep=N
     peo = args.get("planner_exclude_obstacles", None)
     blind = bool(peo) if peo is not None else ecm
     with h5py.File(hdf5_path, "a") as f:
+        action_provider = resolve_provider(generator if generator is not None else "rule_based")
+        f.attrs["action_provider"] = action_provider["name"]
+        f.attrs["action_provider_kind"] = action_provider["kind"]
+        f.attrs["action_representation"] = action_provider["action_representation"]
+        f.attrs["policy_action_contract_version"] = POLICY_ACTION_CONTRACT_VERSION
+        contract_group = f.require_group("benchmark_support").require_group("policy_action_contract")
+        string_dtype = h5py.string_dtype(encoding="utf-8")
+        contract_values = {
+            "version": POLICY_ACTION_CONTRACT_VERSION,
+            "provider_name": action_provider["name"],
+            "provider_kind": action_provider["kind"],
+            "action_representation": action_provider["action_representation"],
+            "provider_config_json": json.dumps(action_provider, sort_keys=True),
+            "provider_registry_json": json.dumps(provider_registry(), sort_keys=True),
+            "tool_schema_json": json.dumps(tool_schema(), sort_keys=True),
+        }
+        for dataset_name, value in contract_values.items():
+            if dataset_name in contract_group:
+                del contract_group[dataset_name]
+            contract_group.create_dataset(dataset_name, data=value, dtype=string_dtype)
         # human-readable producer label ("what made this data"). CuRobo datasets
         # derive it from the resolved planner regime; policy-rollout datasets pass
         # generator=<policy name> (e.g. "pi05") explicitly.

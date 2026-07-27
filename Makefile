@@ -81,6 +81,8 @@ ACTION_VALIDATION_START_SEED ?= 0
 ACTION_VALIDATION_TASK_TIMEOUT ?= 1800
 ACTION_VALIDATION_DRY_RUN ?= 0
 ACTION_VALIDATION_OBSTACLE_DENSITY ?= 10
+POLICY_ACTION_PROVIDER ?= rule_based
+POLICY_ACTION_PROVIDER_CONFIG ?=
 
 # Asset / install flags
 PYTHON_VERSION ?= 3.10
@@ -183,10 +185,11 @@ help:
 	'    Vars: TASK_NAME=put_sauce_can_in_basket GPU_ID=0 RELATION_EPISODE_NUM=1 RELATION_OBSTACLE_DENSITY=14 RELATION_SAVE_PATH=./data/relation_validation_d14_actions_v2' \
 	'      REACHABLE_BY_ENABLED=1 REACHABLE_BY_INTERVAL=10 REACHABLE_BY_MOVABLE_ONLY=1' \
 	'      REACHABLE_BY_CACHE_UNCHANGED=1 REACHABLE_BY_POSE_DECIMALS=3' \
-	'  make action-validation-suite  Collect and check the schema-1.5 cross-task matrix.' \
+	'  make action-validation-suite  Collect and check the schema-1.6 cross-task matrix.' \
 	'    Vars: GPU_ID=0 ACTION_VALIDATION_MODE=collect|check|all ACTION_VALIDATION_TASKS=id1,id2' \
 	'      ACTION_VALIDATION_OUTPUT_ROOT=customized_robotwin/data/action_validation_suite_v1' \
 	'      ACTION_VALIDATION_START_SEED=0 ACTION_VALIDATION_DRY_RUN=0|1 REACHABLE_BY_INTERVAL=10 ACTION_VALIDATION_OBSTACLE_DENSITY=10' \
+	'      POLICY_ACTION_PROVIDER=rule_based POLICY_ACTION_PROVIDER_CONFIG=' \
 	'  make check-action-validation-suite  Check existing suite outputs without collecting.' \
 	'  make collect-rollout-pi05     Dual-env pi05 rollout collection.' \
 	'' \
@@ -300,12 +303,14 @@ verify-rollout:
 		eval "$$cmd")
 
 collect-data:
-	$(call RUN_IN_CUSTOMIZED,bash collect_data.sh "$(TASK_NAME)" "$(TASK_CONFIG)" "$(GPU_ID)")
+	$(call RUN_IN_CUSTOMIZED,export ROBOPRO_ACTION_PROVIDER="$(POLICY_ACTION_PROVIDER)"; export ROBOPRO_ACTION_PROVIDER_CONFIG="$(POLICY_ACTION_PROVIDER_CONFIG)"; bash collect_data.sh "$(TASK_NAME)" "$(TASK_CONFIG)" "$(GPU_ID)")
 
 relation-validation: TASK_NAME = put_sauce_can_in_basket
 relation-validation: TASK_CONFIG = relation_validation_d14
 relation-validation:
 	$(call RUN_IN_CUSTOMIZED,\
+		export ROBOPRO_ACTION_PROVIDER="$(POLICY_ACTION_PROVIDER)"; \
+		export ROBOPRO_ACTION_PROVIDER_CONFIG="$(POLICY_ACTION_PROVIDER_CONFIG)"; \
 		export ROBOPRO_REACHABLE_BY_ENABLED="$(REACHABLE_BY_ENABLED)"; \
 		export ROBOPRO_REACHABLE_BY_FRAME_STRIDE="$(REACHABLE_BY_INTERVAL)"; \
 		export ROBOPRO_REACHABLE_BY_MOVABLE_ONLY="$(REACHABLE_BY_MOVABLE_ONLY)"; \
@@ -318,6 +323,8 @@ relation-validation:
 
 action-validation-suite:
 	$(call RUN_IN_CUSTOMIZED,\
+		export ROBOPRO_ACTION_PROVIDER="$(POLICY_ACTION_PROVIDER)"; \
+		export ROBOPRO_ACTION_PROVIDER_CONFIG="$(POLICY_ACTION_PROVIDER_CONFIG)"; \
 		cmd='$(PYTHON) ../benchmark/bench_script/run_action_validation_suite.py "$(ACTION_VALIDATION_MODE)" --matrix "$(ACTION_VALIDATION_MATRIX)" --output-root "$(abspath $(ACTION_VALIDATION_OUTPUT_ROOT))" --gpu "$(GPU_ID)" --start-seed "$(ACTION_VALIDATION_START_SEED)" --task-timeout "$(ACTION_VALIDATION_TASK_TIMEOUT)" --reachability-interval "$(REACHABLE_BY_INTERVAL)" --obstacle-density "$(ACTION_VALIDATION_OBSTACLE_DENSITY)"'; \
 		if [[ -n "$(ACTION_VALIDATION_TASKS)" ]]; then cmd+=" --tasks $(ACTION_VALIDATION_TASKS)"; fi; \
 		if [[ "$(ACTION_VALIDATION_DRY_RUN)" == "1" ]]; then cmd+=" --dry-run"; fi; \

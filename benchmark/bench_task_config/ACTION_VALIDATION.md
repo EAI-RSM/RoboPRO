@@ -1,4 +1,4 @@
-# Schema 1.5 action validation suite
+# Schema 1.6 action validation suite
 
 The matrix in `action_validation_suite.yml` selects four expert tasks:
 
