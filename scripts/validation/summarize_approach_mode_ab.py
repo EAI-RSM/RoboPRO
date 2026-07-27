@@ -46,6 +46,20 @@ PAIRS = [
     ("off", "direct", "optional reference: what the around-box waypoint was worth"),
 ]
 
+# The final step of placement: place_actor lowers the held object onto the pad. It is a
+# KNOWN-BROKEN stage that fails for reasons unrelated to the grasp approach (the attached
+# object's collision margin against the table is tightest at exactly that pose), and it
+# fails that way under every mode. A rollout that got all the way there and died has
+# already exercised everything the approach mode controls, so counting it as a loss adds
+# the same noise to both cells and drags both rates toward each other.
+#
+# The placement-adjusted view drops those rollouts. It is a CONDITIONAL rate --
+# "given the run reached the final placement descent, did it succeed" -- not a fixed
+# benchmark number, and it is always reported next to the unconditional rate, never
+# instead of it. Widen with --exclude-stages if pre_place_descent proves to be the same
+# story (that is the step immediately before place_actor).
+TERMINAL_PLACEMENT_STAGES = ("place_actor",)
+
 
 # --------------------------------------------------------------------------- io
 
@@ -143,6 +157,34 @@ def pre_grasp_effort(rec: dict, field: str = "attempts") -> int | None:
 def pre_grasp_attempts(rec: dict) -> int | None:
     """Back-compat alias for the `attempts` field (see pre_grasp_effort)."""
     return pre_grasp_effort(rec, "attempts")
+
+
+def drop_terminal_placement(res: dict[int, dict],
+                            stages: tuple[str, ...] = TERMINAL_PLACEMENT_STAGES,
+                            ) -> tuple[dict[int, dict], int]:
+    """Drop rollouts that FAILED at a terminal placement stage. Returns (kept, dropped).
+
+    Only failures are ever dropped -- a success that passed through place_actor stays,
+    which is what makes the result a conditional success rate rather than a cherry-pick."""
+    kept = {s: v for s, v in res.items()
+            if v["success"] or str(v.get("failure_stage")) not in stages}
+    return kept, len(res) - len(kept)
+
+
+def paired_drop(ra: dict[int, dict], rb: dict[int, dict],
+                stages: tuple[str, ...] = TERMINAL_PLACEMENT_STAGES,
+                ) -> tuple[dict[int, dict], dict[int, dict]]:
+    """Placement-adjusted views of two cells for a PAIRED test.
+
+    List-wise deletion: a seed is dropped from BOTH cells if EITHER died at a terminal
+    placement stage. Dropping per-cell would break the pairing -- McNemar needs the same
+    seed present on both sides, and filtering each side independently would silently
+    compare different scene sets."""
+    ka, _ = drop_terminal_placement(ra, stages)
+    kb, _ = drop_terminal_placement(rb, stages)
+    keep = set(ka) & set(kb)
+    return ({s: v for s, v in ra.items() if s in keep},
+            {s: v for s, v in rb.items() if s in keep})
 
 
 def cell_stats(res: dict[int, dict]) -> dict | None:
@@ -305,6 +347,18 @@ def print_pair(a: str, b: str, why: str,
         print("        the effort numbers above are not comparable for this pair (rates are).")
 
 
+def print_adjusted(mode: str, res: dict[int, dict], stages: tuple[str, ...]) -> None:
+    """Placement-adjusted rate for one cell, printed beside its raw counterpart."""
+    kept, dropped = drop_terminal_placement(res, stages)
+    st = cell_stats(kept)
+    if st is None:
+        print(f"  {mode:<7} nothing left after dropping {dropped} terminal-placement failures")
+        return
+    lo, hi = st["ci"]
+    print(f"  {mode:<7} {st['k']:>3}/{st['n']:<3} = {st['rate']:6.1%}  95% CI [{lo:5.1%}, {hi:5.1%}]"
+          f"   (dropped {dropped})")
+
+
 def print_failure_stages(mode: str, res: dict[int, dict]) -> None:
     """Where the failures died. In direct/seed mode a pile-up at 'pre_grasp' is the
     expected shape (no waypoint fallback); a pile-up elsewhere means the mode change
@@ -321,6 +375,15 @@ def print_failure_stages(mode: str, res: dict[int, dict]) -> None:
 
 # ----------------------------------------------------------------------- figure
 
+# Fixed hue per mode, assigned by identity and never cycled: a run with fewer cells
+# must not repaint the survivors. Checked with the Machado-2009 severity-1.0 CVD
+# simulation in OKLab: worst adjacent-pair dE is 16.7 under protan/deutan and 17.8
+# unsimulated (targets 8 and 15), and every step clears 3:1 contrast on white. `off` is
+# an achromatic reference rather than a categorical hue, which is why its chroma is 0.
+MODE_COLOR = {"direct": "#4C72B0", "seed": "#C4632A", "off": "#4A4A4A"}
+INK, INK_MUTED = "#1a1a19", "#5c5c58"
+
+
 def make_figure(stats: dict[str, dict | None], out_path: Path) -> None:
     """Three panels: success rate with Wilson CI, usable samples/hour, median
     pre_grasp attempts -- one bar per mode. Skips panels that have no data."""
@@ -332,7 +395,7 @@ def make_figure(stats: dict[str, dict | None], out_path: Path) -> None:
     if not cells:
         print("\nno cell data -> skipping figure")
         return
-    colors = {"off": "#8C8C8C", "direct": "#4C72B0", "seed": "#DD8452"}
+    colors = MODE_COLOR
     x = range(len(cells))
     cc = [colors[m] for m in cells]
 
@@ -343,14 +406,18 @@ def make_figure(stats: dict[str, dict | None], out_path: Path) -> None:
     # Wilson CI as asymmetric error bars -- the interval is not centred on the rate.
     err_lo = [max(0.0, stats[m]["rate"] - stats[m]["ci"][0]) for m in cells]
     err_hi = [max(0.0, stats[m]["ci"][1] - stats[m]["rate"]) for m in cells]
-    ax1.bar(x, rates, color=cc, edgecolor="white")
-    ax1.errorbar(list(x), rates, yerr=[err_lo, err_hi], fmt="none", ecolor="#333", capsize=5)
+    ax1.bar(x, rates, color=cc, edgecolor="white", zorder=2)
+    ax1.errorbar(list(x), rates, yerr=[err_lo, err_hi], fmt="none", ecolor=INK,
+                 capsize=5, zorder=3)
     ax1.set_title("Rollout success rate (95% Wilson CI)")
     ax1.set_ylabel("success rate")
-    ax1.set_ylim(0, 1)
+    ax1.set_ylim(0, 1.12)
+    ax1.yaxis.set_major_formatter(lambda v, _: f"{v:.0%}")
     for xi, m in zip(x, cells):
-        ax1.text(xi, stats[m]["rate"], f" {stats[m]['k']}/{stats[m]['n']}",
-                 ha="center", va="bottom", fontsize=10)
+        # Anchor the count above the CI's upper bound, not the bar top -- at the bar top
+        # the error bar draws straight through the text.
+        ax1.text(xi, stats[m]["ci"][1] + 0.02, f"{stats[m]['k']}/{stats[m]['n']}",
+                 ha="center", va="bottom", fontsize=10, color=INK)
 
     thru = [stats[m]["samples_per_hour"] for m in cells]
     if any(t is not None for t in thru):
@@ -374,7 +441,10 @@ def make_figure(stats: dict[str, dict | None], out_path: Path) -> None:
         ax.set_xticks(list(x))
         ax.set_xticklabels(cells, fontsize=11)
         ax.grid(True, axis="y", alpha=0.25)
-    fig.suptitle("Phase 4: grasp-approach mode  --  off (waypoint) vs direct vs seeded", fontsize=13)
+        ax.set_axisbelow(True)
+        for side in ("top", "right"):
+            ax.spines[side].set_visible(False)
+    fig.suptitle("Phase 4: grasp-approach mode  --  " + " vs ".join(cells), fontsize=13)
     fig.tight_layout()
     out_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(out_path, dpi=130)
@@ -382,9 +452,85 @@ def make_figure(stats: dict[str, dict | None], out_path: Path) -> None:
     print(f"\nsaved figure -> {out_path}")
 
 
+def make_adjusted_figure(data: dict[str, dict[int, dict]], out_path: Path,
+                         stages: tuple[str, ...] = TERMINAL_PLACEMENT_STAGES) -> None:
+    """Success rate as measured vs. with terminal-placement failures dropped.
+
+    Two bars per mode in that mode's own hue -- colour carries the MODE, the hatch
+    carries which view -- so the pair reads as one entity measured two ways rather than
+    as two entities. Both are shown because the adjusted rate is conditional ('given the
+    run reached the final descent'), and showing it alone would present a conditional
+    number as if it were the benchmark."""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    from matplotlib.patches import Patch
+
+    cells = [m for m in MODES if data.get(m)]
+    if not cells:
+        print("no cell data -> skipping placement-adjusted figure")
+        return
+
+    raw = {m: cell_stats(data[m]) for m in cells}
+    adj_pairs = {m: drop_terminal_placement(data[m], stages) for m in cells}
+    adj = {m: cell_stats(adj_pairs[m][0]) for m in cells}
+    if not any(adj[m] for m in cells):
+        print("nothing survives the placement filter -> skipping placement-adjusted figure")
+        return
+
+    fig, ax = plt.subplots(figsize=(1.9 * len(cells) + 5.2, 5.6))
+    w = 0.34
+    for i, m in enumerate(cells):
+        for j, (st, hatch) in enumerate(((raw[m], None), (adj[m], "//"))):
+            if st is None:
+                continue
+            # 2px surface gap between the adjacent bars: the pair reads as grouped
+            # without a divider line doing the work.
+            xi = i + (j - 0.5) * (w + 0.03)
+            ax.bar(xi, st["rate"], width=w, color=MODE_COLOR[m], hatch=hatch,
+                   edgecolor="white", linewidth=1.6, zorder=2)
+            lo, hi = st["ci"]
+            ax.errorbar(xi, st["rate"],
+                        yerr=[[max(0.0, st["rate"] - lo)], [max(0.0, hi - st["rate"])]],
+                        fmt="none", ecolor=INK, capsize=5, zorder=3)
+            # Direct label on every bar: there are at most six, and the counts are the
+            # point (n changes between the two views, which a rate alone would hide).
+            ax.text(xi, hi + 0.02, f"{st['k']}/{st['n']}", ha="center", va="bottom",
+                    fontsize=10, color=INK)
+        dropped = adj_pairs[m][1]
+        ax.text(i, -0.075, f"{dropped} dropped", ha="center", va="top",
+                fontsize=9, color=INK_MUTED)
+
+    ax.set_xticks(range(len(cells)))
+    ax.set_xticklabels(cells, fontsize=12, color=INK)
+    ax.set_ylim(0, 1.12)
+    ax.yaxis.set_major_formatter(lambda v, _: f"{v:.0%}")
+    ax.set_ylabel("rollout success rate", color=INK)
+    ax.grid(True, axis="y", alpha=0.25, zorder=0)
+    ax.set_axisbelow(True)
+    for side in ("top", "right"):
+        ax.spines[side].set_visible(False)
+    # Legend swatches are neutral: they explain the HATCH (which view), not identity --
+    # identity is the bar's hue, already labelled on the x axis.
+    ax.legend(handles=[Patch(facecolor="#b9b9b4", edgecolor="white", label="all rollouts"),
+                       Patch(facecolor="#b9b9b4", edgecolor="white", hatch="//",
+                             label=f"excluding failures at {'/'.join(stages)}")],
+              loc="upper left", frameon=False, fontsize=10)
+    ax.set_title("Success rate with the known-broken final placement step removed\n"
+                 f"right-hand bar is conditional: given the run reached past "
+                 f"{'/'.join(stages)}",
+                 fontsize=12, color=INK)
+    fig.tight_layout()
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(out_path, dpi=130)
+    plt.close(fig)
+    print(f"saved figure -> {out_path}")
+
+
 # ------------------------------------------------------------------------- main
 
-def summarize(root: Path, figure: bool = True) -> None:
+def summarize(root: Path, figure: bool = True,
+              stages: tuple[str, ...] = TERMINAL_PLACEMENT_STAGES) -> None:
     cells = {m: find_cell(root, m) for m in MODES}
     data = {m: load_records(cells[m]) for m in MODES}
     stats = {m: cell_stats(data[m]) for m in MODES}
@@ -413,20 +559,36 @@ def summarize(root: Path, figure: bool = True) -> None:
 
     print_firing(seed_firing(data["seed"]))
 
+    print(f"\n[PLACEMENT-ADJUSTED]  same cells, dropping failures at {'/'.join(stages)}")
+    print("  place_actor is the final descent onto the pad and is broken independently of")
+    print("  the approach mode, so it adds the same noise to every cell. Conditional rate:")
+    for m in MODES:
+        if data[m]:
+            print_adjusted(m, data[m], stages)
+
     for a, b, why in PAIRS:
         # Silently skip a pair whose cells were not both run -- `off` is opt-in, and a
         # SKIPPED banner on every default run is noise, not information.
         if data[a] and data[b]:
             print_pair(a, b, why, data[a], data[b])
+            fa, fb = paired_drop(data[a], data[b], stages)
+            if fa and len(fa) < len(set(data[a]) & set(data[b])):
+                print(f"  -- placement-adjusted (both cells reached past {'/'.join(stages)}) --")
+                print_pair(a, b, "same pair, terminal-placement failures dropped", fa, fb)
 
     if figure:
         make_figure(stats, root / "approach_mode_ab.png")
+        make_adjusted_figure(data, root / "approach_mode_placement_adjusted.png", stages)
 
     print("\n" + "-" * 74)
     print("Reading this: 'direct -> seed' IS the experiment -- both cells plan pre_grasp")
     print("straight from rest with no waypoint fallback, so they differ by only the seed")
     print("and the delta is attributable to it. Check SEED FIRING first: a seed that")
     print("rarely builds cannot show an effect, and a null would mean nothing.")
+    print(f"The placement-adjusted rate conditions on getting past {'/'.join(stages)},")
+    print("a stage that is broken independently of the approach. It isolates the")
+    print("planner's contribution; it is NOT the benchmark number -- quote the")
+    print("unconditional rate for that, and always report the drop counts with it.")
     if data["off"]:
         print("The 'off' cell is a reference number only -- the around-box waypoint is a")
         print("one-occluder-in-front heuristic, so it is a different task, not a control.")
@@ -436,9 +598,9 @@ def _selftest() -> None:
     """End-to-end check on synthetic records: exercises the loader, the stats, both
     paired comparisons and the figure, with a known answer. No sim/GPU needed."""
     # Cook a case with a deliberate signal: seed wins 8 discordant pairs, loses 0.
-    def rec(seed, ok, mode, attempts, seeded_route=None, secs=100.0):
+    def rec(seed, ok, mode, attempts, seeded_route=None, secs=100.0, stage="pre_grasp"):
         r = {"seed": seed, "rollout_success": ok, "approach_mode": mode,
-             "rollout_seconds": secs, "rollout_failure_stage": None if ok else "pre_grasp",
+             "rollout_seconds": secs, "rollout_failure_stage": None if ok else stage,
              "rollout_plan_effort": [{"stage": "pre_grasp", "arm": "left", "status": "Success",
                                       "attempts": attempts, "trajopt_attempts": 2 * attempts,
                                       "seeded": mode == "seed"}]}
@@ -451,6 +613,12 @@ def _selftest() -> None:
 
     with tempfile.TemporaryDirectory() as td:
         root = Path(td)
+        # Seeds 14-19 die at place_actor in BOTH direct and seed: the known-broken final
+        # descent, which the placement-adjusted view drops. Everything else fails at
+        # pre_grasp, which is the stage the mode actually controls and must be kept.
+        def stage_for(i):
+            return "place_actor" if i >= 14 else "pre_grasp"
+
         plan = {  # mode -> list of (seed, success, attempts, built)
             "off":    [(i, i < 12, 3, None) for i in range(20)],
             "direct": [(i, i < 4, 9, None) for i in range(20)],
@@ -461,7 +629,8 @@ def _selftest() -> None:
             d.mkdir(parents=True)
             with (d / "records.jsonl").open("w") as fh:
                 for s, ok, att, built in rows:
-                    fh.write(json.dumps(rec(s, ok, mode, att, built)) + "\n")
+                    fh.write(json.dumps(rec(s, ok, mode, att, built,
+                                            stage=stage_for(s))) + "\n")
 
         cells = {m: find_cell(root, m) for m in MODES}
         assert all(cells[m] is not None for m in MODES), "find_cell missed a cell"
@@ -501,20 +670,39 @@ def _selftest() -> None:
         torn.write_text(torn.read_text() + '{"seed": 99, "rollout_suc')
         assert len(load_records(cells["off"])) == 20, "torn line was not skipped"
 
+        # Placement-adjusted view: seeds 14-19 failed at place_actor in both cells, so 6
+        # drop from each. direct keeps 14 with 4 wins, seed keeps 14 with 12.
+        kept_d, dropped_d = drop_terminal_placement(data["direct"])
+        kept_s, dropped_s = drop_terminal_placement(data["seed"])
+        assert (dropped_d, dropped_s) == (6, 6), (dropped_d, dropped_s)
+        assert cell_stats(kept_d)["k"] == 4 and cell_stats(kept_d)["n"] == 14
+        assert cell_stats(kept_s)["k"] == 12 and cell_stats(kept_s)["n"] == 14
+        # a SUCCESS is never dropped even though it passed through the stage
+        assert all(v["success"] or v["failure_stage"] != "place_actor" for v in kept_s.values())
+        # list-wise deletion keeps the pair aligned
+        fa, fb = paired_drop(data["direct"], data["seed"])
+        assert set(fa) == set(fb) and len(fa) == 14, (len(fa), len(fb))
+        # widening the stage set drops strictly more
+        wider, n_wider = drop_terminal_placement(data["direct"], ("place_actor", "pre_grasp"))
+        assert n_wider == 16 and len(wider) == 4, (n_wider, len(wider))
+
         summarize(root, figure=True)
         assert (root / "approach_mode_ab.png").is_file(), "figure not written"
+        assert (root / "approach_mode_placement_adjusted.png").is_file(), "adjusted figure"
 
         # The DEFAULT run is direct+seed only (off is opt-in): a missing off cell must
         # not crash, must drop the off->direct pair silently, and must still plot.
         import shutil
         shutil.rmtree(root / "off")
         (root / "approach_mode_ab.png").unlink()
+        (root / "approach_mode_placement_adjusted.png").unlink()
         assert find_cell(root, "off") is None, "find_cell should report the removed cell"
         summarize(root, figure=True)
         assert (root / "approach_mode_ab.png").is_file(), "figure not written without off"
+        assert (root / "approach_mode_placement_adjusted.png").is_file(), "adjusted fig"
 
-    print("\n[selftest] ALL PASS (loader/Wilson/McNemar/firing-rate/attempts/figure,"
-          " with and without the opt-in off cell)")
+    print("\n[selftest] ALL PASS (loader/Wilson/McNemar/firing-rate/attempts/"
+          "placement-adjusted/figures, with and without the opt-in off cell)")
 
 
 def main() -> None:
@@ -522,7 +710,12 @@ def main() -> None:
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--root", type=Path,
                     help="results root passed to run_approach_mode_ab.sh")
-    ap.add_argument("--no-figure", action="store_true", help="skip the PNG")
+    ap.add_argument("--no-figure", action="store_true", help="skip the PNGs")
+    ap.add_argument("--exclude-stages", default=",".join(TERMINAL_PLACEMENT_STAGES),
+                    help="comma-separated failure stages treated as terminal-placement "
+                         "noise in the placement-adjusted view "
+                         f"(default: {','.join(TERMINAL_PLACEMENT_STAGES)}; the natural "
+                         "widening is 'place_actor,placement:pre_place_descent')")
     ap.add_argument("--selftest", action="store_true",
                     help="run the synthetic-data self-test and exit")
     args = ap.parse_args()
@@ -534,7 +727,8 @@ def main() -> None:
     if not args.root.is_dir():
         print(f"ERROR: no such results root: {args.root}", file=sys.stderr)
         sys.exit(1)
-    summarize(args.root, figure=not args.no_figure)
+    stages = tuple(s.strip() for s in args.exclude_stages.split(",") if s.strip())
+    summarize(args.root, figure=not args.no_figure, stages=stages)
 
 
 if __name__ == "__main__":
