@@ -22,9 +22,16 @@ Later phases: (1) stack the grid to z, (2) 3D occluder EDT, (3) 26-conn gated wi
 This file reuses the scene / grid / IK machinery from reachability_map.py verbatim
 (that stays the visualization tool); here we only add the metric on top.
 
+OCCLUDER GEOMETRY (--occ-shape, default mesh): the clearance field and every figure measure against
+the TRUE posed collision mesh, re-cut at each z, so the bottle tapers and its neck is thin. The old
+solid -- the widest footprint extruded to the cap -- is still available as --occ-shape extruded, but
+it invents up to ~4 cm of phantom obstacle around the neck (wider than the gripper), so it makes
+climb-over routes look tighter than they are. eps* differs between the two.
+
 USAGE (from the benchmark folder, env sourced + ROBOTWIN_BENCH_TASK=bench):
     python clearance_metric_3d.py --seed 1 --offset 0.2 --arm right --zmin 0.78 --zmax 1.4 --zres 0.03
     #   add --warm-start to also propagate a continuity branch field per slice (slower, one extra IK pass/slice)
+    #   add --occ-shape extruded to reproduce the pre-2026-07-24 (prism-occluder) eps* numbers
 """
 
 import argparse
@@ -1010,14 +1017,24 @@ def phase2_vertical_report(out_dir, args, zs, free_vol, q_warm_2d, q_warm_3d):
 
 # ----------------------------------------------------------------------------- step 3: 3D occluder EDT
 def occluder_footprints_3d(env):
-    """Per occluder: the posed convex-hull xy footprint of its COLLISION mesh (base<id>.glb -- the
-    exact geometry curobo collides against) plus the mesh's true world z-range [zlo, zhi]. We EXTRUDE
-    the footprint over [zlo, zhi] to build the 3D occluder mask, so above zhi (the bottle's top) there
-    is no occluder and the gripper is free to pass over -- the whole point of going 3D.
+    """Per occluder, the posed COLLISION geometry (base<id>.glb -- the exact mesh file curobo's world
+    model loads for this actor, see _bench_base_task.update_world). We keep three things:
 
-    (Approximation: a constant cross-section over-fills the tapering cap slightly; a true per-height
-    mesh cross-section is the refinement if the cap ever matters.) Returns a list of
-    dict(poly=(K,2)|None, zlo, zhi); None if the mesh can't load (caller falls back to cylinders)."""
+      * "mesh"  the full posed triangle mesh in WORLD coordinates -- the ground truth. Used by the
+                --occ-shape mesh path (true per-height cross-sections) and by the 3D render.
+      * "poly"  the convex-hull xy footprint (the mesh's widest silhouette from above), and
+      * zlo/zhi the mesh's true world z-range.
+
+    "poly" EXTRUDED over [zlo, zhi] is the OLD occluder solid (--occ-shape extruded): correct in
+    plan view, but it keeps the widest cross-section all the way to the cap, so it over-fills the
+    bottle's NECK badly (olive-oil: ~0.098 m wide at the body, ~0.019 m at the neck -> up to ~4 cm of
+    phantom obstacle near the top, larger than the gripper half-width). --occ-shape mesh removes that
+    by re-cutting the real mesh at every z. Either way, above zhi there is no occluder at all, so the
+    gripper is free to pass over -- the whole point of going 3D.
+
+    "center" is the actor's world spawn position (marker only). Returns a list of
+    dict(poly=(K,2)|None, zlo, zhi, mesh=Trimesh|None, center=(3,)); None if the mesh can't load
+    (caller falls back to cylinders)."""
     occs = getattr(env, "occluders", None)
     if not occs:
         return []
@@ -1026,7 +1043,8 @@ def occluder_footprints_3d(env):
         import transforms3d as t3d
         from scipy.spatial import ConvexHull
         path = os.path.join(os.environ["BENCH_ROOT"], OCCLUDER_COLLISION)
-        V0 = np.asarray(trimesh.load(path, force="mesh").vertices)   # same mesh for every bottle
+        m0 = trimesh.load(path, force="mesh")                        # same mesh for every bottle
+        V0, F0 = np.asarray(m0.vertices), np.asarray(m0.faces)
     except Exception as e:
         print(f"[footprint] could not load occluder collision mesh ({e}); falling back to cylinders")
         return None
@@ -1034,36 +1052,111 @@ def occluder_footprints_3d(env):
     for occ in occs:
         pose = occ.get_pose()
         R = t3d.quaternions.quat2mat(np.asarray(pose.q, dtype=float))   # SAPIEN quat is wxyz
-        Vw = V0 @ R.T + np.asarray(pose.p, dtype=float)                 # (V,3) posed world verts
+        try:                                    # curobo scales the same mesh by the actor's scale
+            sc = np.asarray(occ.scale, dtype=float)
+        except Exception:
+            sc = 1.0
+        Vw = (V0 * sc) @ R.T + np.asarray(pose.p, dtype=float)          # (V,3) posed world verts
         try:
             poly = Vw[:, :2][ConvexHull(Vw[:, :2]).vertices]
         except Exception:
             poly = None
-        out.append(dict(poly=poly, zlo=float(Vw[:, 2].min()), zhi=float(Vw[:, 2].max())))
+        try:
+            mesh = trimesh.Trimesh(vertices=Vw, faces=F0, process=False)
+        except Exception:
+            mesh = None
+        out.append(dict(poly=poly, zlo=float(Vw[:, 2].min()), zhi=float(Vw[:, 2].max()),
+                        mesh=mesh, center=np.asarray(pose.p, dtype=float)))
     return out
 
 
-def occluder_clearance_3d(foots, occ_ps, XX, YY, zs, res, zres, r_foot):
-    """3D clearance (m) from each voxel to the nearest OCCLUDER -- not the table / furniture / target
-    that also sit in curobo's world. Primary path: extrude each posed footprint over its z-range into
-    a (nz,ny,nx) occluder mask, then the anisotropic 3D Euclidean distance transform (sampling
-    (zres,res,res)) -> 0 inside a bottle, growing outward, and UNBOUNDED above the bottle top (no
-    occluder there = free to pass over). Fallback (foots is None): vertical cylinders radius r_foot.
-    No occluders -> +inf everywhere. Returns (nz, ny, nx) float."""
+def occluder_slice_polys(f, z):
+    """The TRUE cross-section of one posed occluder mesh at height z: the closed world-xy loops where
+    the plane z cuts the mesh (outer boundary first, any inner loops after). This is what makes the
+    occluder solid taper -- a fat body low down, a thin neck up top -- instead of being a prism.
+    Returns [] when the plane misses the mesh (above the cap / below the base) or on any failure."""
+    m = f.get("mesh")
+    if m is None or not (f["zlo"] - 1e-9 <= z <= f["zhi"] + 1e-9):
+        return []
+    try:
+        sec = m.section(plane_origin=[0.0, 0.0, float(z)], plane_normal=[0.0, 0.0, 1.0])
+    except Exception:
+        return []
+    if sec is None:
+        return []
+    return [np.asarray(loop)[:, :2] for loop in sec.discrete if len(loop) >= 3]
+
+
+def occluder_mask_3d(foots, XX, YY, zs, shape="mesh"):
+    """Voxel occupancy (nz,ny,nx bool) of the occluder solid, in one of two geometries:
+
+      shape="mesh"     : re-cut the posed COLLISION mesh at every z and fill the resulting loops --
+                         the bottle tapers, so the neck is thin and the cap is gone. Faithful to the
+                         geometry curobo collides against, up to grid sampling.
+      shape="extruded" : the old solid -- the widest xy footprint held constant over [zlo, zhi].
+
+    Thin-feature guard (mesh path): a neck narrower than one grid cell can slip between sample points
+    and vanish, which would read as free space. Whenever a slice has real cross-section loops but
+    stamps no cell, we stamp the cell nearest each loop's centroid so the occluder never disappears.
+    Returns None if no footprint geometry is available at all."""
+    from matplotlib.path import Path as MplPath
     ny, nx = XX.shape
     nz = len(zs)
-    if foots is not None and any(f["poly"] is not None for f in foots):
-        from matplotlib.path import Path as MplPath
-        cols = np.column_stack([XX.ravel(), YY.ravel()])
-        inxy = np.zeros((len(foots), ny, nx), dtype=bool)      # per-occluder in-footprint (xy), cached
-        for i, f in enumerate(foots):
-            if f["poly"] is not None:
-                inxy[i] = MplPath(f["poly"]).contains_points(cols).reshape(ny, nx)
-        mask = np.zeros((nz, ny, nx), dtype=bool)
+    cols = np.column_stack([XX.ravel(), YY.ravel()])
+    mask = np.zeros((nz, ny, nx), dtype=bool)
+
+    if shape == "mesh" and foots and any(f.get("mesh") is not None for f in foots):
+        rescued = 0
         for iz, z in enumerate(zs):
-            for i, f in enumerate(foots):
-                if f["poly"] is not None and f["zlo"] - 1e-9 <= z <= f["zhi"] + 1e-9:
-                    mask[iz] |= inxy[i]
+            for f in foots:
+                loops = occluder_slice_polys(f, float(z))
+                if not loops:
+                    continue
+                # compound path so an inner loop punches a hole rather than filling it
+                cp = MplPath.make_compound_path(*[MplPath(l, closed=True) for l in loops])
+                hit = cp.contains_points(cols).reshape(ny, nx)
+                if not hit.any():                       # thin-feature rescue (see docstring)
+                    for l in loops:
+                        c = l.mean(axis=0)
+                        iy, ix = np.unravel_index(int(np.argmin((XX - c[0]) ** 2 + (YY - c[1]) ** 2)),
+                                                  XX.shape)
+                        hit[iy, ix] = True
+                    rescued += 1
+                mask[iz] |= hit
+        if rescued:
+            print(f"[edt] thin-feature rescue on {rescued} slice(s): the cross-section was narrower "
+                  f"than the grid, so a single centre cell was stamped")
+        return mask
+
+    if not (foots and any(f["poly"] is not None for f in foots)):
+        return None
+    inxy = np.zeros((len(foots), ny, nx), dtype=bool)      # per-occluder in-footprint (xy), cached
+    for i, f in enumerate(foots):
+        if f["poly"] is not None:
+            inxy[i] = MplPath(f["poly"]).contains_points(cols).reshape(ny, nx)
+    for iz, z in enumerate(zs):
+        for i, f in enumerate(foots):
+            if f["poly"] is not None and f["zlo"] - 1e-9 <= z <= f["zhi"] + 1e-9:
+                mask[iz] |= inxy[i]
+    return mask
+
+
+def occluder_clearance_3d(foots, occ_ps, XX, YY, zs, res, zres, r_foot, shape="mesh"):
+    """3D clearance (m) from each voxel to the nearest OCCLUDER -- not the table / furniture / target
+    that also sit in curobo's world. Primary path: rasterise the occluder solid (see
+    occluder_mask_3d; --occ-shape picks the true tapering mesh or the old extruded footprint) into a
+    (nz,ny,nx) mask, then the anisotropic 3D Euclidean distance transform (sampling (zres,res,res))
+    -> 0 inside a bottle, growing outward, and UNBOUNDED above the bottle top (no occluder there =
+    free to pass over). Fallback (no footprint geometry): vertical cylinders radius r_foot.
+    No occluders -> +inf everywhere. Returns (nz, ny, nx) float.
+
+    Grid caveat (both shapes): the EDT measures voxel-centre to voxel-centre, so the returned
+    clearance sits up to about half a voxel (res/2 in x,y; zres/2 in z) ABOVE the true point-to-
+    surface distance. eps* inherits that bias -- it is slightly optimistic, by construction."""
+    ny, nx = XX.shape
+    nz = len(zs)
+    mask = occluder_mask_3d(foots, XX, YY, zs, shape=shape)
+    if mask is not None:
         if not mask.any():
             return np.full((nz, ny, nx), np.inf, dtype=float)
         return distance_transform_edt(~mask, sampling=(zres, res, res))
@@ -1076,7 +1169,7 @@ def occluder_clearance_3d(foots, occ_ps, XX, YY, zs, res, zres, r_foot):
     return np.clip(d, 0.0, None)
 
 
-def phase3_clearance_report(out_dir, args, xs, ys, zs, label, edt, foots):
+def phase3_clearance_report(out_dir, args, xs, ys, zs, label, edt, foots, tgt_p=None, ee_xyz=None):
     """PHASE 3 sanity: per-slice montage of the 3D occluder-clearance field (0 inside a footprint,
     growing outward; opening up above the bottle top where there is no occluder), footprint outline
     overlaid where it exists. Prints per-z clearance-over-FREE stats so the height profile is legible."""
@@ -1104,8 +1197,15 @@ def phase3_clearance_report(out_dir, args, xs, ys, zs, label, edt, foots):
         if foots:
             from matplotlib.patches import Polygon as MplPolygon
             for f in foots:
-                if f["poly"] is not None and f["zlo"] - 1e-9 <= zs[k] <= f["zhi"] + 1e-9:
+                # outline the occluder as it exists AT THIS HEIGHT: the true cross-section under
+                # --occ-shape mesh (so the neck visibly narrows), else the constant footprint
+                loops = occluder_slice_polys(f, float(zs[k])) if args.occ_shape == "mesh" else []
+                if loops:
+                    for l in loops:
+                        ax.add_patch(MplPolygon(l, closed=True, fill=False, edgecolor="red", lw=1.2))
+                elif f["poly"] is not None and f["zlo"] - 1e-9 <= zs[k] <= f["zhi"] + 1e-9:
                     ax.add_patch(MplPolygon(f["poly"], closed=True, fill=False, edgecolor="red", lw=1.2))
+        _scene_anchor_markers(ax, tgt_p, ee_xyz, args.arm)
         ax.set_title(f"z={zs[k]:.2f}", fontsize=9); ax.set_xticks([]); ax.set_yticks([])
     if im is not None:
         fig.colorbar(im, ax=list(axes.ravel()), fraction=0.02, pad=0.02, label="clearance to occluder (m)")
@@ -1218,37 +1318,135 @@ def reconstruct_widest_path_3d(free_vol, edt, qvol, seed_a, seed_b, eps_star, ta
     return path[::-1]
 
 
-def _metric_path3d(out_dir, args, foots, occ_ps, g_xyz, p_xyz, bott_xyz, route_w, eps_star, merged):
-    """3D view of the gated climb-over route through the stack; occluders as vertical prisms."""
+def surface_distance_to_occluders(foots, pt):
+    """Exact continuous distance (m) from a world point to the nearest occluder SURFACE, measured on
+    the real posed triangle mesh -- no grid, no extrusion. This is the honest yardstick for the eps*
+    sphere: eps* itself comes from the voxel EDT, so comparing the two shows how much the grid costs
+    us. Returns None if no mesh is available."""
+    best = None
+    for f in (foots or []):
+        m = f.get("mesh")
+        if m is None:
+            continue
+        try:
+            import trimesh
+            d = float(trimesh.proximity.closest_point(m, np.asarray([pt], dtype=float))[1][0])
+        except Exception:
+            continue
+        best = d if best is None else min(best, d)
+    return best
+
+
+def _draw_occluder_solids_3d(ax, foots, shape):
+    """Draw the occluders in 3D as the SAME solid the clearance field was measured against: the true
+    posed collision mesh under --occ-shape mesh, the extruded footprint prism under extruded. Keeping
+    the picture and the metric on one geometry is what makes the eps* sphere's 'just touches' claim
+    checkable by eye."""
     from mpl_toolkits.mplot3d.art3d import Poly3DCollection
-    fig = plt.figure(figsize=(9, 7.5))
+    for f in (foots or []):
+        m = f.get("mesh")
+        if shape == "mesh" and m is not None:
+            tris = np.asarray(m.vertices)[np.asarray(m.faces)]
+            ax.add_collection3d(Poly3DCollection(tris, facecolor="red", alpha=0.10, edgecolor="none"))
+            continue
+        if f["poly"] is None:
+            continue
+        p, zlo, zhi = f["poly"], f["zlo"], f["zhi"]
+        bottom = [(x, y, zlo) for x, y in p]
+        top = [(x, y, zhi) for x, y in p]
+        faces = [bottom, top] + [[bottom[i], bottom[(i + 1) % len(p)], top[(i + 1) % len(p)], top[i]]
+                                 for i in range(len(p))]
+        ax.add_collection3d(Poly3DCollection(faces, facecolor="red", alpha=0.12, edgecolor="red", lw=0.5))
+
+
+def _draw_eps_sphere(ax, centre, radius, n=48):
+    """Wireframe sphere of radius eps* centred on the bottleneck voxel -- the 3D twin of the 2D eps*
+    circle. Its surface is the set of points exactly eps* from the bottleneck, so with the axes at
+    equal aspect it should just KISS the nearest occluder: eps* IS that distance. A sphere that
+    visibly bites into a bottle, or floats clear of every bottle, means the clearance field and the
+    drawn geometry have drifted apart."""
+    u = np.linspace(0, 2 * np.pi, n)
+    v = np.linspace(0, np.pi, n // 2)
+    x = centre[0] + radius * np.outer(np.cos(u), np.sin(v))
+    y = centre[1] + radius * np.outer(np.sin(u), np.sin(v))
+    z = centre[2] + radius * np.outer(np.ones_like(u), np.cos(v))
+    ax.plot_wireframe(x, y, z, color="#00bcd4", lw=0.6, alpha=0.55, rstride=3, cstride=3)
+    ax.plot([centre[0]], [centre[1]], [centre[2]], ".", color="#00bcd4", ms=1,
+            label=f"eps* sphere (r = {radius:.3f} m)")
+
+
+def _equal_aspect_3d(ax, pts, pad=0.02):
+    """Force a TRUE 1:1:1 data aspect over the bounding box of `pts` (list of (3,) points). Without
+    this matplotlib stretches each axis independently, the eps* sphere renders as an ellipsoid and
+    'just touching' becomes unreadable."""
+    P = np.asarray([p for p in pts if p is not None], dtype=float)
+    if P.size == 0:
+        return
+    lo, hi = P.min(axis=0) - pad, P.max(axis=0) + pad
+    span = float(max(hi - lo))
+    mid = 0.5 * (lo + hi)
+    ax.set_xlim(mid[0] - span / 2, mid[0] + span / 2)
+    ax.set_ylim(mid[1] - span / 2, mid[1] + span / 2)
+    ax.set_zlim(mid[2] - span / 2, mid[2] + span / 2)
+    ax.set_box_aspect((1, 1, 1))
+
+
+def _metric_path3d(out_dir, args, foots, occ_ps, g_xyz, p_xyz, bott_xyz, route_w, eps_star, merged,
+                   tgt_p=None, ee_xyz=None):
+    """3D view of the gated climb-over route through the stack: occluder solids, the route, the scene
+    anchors (target bottle spawn + the gripper's current pose), and the eps* sphere sitting on the
+    bottleneck."""
+    fig = plt.figure(figsize=(9.5, 8))
     ax = fig.add_subplot(111, projection="3d")
-    if foots:
-        for f in foots:
-            if f["poly"] is None:
-                continue
-            p, zlo, zhi = f["poly"], f["zlo"], f["zhi"]
-            bottom = [(x, y, zlo) for x, y in p]
-            top = [(x, y, zhi) for x, y in p]
-            faces = [bottom, top] + [[bottom[i], bottom[(i + 1) % len(p)], top[(i + 1) % len(p)], top[i]]
-                                     for i in range(len(p))]
-            ax.add_collection3d(Poly3DCollection(faces, facecolor="red", alpha=0.12, edgecolor="red", lw=0.5))
+    _draw_occluder_solids_3d(ax, foots, args.occ_shape)
     if route_w and len(route_w) > 1:
         rx, ry, rz = zip(*route_w)
         ax.plot(rx, ry, rz, "-", color="gold", lw=2.5, label="gated widest path")
     ax.scatter(*g_xyz, c="cyan", marker="o", s=80, label="grasp seed")
     ax.scatter(*p_xyz, c="magenta", marker="s", s=70, label="pad seed")
+    if tgt_p is not None:
+        ax.scatter(tgt_p[0], tgt_p[1], tgt_p[2], c="blue", marker="*", s=200,
+                   label="target bottle (spawn)")
+    if ee_xyz is not None:
+        ax.scatter(ee_xyz[0], ee_xyz[1], ee_xyz[2], c="darkorange", marker="^", s=110,
+                   edgecolors="k", linewidths=0.5, label=f"gripper now ({args.arm})")
     if bott_xyz is not None:
         ax.scatter(*bott_xyz, c="black", marker="X", s=80, label="bottleneck eps*")
+
+    # eps* sphere: radius = the bottleneck's clearance, so it should just touch the nearest occluder
+    exact = None
+    drew_sphere = merged and bott_xyz is not None and np.isfinite(eps_star) and eps_star > 0
+    if drew_sphere:
+        _draw_eps_sphere(ax, bott_xyz, float(eps_star))
+        exact = surface_distance_to_occluders(foots, bott_xyz)
+
+    corners = [np.asarray(g_xyz), np.asarray(p_xyz), tgt_p, ee_xyz]
+    for f in (foots or []):
+        if f["poly"] is not None:
+            corners += [np.array([f["poly"][:, 0].min(), f["poly"][:, 1].min(), f["zlo"]]),
+                        np.array([f["poly"][:, 0].max(), f["poly"][:, 1].max(), f["zhi"]])]
+    if route_w:
+        corners += [np.asarray(route_w).min(axis=0), np.asarray(route_w).max(axis=0)]
+    if drew_sphere:
+        corners += [np.asarray(bott_xyz) - eps_star, np.asarray(bott_xyz) + eps_star]
+    _equal_aspect_3d(ax, corners)
+
     eps_txt = "inf" if (merged and np.isinf(eps_star)) else (f"{eps_star:.3f} m" if merged else "INACCESSIBLE")
+    sub = ""
+    if exact is not None:
+        sub = (f"\ntrue mesh-surface distance at the bottleneck = {exact:.3f} m  "
+               f"(EDT - true = {float(eps_star) - exact:+.3f} m, grid bias)")
     ax.set_xlabel("x (m)"); ax.set_ylabel("y (m)"); ax.set_zlabel("z (m)")
-    ax.set_title(f"2.5D metric route  |  seed {args.seed}, arm {args.arm}\neps* (gated) = {eps_txt}")
+    ax.set_title(f"2.5D metric route  |  seed {args.seed}, arm {args.arm}, occluder geom={args.occ_shape}"
+                 f"\neps* (gated) = {eps_txt}{sub}", fontsize=10)
     ax.legend(loc="upper left", fontsize=8)
     stem = f"metric_path3d_seed{args.seed}_{args.arm}"
     fig.savefig(out_dir / f"{stem}.png", dpi=120, bbox_inches="tight"); plt.close(fig)
+    return exact
 
 
-def phase4_metric(out_dir, args, XX, YY, zs, label, edt, q_gate, grasp_pose, tgt_p, pad_xy, occ_ps, foots):
+def phase4_metric(out_dir, args, XX, YY, zs, label, edt, q_gate, grasp_pose, tgt_p, pad_xy, occ_ps,
+                  foots, ee_xyz=None):
     """PHASE 4: the 2.5D metric. Seed the grasp voxel and the pad voxel, run the 26-conn widest-path
     (max-min occluder clearance) DSU twice -- UNGATED (reachable + clear only) and GATED on the warm
     branch field (adds the joint-continuity constraint) -- and report eps* for both plus the gated
@@ -1300,6 +1498,12 @@ def phase4_metric(out_dir, args, XX, YY, zs, label, edt, q_gate, grasp_pose, tgt
         print("[metric] NOTE: a reachable+clear route EXISTS but the branch gate disconnects it -> no "
               "continuous single-branch climb-over (seams block it); eps_gated reads INACCESSIBLE")
 
+    exact = _metric_path3d(out_dir, args, foots, occ_ps, w(ga), w(pa), (w(bott_g) if bott_g else None),
+                           route_w, eps_g, merged_g, tgt_p=tgt_p, ee_xyz=ee_xyz)
+    if exact is not None:
+        print(f"[metric] bottleneck: EDT eps*={eps_g:.4f}m vs true mesh-surface distance {exact:.4f}m "
+              f"(grid bias {eps_g - exact:+.4f}m; the eps* sphere is drawn at the EDT value)")
+
     summary = {
         "eps_ungated_m": (None if (merged_u and np.isinf(eps_u)) else (round(float(eps_u), 4) if merged_u else 0.0)),
         "eps_gated_m": (None if (merged_g and np.isinf(eps_g)) else (round(float(eps_g), 4) if merged_g else 0.0)),
@@ -1310,16 +1514,18 @@ def phase4_metric(out_dir, args, XX, YY, zs, label, edt, q_gate, grasp_pose, tgt
         "feasibility_gated": verdict_g, "margin_m": (None if margin_g is None else round(float(margin_g), 4)),
         "grasp_seed_xyz": [round(c, 4) for c in w(ga)], "pad_seed_xyz": [round(c, 4) for c in w(pa)],
         "bottleneck_gated_xyz": ([round(c, 4) for c in w(bott_g)] if bott_g else None),
+        "bottleneck_true_surface_dist_m": (None if exact is None else round(float(exact), 4)),
         "route_len_voxels": (len(route) if route else 0),
         "route_climbs_to_z": (round(max(p[2] for p in route_w), 3) if route_w else None),
+        "target_xyz": [round(float(c), 4) for c in tgt_p],
+        "gripper_now_xyz": (None if ee_xyz is None else [round(float(c), 4) for c in ee_xyz]),
         "config": {"seed": args.seed, "arm": args.arm, "offset": args.offset,
-                   "zmin": args.zmin, "zmax": args.zmax, "zres": args.zres},
+                   "zmin": args.zmin, "zmax": args.zmax, "zres": args.zres,
+                   "occ_shape": args.occ_shape},
     }
     (out_dir / f"{stem}.json").write_text(json.dumps(summary, indent=2))
-    _metric_path3d(out_dir, args, foots, occ_ps, w(ga), w(pa), (w(bott_g) if bott_g else None),
-                   route_w, eps_g, merged_g)
     phase4_visuals(out_dir, args, XX, YY, zs, label, edt, foots, w(ga), w(pa), route, route_w,
-                   eps_g, merged_g)
+                   eps_g, merged_g, tgt_p=tgt_p, ee_xyz=ee_xyz)
     print(f"[metric] wrote {stem}.json + 3D path + side/profile/topdown/ceiling figures")
 
 
@@ -1332,7 +1538,21 @@ def _line_axis(g_xy, p_xy):
     return np.asarray(g_xy, float), u, L
 
 
-def _viz_side_elevation(out_dir, args, XX, YY, zs, label, foots, g_xyz, p_xyz, route_w, eps_star, merged):
+def _scene_anchor_markers(ax, tgt_p=None, ee_xyz=None, arm=""):
+    """The two scene anchors every plan-view figure needs to be readable: where the TARGET BOTTLE
+    actually spawned (the thing being picked -- distinct from the 'grasp seed', which is that pose
+    snapped to the nearest FREE voxel) and where the acting GRIPPER currently is (its rest pose, i.e.
+    the end the route has to start from). Both are plotted in the xy plane."""
+    if tgt_p is not None:
+        ax.plot(tgt_p[0], tgt_p[1], "*", color="blue", ms=17, mec="k", mew=0.6,
+                label="target bottle (spawn)")
+    if ee_xyz is not None:
+        ax.plot(ee_xyz[0], ee_xyz[1], "^", color="darkorange", ms=12, mec="k", mew=0.6,
+                label=f"gripper now ({arm})")
+
+
+def _viz_side_elevation(out_dir, args, XX, YY, zs, label, foots, g_xyz, p_xyz, route_w, eps_star,
+                        merged, tgt_p=None, ee_xyz=None):
     """SIDE ELEVATION: the 3D scene projected onto the vertical plane through grasp->pad. Background =
     labels sampled along that line at every height; the bottle is a red box (footprint projected onto
     the line x its z-range); the route arcs up and over. The most legible 'is it climbing over?' view."""
@@ -1354,14 +1574,38 @@ def _viz_side_elevation(out_dir, args, XX, YY, zs, label, foots, g_xyz, p_xyz, r
         for f in foots:
             if f["poly"] is None:
                 continue
-            proj = (f["poly"] - p0) @ u                       # footprint projected onto the line axis
-            ax.add_patch(plt.Rectangle((float(proj.min()), f["zlo"]), float(proj.max() - proj.min()),
-                                       f["zhi"] - f["zlo"], fill=False, edgecolor="red", lw=2))
+            # mesh mode: per-height silhouette from the real cross-sections (the bottle necks in);
+            # extruded mode: the constant-width box the metric actually used
+            sil = []
+            if args.occ_shape == "mesh" and f.get("mesh") is not None:
+                # sampled on its OWN fine z-grid (not the coarse stack) so the neck reads as a curve
+                for z in np.linspace(f["zlo"] + 1e-4, f["zhi"] - 1e-4, 60):
+                    ss = [((loop - p0) @ u) for loop in occluder_slice_polys(f, float(z))]
+                    if ss:
+                        allss = np.concatenate(ss)
+                        sil.append((float(allss.min()), float(allss.max()), float(z)))
+            if sil:
+                lo, hi, zv = zip(*sil)
+                ax.plot(lo, zv, "-", color="red", lw=2)
+                ax.plot(hi, zv, "-", color="red", lw=2)
+                ax.plot([lo[0], hi[0]], [zv[0]] * 2, "-", color="red", lw=2)
+                ax.plot([lo[-1], hi[-1]], [zv[-1]] * 2, "-", color="red", lw=2)
+            else:
+                proj = (f["poly"] - p0) @ u                   # footprint projected onto the line axis
+                ax.add_patch(plt.Rectangle((float(proj.min()), f["zlo"]), float(proj.max() - proj.min()),
+                                           f["zhi"] - f["zlo"], fill=False, edgecolor="red", lw=2))
     if route_w and len(route_w) > 1:
         rs = [float((np.asarray(r[:2]) - p0) @ u) for r in route_w]
         ax.plot(rs, [r[2] for r in route_w], "-", color="gold", lw=2.5, label="route")
     ax.plot(0, g_xyz[2], "o", color="cyan", ms=11, mec="k", label="grasp")
     ax.plot(L, p_xyz[2], "s", color="magenta", ms=10, mec="k", label="pad")
+    # scene anchors, projected onto the same grasp->pad axis
+    if tgt_p is not None:
+        ax.plot(float((np.asarray(tgt_p[:2]) - p0) @ u), float(tgt_p[2]), "*", color="blue", ms=17,
+                mec="k", mew=0.6, label="target bottle (spawn)")
+    if ee_xyz is not None:
+        ax.plot(float((np.asarray(ee_xyz[:2]) - p0) @ u), float(ee_xyz[2]), "^", color="darkorange",
+                ms=12, mec="k", mew=0.6, label=f"gripper now ({args.arm})")
     from matplotlib.patches import Patch
     proxies = [Patch(color=LABEL_COLORS[c], label=LABEL_NAMES[c]) for c in (FREE, OBSTACLE, BEYOND)]
     h, _ = ax.get_legend_handles_labels()
@@ -1405,7 +1649,7 @@ def _viz_clearance_profile(out_dir, args, route_w, route_clear, eps_star, merged
     print(f"[viz] wrote {stem}.png")
 
 
-def _viz_topdown(out_dir, args, XX, YY, label, foots, g_xyz, p_xyz, route_w):
+def _viz_topdown(out_dir, args, XX, YY, label, foots, g_xyz, p_xyz, route_w, tgt_p=None, ee_xyz=None):
     """TOP-DOWN plan: reachable-at-some-height footprint (green) + occluder outline + the route's (x,y)
     coloured by height z. Shows the sideways detour and how high it climbs, in one plan view."""
     any_free = (label == FREE).any(axis=0)
@@ -1424,6 +1668,7 @@ def _viz_topdown(out_dir, args, XX, YY, label, foots, g_xyz, p_xyz, route_w):
         fig.colorbar(sc, ax=ax, label="route height z (m)")
     ax.plot(g_xyz[0], g_xyz[1], "o", color="cyan", ms=12, mec="k", label="grasp")
     ax.plot(p_xyz[0], p_xyz[1], "s", color="magenta", ms=10, mec="k", label="pad")
+    _scene_anchor_markers(ax, tgt_p, ee_xyz, args.arm)
     ax.legend(loc="upper right", fontsize=8)
     ax.set_xlabel("x (m)"); ax.set_ylabel("y (m)")
     ax.set_title(f"Top-down: route coloured by height  |  seed {args.seed}, arm {args.arm}\n"
@@ -1433,7 +1678,7 @@ def _viz_topdown(out_dir, args, XX, YY, label, foots, g_xyz, p_xyz, route_w):
     print(f"[viz] wrote {stem}.png")
 
 
-def _viz_ceiling(out_dir, args, XX, YY, zs, label, foots):
+def _viz_ceiling(out_dir, args, XX, YY, zs, label, foots, tgt_p=None, ee_xyz=None):
     """REACHABILITY CEILING: highest FREE z per (x,y) -- the 'lid' of the reachable envelope. Cells
     brighter than the bottle-top height can be cleared over; the red footprint shows where the bottle
     sits. Answers 'where can the arm actually get above the occluder?' at a glance."""
@@ -1453,6 +1698,9 @@ def _viz_ceiling(out_dir, args, XX, YY, zs, label, foots):
                 ax.add_patch(MplPolygon(f["poly"], closed=True, fill=False, edgecolor="red", lw=2))
         zhis = [f["zhi"] for f in foots if f["poly"] is not None]
         zhi = max(zhis) if zhis else None
+    _scene_anchor_markers(ax, tgt_p, ee_xyz, args.arm)
+    if tgt_p is not None or ee_xyz is not None:
+        ax.legend(loc="upper right", fontsize=8)
     ax.set_xlabel("x (m)"); ax.set_ylabel("y (m)")
     ax.set_title(f"Reachability ceiling (max FREE z per x,y)  |  seed {args.seed}, arm {args.arm}"
                  + (f"\nbottle top z={zhi:.2f}m -- brighter cells can clear over it" if zhi else ""))
@@ -1461,13 +1709,17 @@ def _viz_ceiling(out_dir, args, XX, YY, zs, label, foots):
     print(f"[viz] wrote {stem}.png")
 
 
-def phase4_visuals(out_dir, args, XX, YY, zs, label, edt, foots, g_xyz, p_xyz, route, route_w, eps_star, merged):
-    """The four 3D-legible views: side elevation, clearance-along-route, top-down-by-height, ceiling."""
+def phase4_visuals(out_dir, args, XX, YY, zs, label, edt, foots, g_xyz, p_xyz, route, route_w,
+                   eps_star, merged, tgt_p=None, ee_xyz=None):
+    """The four 3D-legible views: side elevation, clearance-along-route, top-down-by-height, ceiling.
+    All the spatial ones also carry the scene anchors (target bottle spawn + current gripper pose);
+    the clearance-vs-arc-length chart has no xy plane, so it gets neither."""
     route_clear = [float(edt[iz, iy, ix]) for (iz, iy, ix) in route] if route else []
-    _viz_side_elevation(out_dir, args, XX, YY, zs, label, foots, g_xyz, p_xyz, route_w, eps_star, merged)
+    _viz_side_elevation(out_dir, args, XX, YY, zs, label, foots, g_xyz, p_xyz, route_w, eps_star,
+                        merged, tgt_p=tgt_p, ee_xyz=ee_xyz)
     _viz_clearance_profile(out_dir, args, route_w, route_clear, eps_star, merged)
-    _viz_topdown(out_dir, args, XX, YY, label, foots, g_xyz, p_xyz, route_w)
-    _viz_ceiling(out_dir, args, XX, YY, zs, label, foots)
+    _viz_topdown(out_dir, args, XX, YY, label, foots, g_xyz, p_xyz, route_w, tgt_p=tgt_p, ee_xyz=ee_xyz)
+    _viz_ceiling(out_dir, args, XX, YY, zs, label, foots, tgt_p=tgt_p, ee_xyz=ee_xyz)
 
 
 # ----------------------------------------------------------------------------- run
@@ -1506,6 +1758,15 @@ def run(args):
     with tm.section("select_arm"):
         arm, planner, grasp_q, grasp_pose, ik = select_arm(env, args)
     args.arm = arm      # downstream naming / filenames use the resolved arm
+    # where the acting gripper currently IS (rest pose), in the same world "gripper pose" convention
+    # the grid is swept in -- a scene anchor for the figures, never used by the metric itself
+    try:
+        ee_pose = env.robot.get_left_ee_pose() if arm == "left" else env.robot.get_right_ee_pose()
+        ee_xyz = np.asarray(ee_pose[:3], dtype=float)
+        print(f"[{arm}] gripper currently at ({ee_xyz[0]:.3f}, {ee_xyz[1]:.3f}, {ee_xyz[2]:.3f})")
+    except Exception as e:
+        ee_xyz = None
+        print(f"[{arm}] could not read the current gripper pose ({e}); figures will omit that marker")
     if grasp_pose is not None:
         print(f"[{arm}] grasp pose z={grasp_pose[2]:.3f}  (stack z[{args.zmin:.2f},{args.zmax:.2f}]); "
               f"grasp_q={np.array2string(grasp_q, precision=3)}")
@@ -1579,7 +1840,11 @@ def run(args):
                 if f["poly"] is not None:
                     bb = tuple(np.round(f["poly"].max(0) - f["poly"].min(0), 3))
                     print(f"[footprint] occ {i}: z-range [{f['zlo']:.3f},{f['zhi']:.3f}]  bbox(x,y)={bb}")
-        edt = occluder_clearance_3d(foots, occ_ps, XX, YY, zs, args.res, args.zres, OCC_HALF_FOOTPRINT)
+        edt = occluder_clearance_3d(foots, occ_ps, XX, YY, zs, args.res, args.zres, OCC_HALF_FOOTPRINT,
+                                    shape=args.occ_shape)
+    print(f"[edt] occluder solid = {args.occ_shape}"
+          + ("  (true posed collision mesh, re-cut at every z)" if args.occ_shape == "mesh"
+             else "  (widest footprint extruded over the full height -- over-fills the neck)"))
     freev = label == FREE
     if np.isinf(edt).all():
         print("[edt] no occluders -> occluder-clearance unbounded (nothing to squeeze past)")
@@ -1590,14 +1855,14 @@ def run(args):
                   f"median={np.median(fe):.3f} max={fe.max():.3f}")
 
     with tm.section("phase3_clearance_report"):
-        phase3_clearance_report(out_dir, args, xs, ys, zs, label, edt, foots)
+        phase3_clearance_report(out_dir, args, xs, ys, zs, label, edt, foots, tgt_p=tgt_p, ee_xyz=ee_xyz)
 
     # (reach-envelope viz lives in the producer reach_envelope.py, not here -- this is an actual run)
 
     # --- step 4: gated 26-conn widest-path DSU -> the 2.5D metric (eps*) ---
     with tm.section("metric_dsu"):
         phase4_metric(out_dir, args, XX, YY, zs, label, edt, q_warm_3d, grasp_pose, tgt_p, pad_xy,
-                      occ_ps, foots)
+                      occ_ps, foots, ee_xyz=ee_xyz)
 
     with tm.section("phase1_report"):
         phase1_stack_report(out_dir, args, xs, ys, zs, label, qfield, q_warm_vol)
@@ -1647,6 +1912,13 @@ def main():
     ap.add_argument("--ymin", type=float, default=-0.35)
     ap.add_argument("--ymax", type=float, default=0.35)
     ap.add_argument("--res", type=float, default=0.01, help="grid resolution (m)")
+    ap.add_argument("--occ-shape", choices=["mesh", "extruded"], default="mesh",
+                    help="geometry the occluder-clearance field (and the figures) use. 'mesh' re-cuts "
+                         "the TRUE posed collision mesh at every z, so the bottle tapers and the neck "
+                         "is thin -- faithful to what curobo collides against. 'extruded' is the older "
+                         "solid: the widest footprint held constant to the cap, which invents up to "
+                         "~4cm of phantom obstacle around the neck. CHANGING THIS CHANGES eps*; pass "
+                         "'extruded' to reproduce pre-2026-07-24 numbers.")
     ap.add_argument("--gate-tau", type=float, default=0.35,
                     help="joint-space gate (rad): union adjacent FREE voxels only if the max per-joint "
                          "warm-config jump is <= tau. Set from the phase-0/2 histogram gap (~0.2-0.35). "
