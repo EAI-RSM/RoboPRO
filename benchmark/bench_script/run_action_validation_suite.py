@@ -89,8 +89,27 @@ def collect(matrix: dict, tasks: list[dict], args) -> list[dict]:
         env.update({
             "ROBOTWIN_BENCH_TASK": "bench",
             "ROBOPRO_REACHABLE_BY_FRAME_STRIDE": str(args.reachability_interval),
+            "ROBOPRO_NEAR_HORIZONTAL_THRESHOLD_M": str(args.near_horizontal_threshold),
+            "ROBOPRO_NEAR_VERTICAL_MARGIN_M": str(args.near_vertical_margin),
+            "ROBOPRO_NEAR_MIN_GEOMETRY_EXTENT_M": str(args.near_min_geometry_extent),
+            "ROBOPRO_ON_SUPPORTS_MAX_VERTICAL_PENETRATION_M": str(
+                args.on_supports_max_vertical_penetration
+            ),
+            "ROBOPRO_ON_SUPPORTS_MAX_VERTICAL_SEPARATION_M": str(
+                args.on_supports_max_vertical_separation
+            ),
+            "ROBOPRO_ON_SUPPORTS_MIN_XY_OVERLAP_RATIO": str(
+                args.on_supports_min_xy_overlap_ratio
+            ),
+            "ROBOPRO_ON_SUPPORTS_MIN_XY_AREA_M2": str(args.on_supports_min_xy_area),
+            "ROBOPRO_IN_CONTAINS_CENTER_TOLERANCE_M": str(
+                args.in_contains_center_tolerance
+            ),
             "ROBOPRO_RELATION_OBSTACLE_DENSITY": str(args.obstacle_density),
             "ROBOPRO_RELATION_EPISODE_NUM": str(task.get("episodes", args.episodes)),
+            "ROBOPRO_HELD_BY_MAX_OBJECT_TCP_DISTANCE_M": str(
+                args.held_by_max_object_tcp_distance
+            ),
             "ROBOPRO_RELATION_SAVE_PATH": str(args.output_root),
             "COLLECT_START_SEED": str(args.start_seed),
         })
@@ -457,6 +476,15 @@ def main() -> int:
     parser.add_argument("--episodes", type=int, default=1)
     parser.add_argument("--start-seed", type=int, default=0)
     parser.add_argument("--reachability-interval", type=int, default=10)
+    parser.add_argument("--near-horizontal-threshold", type=float, default=0.10)
+    parser.add_argument("--near-vertical-margin", type=float, default=0.08)
+    parser.add_argument("--near-min-geometry-extent", type=float, default=1e-6)
+    parser.add_argument("--on-supports-max-vertical-penetration", type=float, default=0.03)
+    parser.add_argument("--on-supports-max-vertical-separation", type=float, default=0.06)
+    parser.add_argument("--on-supports-min-xy-overlap-ratio", type=float, default=0.20)
+    parser.add_argument("--held-by-max-object-tcp-distance", type=float, default=0.16)
+    parser.add_argument("--on-supports-min-xy-area", type=float, default=1e-8)
+    parser.add_argument("--in-contains-center-tolerance", type=float, default=1e-4)
     parser.add_argument("--obstacle-density", type=int, default=10)
     parser.add_argument("--task-timeout", type=float, default=1800.0,
                         help="Maximum collection seconds per task")

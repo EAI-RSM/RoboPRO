@@ -23,6 +23,7 @@ import os
 import subprocess
 import time
 import h5py
+import numpy as np
 from argparse import ArgumentParser
 
 from export_scene import export_scene
@@ -55,11 +56,41 @@ def _parse_env_bool(name, value):
 
 def _apply_relation_collection_env_overrides(args):
     """Apply the small, documented Make/env override surface for graph runs."""
-    reachability = args.setdefault("benchmark_relations", {}).setdefault("reachable_by", {})
+    relations = args.setdefault("benchmark_relations", {})
+    reachability = relations.setdefault("reachable_by", {})
+    near = relations.setdefault("near", {})
+    on_supports = relations.setdefault("on_supports", {})
+    in_contains = relations.setdefault("in_contains", {})
+    held_by = relations.setdefault("held_by", {})
     bool_overrides = {
         "ROBOPRO_REACHABLE_BY_ENABLED": "enabled",
         "ROBOPRO_REACHABLE_BY_MOVABLE_ONLY": "movable_only",
         "ROBOPRO_REACHABLE_BY_CACHE_UNCHANGED": "cache_unchanged",
+    }
+    float_overrides = {
+        "ROBOPRO_NEAR_HORIZONTAL_THRESHOLD_M": (near, "horizontal_threshold_m", False),
+        "ROBOPRO_NEAR_VERTICAL_MARGIN_M": (near, "vertical_margin_m", False),
+        "ROBOPRO_NEAR_MIN_GEOMETRY_EXTENT_M": (near, "min_geometry_extent_m", True),
+        "ROBOPRO_ON_SUPPORTS_MAX_VERTICAL_PENETRATION_M": (
+            on_supports, "max_vertical_penetration_m", False
+        ),
+        "ROBOPRO_ON_SUPPORTS_MAX_VERTICAL_SEPARATION_M": (
+            on_supports, "max_vertical_separation_m", False
+        ),
+        "ROBOPRO_ON_SUPPORTS_MIN_XY_AREA_M2": (
+            on_supports, "min_xy_area_m2", True
+        ),
+        "ROBOPRO_IN_CONTAINS_CENTER_TOLERANCE_M": (
+            in_contains, "center_tolerance_m", False
+        ),
+        "ROBOPRO_HELD_BY_MAX_OBJECT_TCP_DISTANCE_M": (
+            held_by, "max_object_tcp_distance_m", False
+        ),
+    }
+    ratio_overrides = {
+        "ROBOPRO_ON_SUPPORTS_MIN_XY_OVERLAP_RATIO": (
+            on_supports, "min_xy_overlap_ratio"
+        ),
     }
     int_overrides = {
         "ROBOPRO_REACHABLE_BY_FRAME_STRIDE": (reachability, "frame_stride", 1),
@@ -74,6 +105,26 @@ def _apply_relation_collection_env_overrides(args):
         value = os.getenv(env_name)
         if value not in (None, ""):
             reachability[config_name] = _parse_env_bool(env_name, value)
+
+    for env_name, (destination, config_name, strictly_positive) in float_overrides.items():
+        value = os.getenv(env_name)
+        if value in (None, ""):
+            continue
+        parsed = float(value)
+        valid = np.isfinite(parsed) and (parsed > 0 if strictly_positive else parsed >= 0)
+        if not valid:
+            operator = "> 0" if strictly_positive else ">= 0"
+            raise ValueError(f"{env_name} must be finite and {operator}; got {value!r}")
+        destination[config_name] = parsed
+
+    for env_name, (destination, config_name) in ratio_overrides.items():
+        value = os.getenv(env_name)
+        if value in (None, ""):
+            continue
+        parsed = float(value)
+        if not np.isfinite(parsed) or not 0 <= parsed <= 1:
+            raise ValueError(f"{env_name} must be finite and in [0, 1]; got {value!r}")
+        destination[config_name] = parsed
 
     for env_name, (destination, config_name, minimum) in int_overrides.items():
         value = os.getenv(env_name)

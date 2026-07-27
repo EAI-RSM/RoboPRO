@@ -34,6 +34,7 @@ benchmark_support/
 ├── object_catalog/          persistent entity identities and attributes
 ├── object_state/            per-frame entity state
 ├── relation_state/          per-frame state-relation edges
+├── relation_parameters/     effective relation-estimation parameters
 ├── action_nodes/            temporal actions plus tool_calls_json
 ├── policy_action_contract/  provider, registry, and tool schema
 ├── action_entity_edges/     action-to-entity participant edges
@@ -158,7 +159,7 @@ and `C` is cameras.
 
 | Relation | Direction / shape | Meaning | Example |
 |---|---|---|---|
-| `on` | directed, `[T,N,N]` | Source rests on destination support. | `bottle --on--> table` |
+| `on` | directed, `[T,N,N]` | Source rests on destination support under contact-gated geometry checks. | `bottle --on--> table` |
 | `supports` | directed, `[T,N,N]` | Source supports destination; exact inverse of `on`. | `table --supports--> bottle` |
 | `in` | directed, `[T,N,N]` | Source is geometrically contained by destination. | `bottle --in--> basket` |
 | `contains` | directed, `[T,N,N]` | Source contains destination; exact inverse of `in`. | `basket --contains--> bottle` |
@@ -171,11 +172,38 @@ and `C` is cameras.
 
 ### Important semantic distinctions
 
+#### `on` and `supports`
+
+`on(upper,lower)` requires `raw_contact(upper,lower)`, the upper AABB center
+above the lower AABB center, a vertical surface gap within the configured
+penetration/separation bounds, and sufficient XY overlap measured relative to
+the upper object's footprint. `supports` is exported as the exact transpose.
+Effective parameters are stored under
+`benchmark_support/relation_parameters/on_supports/` and can be overridden with
+`ON_SUPPORTS_MAX_VERTICAL_PENETRATION_M`,
+`ON_SUPPORTS_MAX_VERTICAL_SEPARATION_M`,
+`ON_SUPPORTS_MIN_XY_OVERLAP_RATIO`, and `ON_SUPPORTS_MIN_XY_AREA_M2`.
+
 #### `near` versus contact
 
 `near(A,B)` means geometrically close. It does not assert touching, collision,
 reachability, or unobstructed access. `raw_contact` reports simulator contact;
 `collides_with` reports contact that survives benchmark collision filtering.
+
+`near` uses world-frame axis-aligned bounding boxes. Its effective parameters
+are exported once per episode under
+`benchmark_support/relation_parameters/near/`:
+
+- `horizontal_threshold_m`: maximum XY AABB-surface gap;
+- `vertical_margin_m`: margin added to the taller entity's height for the
+  vertical-center test;
+- `min_geometry_extent_m`: positive lower bound used for degenerate extents.
+
+The corresponding collection defaults are `0.10`, `0.08`, and `1e-6` metres.
+They can be overridden through the Make variables
+`NEAR_HORIZONTAL_THRESHOLD_M`, `NEAR_VERTICAL_MARGIN_M`, and
+`NEAR_MIN_GEOMETRY_EXTENT_M`. Consumers should read the exported values rather
+than assume the defaults.
 
 #### `reachable_by` versus contact or graspability
 
@@ -201,9 +229,29 @@ the occluder; therefore it does not yet export `occludes` edges.
 #### Containment
 
 Containment is a privileged geometric label. The source object's 3-D center
-must lie within the AABB envelope of an entity classified as a container.
+must lie within the tolerance-expanded AABB envelope of an entity classified
+as a container. This is center containment, not full-volume containment.
 `containment_valid[T,N,N]` and `contains_valid[T,N,N]` distinguish evaluated
 negative pairs from pairs for which containment is not applicable.
+
+The effective `center_tolerance_m` and container-label token vocabulary are
+exported under `benchmark_support/relation_parameters/in_contains/`. The
+tolerance can be overridden with `IN_CONTAINS_CENTER_TOLERANCE_M`; consumers
+should read the exported parameters instead of assuming the default `1e-4 m`.
+
+#### `held_by`
+
+`held_by(object,effector)` is contact-gated current grasp state. It requires an
+available object center and TCP pose, a closed gripper, simulator contact
+evidence between the object and that gripper, and an object-center-to-TCP
+distance no greater than the configured threshold. The default threshold is
+`0.16 m` and can be overridden with
+`HELD_BY_MAX_OBJECT_TCP_DISTANCE_M`.
+
+`held_by_valid[T,N,E]` distinguishes an evaluated negative from unavailable
+object or effector geometry. `grasped_by_code[T,N]` is derived exactly from the
+two arm columns (`-1`: neither, `0`: left, `1`: right, `2`: both). Effective
+parameters are exported under `benchmark_support/relation_parameters/held_by/`.
 
 ## Action vocabulary
 

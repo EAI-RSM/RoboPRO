@@ -62,6 +62,19 @@ planner_exclude_obstacles: false
 # MVP cost control: retain collision-aware IK semantics, explicitly marking
 # changed off-stride frames invalid instead of labeling them negative.
 benchmark_relations:
+  near:
+    horizontal_threshold_m: 0.10
+    vertical_margin_m: 0.08
+    min_geometry_extent_m: 1.0e-6
+  on_supports:
+    max_vertical_penetration_m: 0.03
+    max_vertical_separation_m: 0.06
+    min_xy_overlap_ratio: 0.20
+    min_xy_area_m2: 1.0e-8
+  in_contains:
+    center_tolerance_m: 1.0e-4
+  held_by:
+    max_object_tcp_distance_m: 0.16
   reachable_by:
     enabled: true
     frame_stride: 10

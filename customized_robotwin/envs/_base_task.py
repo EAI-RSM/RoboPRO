@@ -19,6 +19,30 @@ from .utils.policy_action_contract import (
     CONTRACT_VERSION as POLICY_ACTION_CONTRACT_VERSION,
     action_node_to_tool_call, provider_registry, resolve_provider, tool_schema,
 )
+from .utils.benchmark_relations import (
+    CANONICAL_RELATION_NAMES,
+    CONTAINER_LABEL_TOKENS,
+    IMPLEMENTED_BIPARTITE_RELATION_NAMES,
+    IMPLEMENTED_BINARY_RELATION_NAMES,
+    IMPLEMENTED_RELATION_NAMES,
+    IN_CONTAINS_CENTER_TOLERANCE_M,
+    HELD_BY_MAX_OBJECT_TCP_DISTANCE_M,
+    MIN_GEOMETRY_EXTENT_M,
+    NEAR_HORIZONTAL_THRESHOLD_M,
+    NEAR_VERTICAL_MARGIN_M,
+    ON_SUPPORTS_MAX_VERTICAL_PENETRATION_M,
+    ON_SUPPORTS_MAX_VERTICAL_SEPARATION_M,
+    ON_SUPPORTS_MIN_XY_AREA_M2,
+    ON_SUPPORTS_MIN_XY_OVERLAP_RATIO,
+    RelationName,
+    compute_held_by_relations,
+    compute_in_contains_relations,
+    compute_near_relations,
+    compute_on_supports_relations,
+    compute_xy_aabb_gap,
+    is_container_entry,
+    serialize_and_validate_relations,
+)
 import math
 from .robot import Robot
 from .camera import Camera
@@ -215,47 +239,19 @@ class Base_Task(gym.Env):
     BENCHMARK_ROBOT_NAME = "robot"
     BENCHMARK_LEFT_EE_NAME = "left_ee"
     BENCHMARK_RIGHT_EE_NAME = "right_ee"
-    BENCHMARK_CANONICAL_RELATION_NAMES = (
-        "on",
-        "in",
-        "supports",
-        "contains",
-        "held_by",
-        "near",
-        "blocks",
-        "occludes",
-        "reachable_by",
-        "contact_risk_with",
-        "collides_with",
-        "visible_to",
-        "part_of",
-    )
-    BENCHMARK_IMPLEMENTED_RELATION_NAMES = (
-        "on",
-        "in",
-        "supports",
-        "contains",
-        "held_by",
-        "near",
-        "reachable_by",
-        "collides_with",
-        "visible_to",
-        "part_of",
-    )
-    BENCHMARK_IMPLEMENTED_BINARY_RELATION_NAMES = (
-        "on",
-        "in",
-        "supports",
-        "contains",
-        "near",
-        "collides_with",
-        "part_of",
-    )
-    BENCHMARK_IMPLEMENTED_BIPARTITE_RELATION_NAMES = (
-        "held_by",
-        "reachable_by",
-        "visible_to",
-    )
+    BENCHMARK_CANONICAL_RELATION_NAMES = CANONICAL_RELATION_NAMES
+    BENCHMARK_IMPLEMENTED_RELATION_NAMES = IMPLEMENTED_RELATION_NAMES
+    BENCHMARK_IMPLEMENTED_BINARY_RELATION_NAMES = IMPLEMENTED_BINARY_RELATION_NAMES
+    BENCHMARK_IMPLEMENTED_BIPARTITE_RELATION_NAMES = IMPLEMENTED_BIPARTITE_RELATION_NAMES
+    BENCHMARK_NEAR_HORIZONTAL_THRESHOLD_M = NEAR_HORIZONTAL_THRESHOLD_M
+    BENCHMARK_NEAR_VERTICAL_MARGIN_M = NEAR_VERTICAL_MARGIN_M
+    BENCHMARK_NEAR_MIN_GEOMETRY_EXTENT_M = MIN_GEOMETRY_EXTENT_M
+    BENCHMARK_ON_SUPPORTS_MAX_VERTICAL_PENETRATION_M = ON_SUPPORTS_MAX_VERTICAL_PENETRATION_M
+    BENCHMARK_ON_SUPPORTS_MAX_VERTICAL_SEPARATION_M = ON_SUPPORTS_MAX_VERTICAL_SEPARATION_M
+    BENCHMARK_ON_SUPPORTS_MIN_XY_OVERLAP_RATIO = ON_SUPPORTS_MIN_XY_OVERLAP_RATIO
+    BENCHMARK_ON_SUPPORTS_MIN_XY_AREA_M2 = ON_SUPPORTS_MIN_XY_AREA_M2
+    BENCHMARK_IN_CONTAINS_CENTER_TOLERANCE_M = IN_CONTAINS_CENTER_TOLERANCE_M
+    BENCHMARK_HELD_BY_MAX_OBJECT_TCP_DISTANCE_M = HELD_BY_MAX_OBJECT_TCP_DISTANCE_M
     BENCHMARK_AUXILIARY_RELATION_STATE_NAMES = (
         "raw_contact",
         "grasped_by_code",
@@ -429,6 +425,20 @@ class Base_Task(gym.Env):
         self._benchmark_held_object_ids = {"left": None, "right": None}
         self._benchmark_held_object_state_known = {"left": False, "right": False}
         relation_config = kwags.get("benchmark_relations", {}) or {}
+        near_config = relation_config.get("near", {}) or {}
+        self._benchmark_near_config = self._resolve_benchmark_near_config(near_config)
+        on_supports_config = relation_config.get("on_supports", {}) or {}
+        self._benchmark_on_supports_config = self._resolve_benchmark_on_supports_config(
+            on_supports_config
+        )
+        in_contains_config = relation_config.get("in_contains", {}) or {}
+        self._benchmark_in_contains_config = self._resolve_benchmark_in_contains_config(
+            in_contains_config
+        )
+        held_by_config = relation_config.get("held_by", {}) or {}
+        self._benchmark_held_by_config = self._resolve_benchmark_held_by_config(
+            held_by_config
+        )
         reachability_config = relation_config.get("reachable_by", {}) or {}
         self._benchmark_reachability_config = {
             "enabled": bool(reachability_config.get("enabled", True)),
@@ -438,6 +448,94 @@ class Base_Task(gym.Env):
             "pose_round_decimals": max(0, int(reachability_config.get("pose_round_decimals", 3))),
         }
         self._benchmark_reachability_cache = None
+
+    @classmethod
+    def _resolve_benchmark_near_config(cls, config):
+        resolved = {
+            "horizontal_threshold_m": float(
+                config.get("horizontal_threshold_m", cls.BENCHMARK_NEAR_HORIZONTAL_THRESHOLD_M)
+            ),
+            "vertical_margin_m": float(
+                config.get("vertical_margin_m", cls.BENCHMARK_NEAR_VERTICAL_MARGIN_M)
+            ),
+            "min_geometry_extent_m": float(
+                config.get(
+                    "min_geometry_extent_m",
+                    cls.BENCHMARK_NEAR_MIN_GEOMETRY_EXTENT_M,
+                )
+            ),
+        }
+        for name in ("horizontal_threshold_m", "vertical_margin_m"):
+            value = resolved[name]
+            if not np.isfinite(value) or value < 0:
+                raise ValueError(f"benchmark_relations.near.{name} must be finite and >= 0")
+        value = resolved["min_geometry_extent_m"]
+        if not np.isfinite(value) or value <= 0:
+            raise ValueError(
+                "benchmark_relations.near.min_geometry_extent_m must be finite and > 0"
+            )
+        return resolved
+
+    @classmethod
+    def _resolve_benchmark_on_supports_config(cls, config):
+        resolved = {
+            "max_vertical_penetration_m": float(config.get(
+                "max_vertical_penetration_m",
+                cls.BENCHMARK_ON_SUPPORTS_MAX_VERTICAL_PENETRATION_M,
+            )),
+            "max_vertical_separation_m": float(config.get(
+                "max_vertical_separation_m",
+                cls.BENCHMARK_ON_SUPPORTS_MAX_VERTICAL_SEPARATION_M,
+            )),
+            "min_xy_overlap_ratio": float(config.get(
+                "min_xy_overlap_ratio",
+                cls.BENCHMARK_ON_SUPPORTS_MIN_XY_OVERLAP_RATIO,
+            )),
+            "min_xy_area_m2": float(config.get(
+                "min_xy_area_m2",
+                cls.BENCHMARK_ON_SUPPORTS_MIN_XY_AREA_M2,
+            )),
+        }
+        for name in ("max_vertical_penetration_m", "max_vertical_separation_m"):
+            if not np.isfinite(resolved[name]) or resolved[name] < 0:
+                raise ValueError(f"benchmark_relations.on_supports.{name} must be finite and >= 0")
+        overlap = resolved["min_xy_overlap_ratio"]
+        if not np.isfinite(overlap) or not 0 <= overlap <= 1:
+            raise ValueError(
+                "benchmark_relations.on_supports.min_xy_overlap_ratio must be in [0, 1]"
+            )
+        area = resolved["min_xy_area_m2"]
+        if not np.isfinite(area) or area <= 0:
+            raise ValueError(
+                "benchmark_relations.on_supports.min_xy_area_m2 must be finite and > 0"
+            )
+        return resolved
+
+    @classmethod
+    def _resolve_benchmark_in_contains_config(cls, config):
+        tolerance = float(config.get(
+            "center_tolerance_m",
+            cls.BENCHMARK_IN_CONTAINS_CENTER_TOLERANCE_M,
+        ))
+        if not np.isfinite(tolerance) or tolerance < 0:
+            raise ValueError(
+                "benchmark_relations.in_contains.center_tolerance_m "
+                "must be finite and >= 0"
+            )
+        return {"center_tolerance_m": tolerance}
+
+    @classmethod
+    def _resolve_benchmark_held_by_config(cls, config):
+        distance = float(config.get(
+            "max_object_tcp_distance_m",
+            cls.BENCHMARK_HELD_BY_MAX_OBJECT_TCP_DISTANCE_M,
+        ))
+        if not np.isfinite(distance) or distance < 0:
+            raise ValueError(
+                "benchmark_relations.held_by.max_object_tcp_distance_m "
+                "must be finite and >= 0"
+            )
+        return {"max_object_tcp_distance_m": distance}
 
     def set_benchmark_export_context(self, task_config=None, config_snapshot=None, bench_subdir=None):
         self._ensure_benchmark_export_state()
@@ -455,6 +553,20 @@ class Base_Task(gym.Env):
             provider_config.get("config_ref"),
         )
         relation_config = resolved_config.get("benchmark_relations", {}) or {}
+        near_config = relation_config.get("near", {}) or {}
+        self._benchmark_near_config = self._resolve_benchmark_near_config(near_config)
+        on_supports_config = relation_config.get("on_supports", {}) or {}
+        self._benchmark_on_supports_config = self._resolve_benchmark_on_supports_config(
+            on_supports_config
+        )
+        in_contains_config = relation_config.get("in_contains", {}) or {}
+        self._benchmark_in_contains_config = self._resolve_benchmark_in_contains_config(
+            in_contains_config
+        )
+        held_by_config = relation_config.get("held_by", {}) or {}
+        self._benchmark_held_by_config = self._resolve_benchmark_held_by_config(
+            held_by_config
+        )
         reachability_config = relation_config.get("reachable_by", {}) or {}
         self._benchmark_reachability_config = {
             "enabled": bool(reachability_config.get("enabled", True)),
@@ -939,67 +1051,8 @@ class Base_Task(gym.Env):
         return None
 
     @staticmethod
-    def _compute_benchmark_xy_overlap_ratio(upper_aabb, lower_aabb) -> float:
-        upper_min, upper_max = upper_aabb
-        lower_min, lower_max = lower_aabb
-        overlap_x = max(0.0, min(float(upper_max[0]), float(lower_max[0])) - max(float(upper_min[0]), float(lower_min[0])))
-        overlap_y = max(0.0, min(float(upper_max[1]), float(lower_max[1])) - max(float(upper_min[1]), float(lower_min[1])))
-        overlap_area = overlap_x * overlap_y
-        upper_area = max(
-            (float(upper_max[0]) - float(upper_min[0])) * (float(upper_max[1]) - float(upper_min[1])),
-            1e-8,
-        )
-        return overlap_area / upper_area
-
-    @staticmethod
-    def _compute_benchmark_xy_gap(aabb_a, aabb_b) -> float:
-        min_a, max_a = aabb_a
-        min_b, max_b = aabb_b
-        gap_x = max(0.0, max(float(min_a[0]) - float(max_b[0]), float(min_b[0]) - float(max_a[0])))
-        gap_y = max(0.0, max(float(min_a[1]) - float(max_b[1]), float(min_b[1]) - float(max_a[1])))
-        return float(np.hypot(gap_x, gap_y))
-
-    def _is_benchmark_supported_by(self, upper_aabb, lower_aabb) -> bool:
-        upper_min, upper_max = upper_aabb
-        lower_min, lower_max = lower_aabb
-        vertical_gap = float(upper_min[2] - lower_max[2])
-        if vertical_gap < -0.03 or vertical_gap > 0.06:
-            return False
-
-        upper_center_z = 0.5 * float(upper_min[2] + upper_max[2])
-        lower_center_z = 0.5 * float(lower_min[2] + lower_max[2])
-        if upper_center_z <= lower_center_z:
-            return False
-
-        return self._compute_benchmark_xy_overlap_ratio(upper_aabb, lower_aabb) >= 0.2
-
-    @staticmethod
     def _is_benchmark_container_entry(entry: dict) -> bool:
-        """Return whether a catalog object is a plausible physical container."""
-        label = " ".join(
-            str(entry.get(field) or "").lower()
-            for field in ("name", "semantic_label", "asset_ref")
-        )
-        return any(
-            token in label
-            for token in (
-                "basket", "bin", "box", "cabinet", "drawer", "fridge",
-                "microwave", "sink", "bowl", "cup", "fileholder",
-                "file_holder", "dishrack", "trash", "container",
-            )
-        )
-
-    @staticmethod
-    def _is_benchmark_inside(object_aabb, container_aabb) -> bool:
-        """Conservatively test whether an object's center is in a container volume."""
-        object_min, object_max = object_aabb
-        container_min, container_max = container_aabb
-        center = 0.5 * (np.asarray(object_min) + np.asarray(object_max))
-        tolerance = 1e-4
-        return bool(
-            np.all(center >= np.asarray(container_min) - tolerance)
-            and np.all(center <= np.asarray(container_max) + tolerance)
-        )
+        return is_container_entry(entry)
 
     def _infer_benchmark_destination_object_id(self, target_pose, excluded_entity=None):
         """Resolve placement provenance from geometry, rejecting ambiguous scenes."""
@@ -1243,14 +1296,7 @@ class Base_Task(gym.Env):
         object_ids = np.array([int(entry["object_id"]) for entry in object_catalog], dtype=np.int64)
         object_count = len(object_catalog)
         raw_contact = np.zeros((object_count, object_count), dtype=np.bool_)
-        near = np.zeros((object_count, object_count), dtype=np.bool_)
-        supports_from = np.zeros((object_count, object_count), dtype=np.bool_)
         part_of = np.zeros((object_count, object_count), dtype=np.bool_)
-        grasped_by_code = np.full((object_count,), -1, dtype=np.int8)
-        held_by = np.zeros((object_count, 2), dtype=np.bool_)
-        in_relation = np.zeros((object_count, object_count), dtype=np.bool_)
-        containment_valid = np.zeros_like(in_relation)
-
         left_gripper_names = set(getattr(self.robot, "left_fix_gripper_name", []))
         right_gripper_names = set(getattr(self.robot, "right_fix_gripper_name", []))
         for joint, _, _ in getattr(self.robot, "left_gripper", []):
@@ -1303,40 +1349,19 @@ class Base_Task(gym.Env):
             if object_id1 in index_by_id and name0 in right_gripper_names:
                 right_contact[index_by_id[object_id1]] = True
 
-        for i in range(object_count):
-            object_id_i = int(object_ids[i])
-            aabb_i = aabb_by_id.get(object_id_i)
-            if aabb_i is None:
-                continue
-            min_i, max_i = aabb_i
-            center_i = 0.5 * (min_i + max_i)
-            extent_i = np.maximum(max_i - min_i, 1e-6)
-
-            for j in range(i + 1, object_count):
-                object_id_j = int(object_ids[j])
-                aabb_j = aabb_by_id.get(object_id_j)
-                if aabb_j is None:
-                    continue
-                min_j, max_j = aabb_j
-                center_j = 0.5 * (min_j + max_j)
-                extent_j = np.maximum(max_j - min_j, 1e-6)
-
-                horizontal_gap = self._compute_benchmark_xy_gap(aabb_i, aabb_j)
-                vertical_center_gap = abs(float(center_i[2] - center_j[2]))
-                vertical_tolerance = max(float(extent_i[2]), float(extent_j[2])) + 0.08
-                if horizontal_gap <= 0.10 and vertical_center_gap <= vertical_tolerance:
-                    near[i, j] = True
-                    near[j, i] = True
-
-                if raw_contact[i, j]:
-                    if self._is_benchmark_supported_by(aabb_i, aabb_j):
-                        supports_from[i, j] = True
-                    if self._is_benchmark_supported_by(aabb_j, aabb_i):
-                        supports_from[j, i] = True
+        near_config = getattr(
+            self, "_benchmark_near_config",
+            self._resolve_benchmark_near_config({}),
+        )
+        near = compute_near_relations(
+            object_ids,
+            aabb_by_id,
+            **near_config,
+        )
 
         left_tcp, left_closed = self._get_benchmark_effector_state("left")
         right_tcp, right_closed = self._get_benchmark_effector_state("right")
-
+        center_by_id = {}
         for i, object_id in enumerate(object_ids.tolist()):
             entity = actor_by_id.get(int(object_id))
             if entity is None:
@@ -1344,48 +1369,41 @@ class Base_Task(gym.Env):
             entity_pose = self._get_benchmark_entity_pose(entity)
             if entity_pose is None:
                 continue
-            center = np.array(entity_pose.p, dtype=np.float64)
-            left_held = (
-                left_tcp is not None
-                and left_closed
-                and left_contact[i]
-                and float(np.linalg.norm(center - left_tcp)) <= 0.16
-            )
-            right_held = (
-                right_tcp is not None
-                and right_closed
-                and right_contact[i]
-                and float(np.linalg.norm(center - right_tcp)) <= 0.16
-            )
-            held_by[i, 0] = left_held
-            held_by[i, 1] = right_held
-            if left_held and right_held:
-                grasped_by_code[i] = 2
-            elif left_held:
-                grasped_by_code[i] = 0
-            elif right_held:
-                grasped_by_code[i] = 1
+            center_by_id[int(object_id)] = np.array(entity_pose.p, dtype=np.float64)
+        held_by_config = getattr(
+            self, "_benchmark_held_by_config",
+            self._resolve_benchmark_held_by_config({}),
+        )
+        held_by, held_by_valid, grasped_by_code = compute_held_by_relations(
+            object_ids,
+            center_by_id,
+            np.asarray([left_tcp, right_tcp], dtype=np.float64),
+            np.asarray([left_closed, right_closed], dtype=np.bool_),
+            np.column_stack((left_contact, right_contact)),
+            **held_by_config,
+        )
 
-        on = supports_from.copy()
-        supports = supports_from.T.copy()
-        for container_idx, container_entry in enumerate(object_catalog):
-            if not self._is_benchmark_container_entry(container_entry):
-                continue
-            container_aabb = aabb_by_id.get(int(container_entry["object_id"]))
-            if container_aabb is None:
-                continue
-            for object_idx, object_entry in enumerate(object_catalog):
-                if object_idx == container_idx:
-                    continue
-                object_aabb = aabb_by_id.get(int(object_entry["object_id"]))
-                if object_aabb is None:
-                    continue
-                containment_valid[object_idx, container_idx] = True
-                in_relation[object_idx, container_idx] = self._is_benchmark_inside(
-                    object_aabb, container_aabb
-                )
-        contains = in_relation.T.copy()
-        contains_valid = containment_valid.T.copy()
+        on_supports_config = getattr(
+            self, "_benchmark_on_supports_config",
+            self._resolve_benchmark_on_supports_config({}),
+        )
+        on, supports = compute_on_supports_relations(
+            object_ids,
+            aabb_by_id,
+            raw_contact,
+            **on_supports_config,
+        )
+        in_contains_config = getattr(
+            self, "_benchmark_in_contains_config",
+            self._resolve_benchmark_in_contains_config({}),
+        )
+        in_relation, contains, containment_valid, contains_valid = (
+            compute_in_contains_relations(
+                object_catalog,
+                aabb_by_id,
+                **in_contains_config,
+            )
+        )
 
         visible_to, visible_to_valid, visible_pixel_count, camera_names = (
             self._build_benchmark_visibility_relations(object_catalog, actor_by_id)
@@ -1406,30 +1424,34 @@ class Base_Task(gym.Env):
         if robot_idx is not None and right_ee_idx is not None:
             part_of[right_ee_idx, robot_idx] = True
 
+        relations = serialize_and_validate_relations({
+            RelationName.ON: on,
+            RelationName.IN: in_relation,
+            RelationName.SUPPORTS: supports,
+            RelationName.CONTAINS: contains,
+            RelationName.HELD_BY: held_by,
+            RelationName.NEAR: near,
+            RelationName.REACHABLE_BY: reachable_by,
+            RelationName.COLLIDES_WITH: collides_with,
+            RelationName.VISIBLE_TO: visible_to,
+            RelationName.PART_OF: part_of,
+        }, object_count=object_count)
         return {
             "object_ids": object_ids,
             "raw_contact": raw_contact,
-            "near": near,
             "grasped_by_code": grasped_by_code,
-            "on": on,
-            "in": in_relation,
-            "supports": supports,
-            "contains": contains,
+            "held_by_valid": held_by_valid,
             "containment_valid": containment_valid,
             "contains_valid": contains_valid,
-            "collides_with": collides_with,
-            "held_by": held_by,
-            "reachable_by": reachable_by,
             "reachable_by_valid": reachable_by_valid,
             "reachable_by_evaluated": np.bool_(reachable_by_evaluated),
             "reachable_by_effector_names": np.array(
                 [self.BENCHMARK_LEFT_EE_NAME, self.BENCHMARK_RIGHT_EE_NAME], dtype="S32"
             ),
-            "visible_to": visible_to,
             "visible_to_valid": visible_to_valid,
             "visible_pixel_count": visible_pixel_count,
             "visible_to_camera_names": np.array(camera_names, dtype="S64"),
-            "part_of": part_of,
+            **relations,
             "held_by_effector_names": np.array([self.BENCHMARK_LEFT_EE_NAME, self.BENCHMARK_RIGHT_EE_NAME], dtype="S32"),
             "canonical_relation_names": np.array(self.BENCHMARK_CANONICAL_RELATION_NAMES, dtype="S32"),
             "implemented_relation_names": np.array(self.BENCHMARK_IMPLEMENTED_RELATION_NAMES, dtype="S32"),
@@ -1466,15 +1488,54 @@ class Base_Task(gym.Env):
             }
         )
 
-    @staticmethod
-    def _benchmark_entity_object_id(entity):
-        raw_entity = getattr(entity, "actor", entity)
-        object_id = getattr(raw_entity, "per_scene_id", None)
-        if object_id is None and hasattr(raw_entity, "get_links"):
-            links = raw_entity.get_links()
+    def _benchmark_entity_object_id(self, entity):
+        if entity is None:
+            return None
+
+        candidates = (
+            getattr(entity, "actor", None),
+            getattr(entity, "entity", None),
+            entity,
+        )
+        for candidate in candidates:
+            if candidate is None:
+                continue
+            object_id = getattr(candidate, "per_scene_id", None)
+            if object_id is not None:
+                return int(object_id)
+            if hasattr(candidate, "get_links"):
+                links = list(candidate.get_links())
+                root = getattr(links[0], "entity", None) if links else None
+                object_id = getattr(root, "per_scene_id", None)
+                if object_id is not None:
+                    return int(object_id)
+
+        get_name = getattr(entity, "get_name", None)
+        name = get_name() if callable(get_name) else getattr(entity, "name", None)
+        if not name or not hasattr(self, "scene"):
+            return None
+
+        matching_ids = set()
+        for scene_actor in self.scene.get_all_actors():
+            if scene_actor.get_name() != name:
+                continue
+            object_id = getattr(scene_actor, "per_scene_id", None)
+            if object_id is not None:
+                matching_ids.add(int(object_id))
+        for articulation in self.scene.get_all_articulations():
+            if articulation.get_name() != name:
+                continue
+            links = list(articulation.get_links())
             root = getattr(links[0], "entity", None) if links else None
             object_id = getattr(root, "per_scene_id", None)
-        return None if object_id is None else int(object_id)
+            if object_id is not None:
+                matching_ids.add(int(object_id))
+        if len(matching_ids) > 1:
+            raise ValueError(
+                f"Benchmark entity name {name!r} is ambiguous across object ids "
+                f"{sorted(matching_ids)}"
+            )
+        return next(iter(matching_ids), None)
 
     def _benchmark_articulation_by_object_id(self, object_id):
         if object_id is None or not hasattr(self, "scene"):
@@ -1774,6 +1835,81 @@ class Base_Task(gym.Env):
             f.attrs["success"] = -1 if success_value is None else int(bool(success_value))
 
             export_group = f.require_group("benchmark_support")
+
+            if "relation_parameters" in export_group:
+                del export_group["relation_parameters"]
+            relation_parameters = export_group.create_group("relation_parameters")
+            near_parameters = relation_parameters.create_group("near")
+            near_config = getattr(
+                self, "_benchmark_near_config",
+                self._resolve_benchmark_near_config({}),
+            )
+            for parameter_name, parameter_value in near_config.items():
+                near_parameters.create_dataset(
+                    parameter_name, data=np.float64(parameter_value)
+                )
+            near_parameters.attrs["units"] = "metres"
+            near_parameters.attrs["geometry"] = "world_axis_aligned_bounding_boxes"
+            near_parameters.attrs["definition"] = (
+                "xy_aabb_gap <= horizontal_threshold_m and "
+                "vertical_center_gap <= max_object_height + vertical_margin_m"
+            )
+            on_supports_parameters = relation_parameters.create_group("on_supports")
+            on_supports_config = getattr(
+                self, "_benchmark_on_supports_config",
+                self._resolve_benchmark_on_supports_config({}),
+            )
+            for parameter_name, parameter_value in on_supports_config.items():
+                on_supports_parameters.create_dataset(
+                    parameter_name, data=np.float64(parameter_value)
+                )
+            on_supports_parameters.attrs["length_units"] = "metres"
+            on_supports_parameters.attrs["area_units"] = "square_metres"
+            on_supports_parameters.attrs["contact_gated"] = True
+            on_supports_parameters.attrs["definition"] = (
+                "on(upper,lower) requires raw_contact, upper center above lower center, "
+                "bounded vertical gap, and sufficient upper-relative XY overlap; "
+                "supports is the exact transpose"
+            )
+            in_contains_parameters = relation_parameters.create_group("in_contains")
+            in_contains_config = getattr(
+                self, "_benchmark_in_contains_config",
+                self._resolve_benchmark_in_contains_config({}),
+            )
+            in_contains_parameters.create_dataset(
+                "center_tolerance_m",
+                data=np.float64(in_contains_config["center_tolerance_m"]),
+            )
+            in_contains_parameters.create_dataset(
+                "container_label_tokens",
+                data=np.asarray(CONTAINER_LABEL_TOKENS, dtype=object),
+                dtype=string_dtype,
+            )
+            in_contains_parameters.attrs["units"] = "metres"
+            in_contains_parameters.attrs["geometry"] = (
+                "source_aabb_center_inside_destination_world_aabb"
+            )
+            in_contains_parameters.attrs["definition"] = (
+                "in(source,destination) is evaluated only for destinations whose "
+                "catalog labels match a container token; contains is the exact transpose"
+            )
+
+            held_by_parameters = relation_parameters.create_group("held_by")
+            held_by_config = getattr(
+                self, "_benchmark_held_by_config",
+                self._resolve_benchmark_held_by_config({}),
+            )
+            held_by_parameters.create_dataset(
+                "max_object_tcp_distance_m",
+                data=np.float64(held_by_config["max_object_tcp_distance_m"]),
+            )
+            held_by_parameters.attrs["units"] = "metres"
+            held_by_parameters.attrs["contact_gated"] = True
+            held_by_parameters.attrs["requires_closed_gripper"] = True
+            held_by_parameters.attrs["definition"] = (
+                "held_by(object,effector) requires a closed gripper, simulator "
+                "contact evidence, and object-center-to-TCP distance within the threshold"
+            )
 
             object_state_group = export_group.get("object_state")
             if object_state_group is not None:
@@ -4044,6 +4180,8 @@ class Base_Task(gym.Env):
         constraint_pose: list = None,
         benchmark_action: str = None,
         benchmark_target_entity=None,
+        benchmark_destination_entity=None,
+        benchmark_phase: str = None,
         interaction_part: str = None,
         articulation_joint_index: int = None,
     ):
@@ -4078,10 +4216,17 @@ class Base_Task(gym.Env):
         )
         if "benchmark_target_object_id" not in target_meta:
             target_meta["benchmark_target_object_id"] = held_id
+        if benchmark_destination_entity is not None:
+            destination_id = self._benchmark_entity_object_id(benchmark_destination_entity)
+            if destination_id is None:
+                raise ValueError("Explicit benchmark_destination_entity has no object id")
+            target_meta["benchmark_destination_object_id"] = destination_id
+        if benchmark_phase is None:
+            benchmark_phase = "final_descent" if action_type == "place" else "transition"
         return arm_tag, [Action(
             arm_tag, "move", target_pose=origin_pose,
             benchmark_action=action_type,
-            benchmark_phase="transition",
+            benchmark_phase=benchmark_phase,
             **target_meta,
             displacement={"x": x, "y": y, "z": z, "move_axis": move_axis},
         )]
@@ -4120,11 +4265,19 @@ class Base_Task(gym.Env):
             **target_meta,
         )]
 
-    def open_gripper(self, arm_tag: ArmTag, pos: float = 1.0):
+    def open_gripper(
+        self,
+        arm_tag: ArmTag,
+        pos: float = 1.0,
+        benchmark_target_entity=None,
+    ):
+        target_meta = self._benchmark_action_target_metadata(benchmark_target_entity)
+        if "benchmark_target_object_id" not in target_meta:
+            target_meta["benchmark_target_object_id"] = self._benchmark_held_object_id(arm_tag)
         return arm_tag, [Action(
             arm_tag, "open", target_gripper_pos=pos,
             benchmark_action="release", benchmark_phase="final_descent",
-            benchmark_target_object_id=self._benchmark_held_object_id(arm_tag),
+            **target_meta,
         )]
 
     def back_to_origin(self, arm_tag: ArmTag):

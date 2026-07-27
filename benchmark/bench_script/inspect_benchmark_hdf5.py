@@ -92,6 +92,7 @@ def _summarize_benchmark_support(root: h5py.File) -> None:
     on_matrix = None
     collides_with = None
     held_by = None
+    held_by_valid = None
     part_of = None
 
     if "scenario_metadata" in support:
@@ -214,6 +215,110 @@ def _summarize_benchmark_support(root: h5py.File) -> None:
                 parent = int(parent_index[idx]) if parent_index is not None else -1
                 print(f"      [{idx}] side={side} chain_index={chain_pos} parent_index={parent} name={link_names[idx]}")
 
+    if "relation_parameters" in support:
+        parameters = support["relation_parameters"]
+        print("  relation_parameters:")
+        if "near" in parameters:
+            near_parameters = parameters["near"]
+            expected = (
+                "horizontal_threshold_m",
+                "vertical_margin_m",
+                "min_geometry_extent_m",
+            )
+            values = {
+                name: float(near_parameters[name][()])
+                for name in expected
+                if name in near_parameters
+            }
+            print(f"    near: {values}")
+            checks = {
+                "near parameter fields complete": set(values) == set(expected),
+                "near parameters are finite": all(np.isfinite(value) for value in values.values()),
+                "near thresholds are non-negative": all(
+                    values.get(name, -1.0) >= 0
+                    for name in ("horizontal_threshold_m", "vertical_margin_m")
+                ),
+                "near minimum extent is positive": values.get("min_geometry_extent_m", 0.0) > 0,
+            }
+            _record_checks(checks, failures)
+        if "on_supports" in parameters:
+            support_parameters = parameters["on_supports"]
+            expected = (
+                "max_vertical_penetration_m",
+                "max_vertical_separation_m",
+                "min_xy_overlap_ratio",
+                "min_xy_area_m2",
+            )
+            values = {
+                name: float(support_parameters[name][()])
+                for name in expected
+                if name in support_parameters
+            }
+            print(f"    on_supports: {values}")
+            checks = {
+                "on/supports parameter fields complete": set(values) == set(expected),
+                "on/supports parameters are finite": all(
+                    np.isfinite(value) for value in values.values()
+                ),
+                "on/supports vertical tolerances are non-negative": all(
+                    values.get(name, -1.0) >= 0
+                    for name in (
+                        "max_vertical_penetration_m",
+                        "max_vertical_separation_m",
+                    )
+                ),
+                "on/supports overlap ratio is in [0,1]": (
+                    0 <= values.get("min_xy_overlap_ratio", -1.0) <= 1
+                ),
+                "on/supports minimum area is positive": (
+                    values.get("min_xy_area_m2", 0.0) > 0
+                ),
+            }
+            _record_checks(checks, failures)
+        if "in_contains" in parameters:
+            containment_parameters = parameters["in_contains"]
+            tolerance = (
+                float(containment_parameters["center_tolerance_m"][()])
+                if "center_tolerance_m" in containment_parameters else None
+            )
+            tokens = (
+                _decode_string_array(containment_parameters["container_label_tokens"])
+                if "container_label_tokens" in containment_parameters else []
+            )
+            print(
+                "    in_contains: "
+                f"center_tolerance_m={tolerance}, container_label_tokens={tokens}"
+            )
+            checks = {
+                "in/contains center tolerance exists": tolerance is not None,
+                "in/contains center tolerance is finite and non-negative": (
+                    tolerance is not None and np.isfinite(tolerance) and tolerance >= 0
+                ),
+                "in/contains container token vocabulary is non-empty": bool(tokens),
+                "in/contains container tokens are unique": len(tokens) == len(set(tokens)),
+            }
+            _record_checks(checks, failures)
+        if "held_by" in parameters:
+            held_parameters = parameters["held_by"]
+            distance = (
+                float(held_parameters["max_object_tcp_distance_m"][()])
+                if "max_object_tcp_distance_m" in held_parameters else None
+            )
+            print(f"    held_by: max_object_tcp_distance_m={distance}")
+            checks = {
+                "held_by maximum object-TCP distance exists": distance is not None,
+                "held_by maximum object-TCP distance is finite and non-negative": (
+                    distance is not None and np.isfinite(distance) and distance >= 0
+                ),
+                "held_by is marked contact-gated": bool(
+                    held_parameters.attrs.get("contact_gated", False)
+                ),
+                "held_by is marked closed-gripper-gated": bool(
+                    held_parameters.attrs.get("requires_closed_gripper", False)
+                ),
+            }
+            _record_checks(checks, failures)
+
     if "relation_state" in support:
         state = support["relation_state"]
         print("  relation_state:")
@@ -230,6 +335,7 @@ def _summarize_benchmark_support(root: h5py.File) -> None:
         contains_valid = state["contains_valid"][()] if "contains_valid" in state else None
         collides_with = state["collides_with"][()] if "collides_with" in state else None
         held_by = state["held_by"][()] if "held_by" in state else None
+        held_by_valid = state["held_by_valid"][()] if "held_by_valid" in state else None
         reachable_by = state["reachable_by"][()] if "reachable_by" in state else None
         reachable_by_valid = state["reachable_by_valid"][()] if "reachable_by_valid" in state else None
         reachable_by_evaluated = state["reachable_by_evaluated"][()] if "reachable_by_evaluated" in state else None
@@ -322,6 +428,21 @@ def _summarize_benchmark_support(root: h5py.File) -> None:
             )
         if held_by is not None:
             checks["held_by dims are (T,N,E)"] = held_by.ndim == 3
+        if held_by_valid is not None:
+            checks["held_by_valid matches held_by shape"] = (
+                held_by is not None and held_by_valid.shape == held_by.shape
+            )
+            checks["true held_by edges are valid"] = (
+                held_by is not None and np.all(np.logical_or(~held_by, held_by_valid))
+            )
+        if held_by is not None and grasped_by_code is not None:
+            expected_codes = np.full(held_by.shape[:2], -1, dtype=np.int8)
+            expected_codes[np.logical_and(held_by[:, :, 0], ~held_by[:, :, 1])] = 0
+            expected_codes[np.logical_and(~held_by[:, :, 0], held_by[:, :, 1])] = 1
+            expected_codes[np.logical_and(held_by[:, :, 0], held_by[:, :, 1])] = 2
+            checks["grasped_by_code matches held_by"] = np.array_equal(
+                grasped_by_code, expected_codes
+            )
         if reachable_by is not None:
             checks["reachable_by dims are (T,N,E)"] = reachable_by.ndim == 3
         if reachable_by_valid is not None:
