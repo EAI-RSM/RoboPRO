@@ -10,15 +10,18 @@ Obstacle-attention variant — primary source is the HuggingFace raw expert dump
     huggingface-cli download mzxuan/robopro_expert --repo-type dataset \\
         --local-dir /path/to/robopro_expert
 
-Then bake obstacle/beta/target/dest masks into a LeRobot dataset. Beta proximity
-weights come from in-repo ``scripts/precompute_beta_weights.py``; pass
-``--precompute-beta`` to run that first if caches are missing:
+Then bake obstacle/beta/target/dest masks into a LeRobot dataset. The existing
+obstacle/target fields are contact-localized from demonstrated motion; beta
+proximity weights and object-local anchors come from
+``scripts/precompute_beta_weights.py``. Pass ``--precompute-beta`` to generate or
+upgrade those caches:
 
     uv run python scripts/precompute_beta_weights.py --data-root /path/to/robopro_expert
 
     uv run examples/aloha_real/convert_aloha_data_to_lerobot_robotwin.py grounding \\
         --raw-dir /path/to/robopro_expert --repo-id local/robopro_expert \\
-        --precompute-beta
+        --precompute-beta --attention-mask-mode contact \\
+        --contact-audit-dir ./contact_audit
 """
 
 import dataclasses
@@ -39,6 +42,11 @@ import json
 import os
 import sys
 import fnmatch
+
+_SCRIPTS_DIR = Path(__file__).resolve().parents[2] / "scripts"
+if str(_SCRIPTS_DIR) not in sys.path:
+    sys.path.insert(0, str(_SCRIPTS_DIR))
+import beta_geometry as _bg  # noqa: E402
 
 
 @dataclasses.dataclass(frozen=True)
@@ -348,6 +356,31 @@ def _episode_role_ids(scene_info_path: str, ep_idx: int) -> tuple[int, int]:
     return target_id, dest_id
 
 
+def _stage_role_ids(cfg_dir: str, ep_idx: int) -> tuple[np.ndarray | None, np.ndarray | None]:
+    """Per-frame target/object-destination ids from RoboPRO masking sidecars."""
+    path = Path(cfg_dir) / "masking" / f"episode{ep_idx}.json"
+    if not path.is_file():
+        return None, None
+    with path.open() as f:
+        data = json.load(f)
+    target_by_stage = {
+        int(stage["stage"]): int(stage["target_id"])
+        for stage in data.get("stages", [])
+        if stage.get("target_id") is not None
+    }
+    dest_by_stage = {
+        int(stage["stage"]): int(stage["bin"]["bin_id"])
+        for stage in data.get("stages", [])
+        if (stage.get("bin") or {}).get("bin_id") is not None
+    }
+    frame_stage = data.get("frame_stage")
+    if not frame_stage:
+        return None, None
+    target = np.asarray([target_by_stage.get(int(s), -1) for s in frame_stage], dtype=np.int64)
+    dest = np.asarray([dest_by_stage.get(int(s), -1) for s in frame_stage], dtype=np.int64)
+    return target, dest
+
+
 def _resize_with_pad_nearest(mask: np.ndarray, height: int, width: int) -> np.ndarray:
     """numpy/cv2 equivalent of openpi image_tools.resize_with_pad (nearest, pad=0).
 
@@ -366,6 +399,19 @@ def _resize_with_pad_nearest(mask: np.ndarray, height: int, width: int) -> np.nd
     return np.pad(resized, ((pad_h0, pad_h1), (pad_w0, pad_w1)), constant_values=0.0)
 
 
+def _resize_rgb_with_pad(image: np.ndarray, height: int, width: int) -> np.ndarray:
+    """Aspect-preserving RGB resize matching `_resize_with_pad_nearest` geometry."""
+    cur_h, cur_w = image.shape[:2]
+    ratio = max(cur_h / height, cur_w / width)
+    resized_h = max(1, int(cur_h / ratio))
+    resized_w = max(1, int(cur_w / ratio))
+    resized = cv2.resize(image, (resized_w, resized_h), interpolation=cv2.INTER_LINEAR)
+    out = np.zeros((height, width, 3), dtype=resized.dtype)
+    y0, x0 = (height - resized_h) // 2, (width - resized_w) // 2
+    out[y0 : y0 + resized_h, x0 : x0 + resized_w] = resized
+    return out
+
+
 def _decode_seg_frame(seg_ds, frame_idx: int) -> np.ndarray:
     """Decode a PNG-encoded uint16 actor-id map for one frame -> [H, W] uint16."""
     buf = np.frombuffer(seg_ds[frame_idx], dtype=np.uint8)
@@ -377,20 +423,120 @@ def _decode_rgb_frame(rgb_ds, frame_idx: int) -> np.ndarray:
     return cv2.imdecode(buf, cv2.IMREAD_COLOR)
 
 
+def _bbox_frame(raw_h5: h5py.File, frame_idx: int):
+    """Return actor + articulation-link OBBs for one frame, accepting legacy AABBs."""
+
+    def read_group(group):
+        ids = group["id"][frame_idx]
+        if all(k in group for k in ("obb_center", "obb_half", "obb_quat")):
+            return (
+                ids,
+                group["obb_center"][frame_idx],
+                group["obb_half"][frame_idx],
+                group["obb_quat"][frame_idx],
+            )
+        mins, maxs = group["aabb_min"][frame_idx], group["aabb_max"][frame_idx]
+        centers = 0.5 * (mins + maxs)
+        halves = 0.5 * (maxs - mins)
+        quats = np.zeros((*centers.shape[:-1], 4), dtype=np.float32)
+        quats[..., 0] = 1.0
+        return ids, centers, halves, quats
+
+    tables = [read_group(raw_h5["actor_bbox"])]
+    if "link_bbox" in raw_h5 and "id" in raw_h5["link_bbox"]:
+        tables.append(read_group(raw_h5["link_bbox"]))
+    return tuple(np.concatenate([table[i] for table in tables], axis=0) for i in range(4))
+
+
 @dataclasses.dataclass
 class _BetaCache:
-    """Per-episode beta_t proximity weights from scripts/precompute_beta_weights.py."""
+    """Per-episode proximity weights and object-local contact anchors."""
 
     beta: np.ndarray | None  # [T, K] or None
     cols: dict | None  # actor_id -> column
+    contact_beta: np.ndarray | None = None  # [T,K], centered-window contact risk
+    obstacle_contact_local: np.ndarray | None = None  # [T,K,3], normalized OBB-local
+    obstacle_contact_valid: np.ndarray | None = None  # [T,K]
+    target_contact_id: np.ndarray | None = None  # [T], supports stage-resolved targets
+    target_contact_local: np.ndarray | None = None  # [T,3] (legacy caches may use [3])
+    target_contact_valid: np.ndarray | bool = False  # [T] or scalar
 
     @classmethod
-    def load(cls, cfg_dir: str, ep_filename: str, beta_subdir: str = "beta_weights") -> "_BetaCache":
-        beta_path = os.path.join(cfg_dir, beta_subdir, ep_filename.replace(".hdf5", ".npz"))
+    def load(
+        cls,
+        cfg_dir: str,
+        ep_filename: str,
+        beta_subdir: str = "beta_weights",
+        beta_root: str | None = None,
+        raw_dir: str | None = None,
+    ) -> "_BetaCache":
+        # When beta_root is set the raw tree is read-only and caches live under a
+        # mirrored <beta_root>/<domain>/<task>/<config>/ layout; otherwise they sit
+        # next to the HDF5s in <config>/<beta_subdir>/.
+        if beta_root is not None:
+            rel = os.path.relpath(cfg_dir, os.path.expanduser(str(raw_dir))) if raw_dir else os.path.basename(cfg_dir)
+            beta_dir = os.path.join(os.path.expanduser(beta_root), rel, beta_subdir)
+        else:
+            beta_dir = os.path.join(cfg_dir, beta_subdir)
+        beta_path = os.path.join(beta_dir, ep_filename.replace(".hdf5", ".npz"))
         if os.path.isfile(beta_path):
-            bz = np.load(beta_path)
-            return cls(beta=bz["beta"], cols={int(a): j for j, a in enumerate(bz["obj_ids"])})
+            with np.load(beta_path) as bz:
+                return cls(
+                    beta=bz["beta"].copy(),
+                    cols={int(a): j for j, a in enumerate(bz["obj_ids"])},
+                    contact_beta=bz["contact_beta"].copy() if "contact_beta" in bz else None,
+                    obstacle_contact_local=(
+                        bz["obstacle_contact_local"].copy() if "obstacle_contact_local" in bz else None
+                    ),
+                    obstacle_contact_valid=(
+                        bz["obstacle_contact_valid"].copy() if "obstacle_contact_valid" in bz else None
+                    ),
+                    target_contact_id=(
+                        bz["target_contact_id"].copy() if "target_contact_id" in bz else None
+                    ),
+                    target_contact_local=(
+                        bz["target_contact_local"].copy() if "target_contact_local" in bz else None
+                    ),
+                    target_contact_valid=(
+                        bz["target_contact_valid"].copy() if "target_contact_valid" in bz else False
+                    ),
+                )
         return cls(beta=None, cols=None)
+
+
+def _contact_seed_mask(
+    seg: np.ndarray,
+    actor_id: int,
+    uv: np.ndarray,
+    *,
+    radius_px: int,
+    max_snap_px: float,
+) -> np.ndarray | None:
+    """Snap a projected contact point to actor pixels and splat an actor-clipped disk."""
+    ys, xs = np.nonzero(seg == actor_id)
+    if xs.size == 0 or not np.all(np.isfinite(uv)):
+        return None
+    d2 = (xs.astype(np.float64) - float(uv[0])) ** 2 + (ys.astype(np.float64) - float(uv[1])) ** 2
+    nearest = int(np.argmin(d2))
+    if d2[nearest] > max_snap_px**2:
+        return None
+    cx, cy = int(xs[nearest]), int(ys[nearest])
+    yy, xx = np.ogrid[: seg.shape[0], : seg.shape[1]]
+    disk = (xx - cx) ** 2 + (yy - cy) ** 2 <= radius_px**2
+    return (disk & (seg == actor_id)).astype(np.float32)
+
+
+def _project_local_anchor(
+    normalized_local: np.ndarray,
+    center: np.ndarray,
+    half: np.ndarray,
+    quat: np.ndarray,
+    ext_cv: np.ndarray,
+    intrinsic_cv: np.ndarray,
+) -> np.ndarray | None:
+    world = _bg.obb_normalized_to_world(normalized_local, center, half, quat).reshape(1, 3)
+    uv, depth = _bg.project_world_to_image(world, ext_cv, intrinsic_cv)
+    return uv[0] if depth[0] > 1e-6 else None
 
 
 def _build_masks_for_frame(
@@ -400,14 +546,31 @@ def _build_masks_for_frame(
     dest_id: int,
     beta: _BetaCache,
     frame_idx: int,
+    *,
+    bbox_ids: np.ndarray | None = None,
+    bbox_centers: np.ndarray | None = None,
+    bbox_halves: np.ndarray | None = None,
+    bbox_quats: np.ndarray | None = None,
+    ext_cv: np.ndarray | None = None,
+    intrinsic_cv: np.ndarray | None = None,
+    attention_mask_mode: Literal["contact", "object"] = "contact",
+    contact_radius_px: int = 8,
+    max_snap_px: float = 48.0,
+    stats: dict[str, int] | None = None,
 ) -> dict[str, np.ndarray]:
     """Build obstacle/beta/target/dest masks for one frame, resized to the model
     geometry (resize_with_pad, nearest). Returns float32 [H, W] masks."""
-    obstacle = np.isin(seg, obj_ids).astype(np.float32)
+    object_obstacle = np.isin(seg, obj_ids).astype(np.float32)
+    obstacle = object_obstacle.copy()
 
     beta_field = np.ones(seg.shape, dtype=np.float32)
-    if beta.beta is not None and frame_idx < beta.beta.shape[0]:
-        row = beta.beta[frame_idx]
+    beta_values = (
+        beta.contact_beta
+        if attention_mask_mode == "contact" and beta.contact_beta is not None
+        else beta.beta
+    )
+    if beta_values is not None and frame_idx < beta_values.shape[0]:
+        row = beta_values[frame_idx]
         for aid, col in beta.cols.items():
             w = float(row[col])
             if w != 1.0:
@@ -416,10 +579,96 @@ def _build_masks_for_frame(
     def role_mask(aid: int) -> np.ndarray:
         return (seg == aid).astype(np.float32) if aid >= 0 else np.zeros(seg.shape, np.float32)
 
+    if beta.target_contact_id is not None and frame_idx < beta.target_contact_id.shape[0]:
+        cached_target_id = int(beta.target_contact_id[frame_idx])
+        if cached_target_id >= 0:
+            target_id = cached_target_id
+    target = role_mask(target_id)
+    geometry_ready = all(
+        x is not None
+        for x in (bbox_ids, bbox_centers, bbox_halves, bbox_quats, ext_cv, intrinsic_cv)
+    )
+    id_to_col = {int(a): i for i, a in enumerate(bbox_ids)} if geometry_ready else {}
+
+    if attention_mask_mode == "contact":
+        localized_obstacle = np.zeros(seg.shape, dtype=np.float32)
+        for aid in obj_ids:
+            actor_mask = role_mask(int(aid))
+            contact = None
+            cache_col = beta.cols.get(int(aid)) if beta.cols is not None else None
+            bbox_col = id_to_col.get(int(aid))
+            cache_valid = (
+                cache_col is not None
+                and beta.obstacle_contact_local is not None
+                and frame_idx < beta.obstacle_contact_local.shape[0]
+                and (
+                    beta.obstacle_contact_valid is None
+                    or bool(beta.obstacle_contact_valid[frame_idx, cache_col])
+                )
+            )
+            if geometry_ready and bbox_col is not None and cache_valid:
+                uv = _project_local_anchor(
+                    beta.obstacle_contact_local[frame_idx, cache_col],
+                    bbox_centers[bbox_col],
+                    bbox_halves[bbox_col],
+                    bbox_quats[bbox_col],
+                    ext_cv,
+                    intrinsic_cv,
+                )
+                if uv is not None:
+                    contact = _contact_seed_mask(
+                        seg, int(aid), uv, radius_px=contact_radius_px, max_snap_px=max_snap_px
+                    )
+            if contact is None:
+                localized_obstacle = np.maximum(localized_obstacle, actor_mask)
+                if stats is not None and actor_mask.any():
+                    stats["obstacle_fallback"] = stats.get("obstacle_fallback", 0) + 1
+            else:
+                localized_obstacle = np.maximum(localized_obstacle, contact)
+                if stats is not None:
+                    stats["obstacle_contact"] = stats.get("obstacle_contact", 0) + 1
+        obstacle = localized_obstacle
+
+        target_contact = None
+        target_col = id_to_col.get(target_id)
+        target_local = beta.target_contact_local
+        if target_local is not None and target_local.ndim == 2:
+            target_local = target_local[frame_idx] if frame_idx < target_local.shape[0] else None
+        target_valid = beta.target_contact_valid
+        if isinstance(target_valid, np.ndarray):
+            if target_valid.ndim == 0:
+                target_valid = bool(target_valid)
+            else:
+                target_valid = bool(target_valid[frame_idx]) if frame_idx < target_valid.shape[0] else False
+        if (
+            geometry_ready
+            and target_col is not None
+            and target_valid
+            and target_local is not None
+        ):
+            uv = _project_local_anchor(
+                target_local,
+                bbox_centers[target_col],
+                bbox_halves[target_col],
+                bbox_quats[target_col],
+                ext_cv,
+                intrinsic_cv,
+            )
+            if uv is not None:
+                target_contact = _contact_seed_mask(
+                    seg, target_id, uv, radius_px=contact_radius_px, max_snap_px=max_snap_px
+                )
+        if target_contact is not None:
+            target = target_contact
+            if stats is not None:
+                stats["target_contact"] = stats.get("target_contact", 0) + 1
+        elif target.any() and stats is not None:
+            stats["target_fallback"] = stats.get("target_fallback", 0) + 1
+
     out = {
         "obstacle": obstacle,
         "beta": beta_field,
-        "target": role_mask(target_id),
+        "target": target,
         "dest": role_mask(dest_id),
     }
     return {k: _resize_with_pad_nearest(v, *MASK_RESOLUTION) for k, v in out.items()}
@@ -523,17 +772,26 @@ def _read_instruction(cfg_dir: str, ep_idx: int, desc_type: str = "seen") -> str
     return ""
 
 
-def _ensure_beta_weights(raw_dir: Path, beta_subdir: str, exclude_target: bool) -> None:
-    """Run in-repo FK precompute so `<config>/<beta_subdir>/episodeN.npz` exists."""
+def _ensure_beta_weights(
+    raw_dir: Path, beta_subdir: str, exclude_target: bool, beta_root: str | None = None
+) -> None:
+    """Run in-repo FK precompute so the per-episode beta caches exist.
+
+    With ``beta_root`` set, ``raw_dir`` is treated as read-only and caches are
+    written under ``<beta_root>/<domain>/<task>/<config>/<beta_subdir>/``; without
+    it they land next to the HDF5s in ``<config>/<beta_subdir>/``.
+    """
     scripts_dir = Path(__file__).resolve().parents[2] / "scripts"
     if str(scripts_dir) not in sys.path:
         sys.path.insert(0, str(scripts_dir))
     from precompute_beta_weights import precompute_beta_weights  # noqa: PLC0415
 
-    print(f"[beta] precomputing proximity weights under {raw_dir} -> */{beta_subdir}/")
+    dest = beta_root if beta_root else raw_dir
+    print(f"[beta] precomputing proximity weights (raw={raw_dir}, out under {dest}) -> */{beta_subdir}/")
     precompute_beta_weights(
         str(raw_dir),
         out_subdir=beta_subdir,
+        beta_root=beta_root,
         exclude_target=exclude_target,
         overwrite=False,
     )
@@ -551,11 +809,21 @@ def port_grounding(
     left_camera: str = "left_camera",
     right_camera: str = "right_camera",
     beta_subdir: str = "beta_weights",
+    beta_root: str | None = None,
     precompute_beta: bool = False,
+    attention_mask_mode: Literal["contact", "object"] = "contact",
+    contact_radius_px: int = 8,
+    max_contact_snap_px: float = 48.0,
+    max_contact_fallback_fraction: float = 0.8,
+    strict_contact_fallback: bool = False,
+    contact_audit_dir: str | None = None,
+    contact_audit_frames_per_episode: int = 3,
     dataset_config: DatasetConfig = DEFAULT_DATASET_CONFIG,
 ):
     """Convert raw RoboPRO expert HDF5 (e.g. ``mzxuan/robopro_expert``) to LeRobot
     with baked obstacle/beta/target/dest masks from countertop-camera segmentation.
+    In ``contact`` mode, obstacle/target masks contain localized inferred contact
+    regions; ``object`` mode reproduces the original full-object masks.
 
     Expected layout under ``raw_dir``:
       ``<domain>/<task>/<config>/data/episodeN.hdf5`` + ``scene_info.json``
@@ -564,6 +832,10 @@ def port_grounding(
     If ``precompute_beta`` is True, runs ``scripts/precompute_beta_weights.py`` first
     (skipping episodes that already have a cache). Without a cache, beta masks are
     all-ones (no proximity weighting).
+
+    ``beta_root`` keeps ``raw_dir`` read-only: beta caches are written to and read
+    from ``<beta_root>/<domain>/<task>/<config>/<beta_subdir>/`` (mirroring the raw
+    layout) instead of next to the source HDF5s. Leave it None for legacy behavior.
     """
     if (HF_LEROBOT_HOME / repo_id).exists():
         shutil.rmtree(HF_LEROBOT_HOME / repo_id)
@@ -576,7 +848,7 @@ def port_grounding(
         )
 
     if precompute_beta:
-        _ensure_beta_weights(raw_dir, beta_subdir, exclude_target=mask_exclude_target)
+        _ensure_beta_weights(raw_dir, beta_subdir, exclude_target=mask_exclude_target, beta_root=beta_root)
 
     dataset = create_empty_grounding_dataset(repo_id, dataset_config=dataset_config)
 
@@ -591,12 +863,37 @@ def port_grounding(
             scene_info_path, file_ep_idx, seg_exclude_names, exclude_roles=mask_exclude_target
         )
         target_id, dest_id = _episode_role_ids(scene_info_path, file_ep_idx)
-        beta = _BetaCache.load(cfg_dir, os.path.basename(ep_path), beta_subdir)
+        stage_target_ids, stage_dest_ids = _stage_role_ids(cfg_dir, file_ep_idx)
+        if target_id < 0 and stage_target_ids is not None and np.any(stage_target_ids >= 0):
+            target_id = int(stage_target_ids[stage_target_ids >= 0][0])
+        if dest_id < 0 and stage_dest_ids is not None and np.any(stage_dest_ids >= 0):
+            dest_id = int(stage_dest_ids[stage_dest_ids >= 0][0])
+        if mask_exclude_target:
+            role_ids = [
+                ids[ids >= 0]
+                for ids in (stage_target_ids, stage_dest_ids)
+                if ids is not None
+            ]
+            if role_ids:
+                obj_ids = np.setdiff1d(obj_ids, np.unique(np.concatenate(role_ids)))
+        beta = _BetaCache.load(
+            cfg_dir, os.path.basename(ep_path), beta_subdir, beta_root=beta_root, raw_dir=str(raw_dir)
+        )
+        if mask_exclude_target and beta.target_contact_id is not None:
+            obj_ids = np.setdiff1d(
+                obj_ids, np.unique(beta.target_contact_id[beta.target_contact_id >= 0])
+            )
         instruction = _read_instruction(cfg_dir, file_ep_idx)
+        contact_stats: dict[str, int] = {}
 
         with h5py.File(ep_path, "r") as raw_h5:
             obs_states, actions = _grounding_state_action(raw_h5)
             num_frames = obs_states.shape[0]
+            audit_frames = (
+                set(np.linspace(0, num_frames - 1, contact_audit_frames_per_episode, dtype=int))
+                if contact_audit_dir and contact_audit_frames_per_episode > 0
+                else set()
+            )
             seg_ds = raw_h5[f"observation/{seg_camera}/actor_segmentation"]
             cam_high_ds = raw_h5[f"observation/{seg_camera}/rgb"]
             cam_left_ds = raw_h5[f"observation/{left_camera}/rgb"]
@@ -611,7 +908,51 @@ def port_grounding(
                     return np.transpose(img, (2, 0, 1))  # CHW uint8
 
                 seg = _decode_seg_frame(seg_ds, i)
-                masks = _build_masks_for_frame(seg, obj_ids, target_id, dest_id, beta, i)
+                bbox_ids = bbox_centers = bbox_halves = bbox_quats = ext_cv = intrinsic_cv = None
+                if attention_mask_mode == "contact":
+                    try:
+                        bbox_ids, bbox_centers, bbox_halves, bbox_quats = _bbox_frame(raw_h5, i)
+                        ext_cv = raw_h5[f"observation/{seg_camera}/extrinsic_cv"][i]
+                        intrinsic_cv = raw_h5[f"observation/{seg_camera}/intrinsic_cv"][i]
+                    except KeyError:
+                        # Old episodes remain convertible via the full-object fallback.
+                        pass
+                masks = _build_masks_for_frame(
+                    seg,
+                    obj_ids,
+                    int(stage_target_ids[i]) if stage_target_ids is not None and i < len(stage_target_ids) else target_id,
+                    int(stage_dest_ids[i]) if stage_dest_ids is not None and i < len(stage_dest_ids) else dest_id,
+                    beta,
+                    i,
+                    bbox_ids=bbox_ids,
+                    bbox_centers=bbox_centers,
+                    bbox_halves=bbox_halves,
+                    bbox_quats=bbox_quats,
+                    ext_cv=ext_cv,
+                    intrinsic_cv=intrinsic_cv,
+                    attention_mask_mode=attention_mask_mode,
+                    contact_radius_px=contact_radius_px,
+                    max_snap_px=max_contact_snap_px,
+                    stats=contact_stats,
+                )
+                if any(not np.all(np.isfinite(mask)) for mask in masks.values()):
+                    raise ValueError(f"{ep_path} frame {i}: non-finite attention mask")
+                if i in audit_frames:
+                    rgb_native = cv2.cvtColor(_decode_rgb_frame(cam_high_ds, i), cv2.COLOR_BGR2RGB)
+                    overlay = _resize_rgb_with_pad(rgb_native, *MASK_RESOLUTION).astype(np.float32)
+                    obstacle_alpha = np.clip(masks["obstacle"], 0.0, 1.0)[..., None]
+                    target_alpha = np.clip(masks["target"], 0.0, 1.0)[..., None]
+                    overlay = overlay * (1.0 - 0.55 * np.maximum(obstacle_alpha, target_alpha))
+                    overlay += obstacle_alpha * np.array([140.0, 0.0, 0.0])
+                    overlay += target_alpha * np.array([0.0, 140.0, 0.0])
+                    audit_root = Path(contact_audit_dir).expanduser()
+                    audit_root.mkdir(parents=True, exist_ok=True)
+                    rel_cfg = Path(os.path.relpath(cfg_dir, raw_dir))
+                    audit_path = audit_root / ("__".join(rel_cfg.parts) + f"__ep{file_ep_idx}_f{i:04d}.png")
+                    cv2.imwrite(
+                        str(audit_path),
+                        cv2.cvtColor(np.clip(overlay, 0, 255).astype(np.uint8), cv2.COLOR_RGB2BGR),
+                    )
 
                 frame = {
                     "observation.state": obs_states[i],
@@ -624,7 +965,30 @@ def port_grounding(
                 for role, m in masks.items():
                     frame[f"observation.mask.{role}"] = m[None].astype(np.float32)  # (1, H, W)
                 dataset.add_frame(frame)
-            dataset.save_episode()
+
+        if attention_mask_mode == "contact":
+            print(f"[contact-audit] {os.path.relpath(ep_path, raw_dir)}: {contact_stats}")
+            for role in ("obstacle", "target"):
+                good = contact_stats.get(f"{role}_contact", 0)
+                fallback = contact_stats.get(f"{role}_fallback", 0)
+                total = good + fallback
+                fraction = fallback / total if total else 0.0
+                if total and fraction > max_contact_fallback_fraction:
+                    # High fallback = this episode's contacts couldn't be projected onto
+                    # the seg camera, so its obstacle/target masks are full-object (still
+                    # beta-weighted) rather than localized. By default warn and keep the
+                    # episode; pass --strict-contact-fallback to abort instead (useful for
+                    # catching a systemic cache/projection/camera regression early).
+                    message = (
+                        f"{os.path.relpath(ep_path, raw_dir)}: {role} contact fallback fraction "
+                        f"{fraction:.1%} exceeds {max_contact_fallback_fraction:.1%}; using "
+                        "full-object masks for this episode (inspect cache/projection/camera "
+                        "if widespread)"
+                    )
+                    if strict_contact_fallback:
+                        raise ValueError(message + " [--strict-contact-fallback]")
+                    print(f"[warn] {message}", file=sys.stderr)
+        dataset.save_episode()
 
     if push_to_hub:
         dataset.push_to_hub()

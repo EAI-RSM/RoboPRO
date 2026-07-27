@@ -583,21 +583,22 @@ _CONFIGS = [
     # pi05 + obstacle-guided attention. Raw source: HuggingFace mzxuan/robopro_expert
     # (object-aligned actor_bbox/obb_*). Convert with:
     #   convert_aloha_data_to_lerobot_robotwin.py grounding --raw-dir <hf_checkout> \
-    #       --repo-id local/robopro_expert --precompute-beta
-    # which bakes observation.mask.{obstacle,beta,target,dest} from countertop-camera
-    # segmentation. Fresh AttnQueryHead params are absent from pi05_base and kept via
-    # missing_regex below.
+    #       --repo-id local/robopro_expert --precompute-beta \
+    #       --attention-mask-mode contact
+    # which bakes contact-localized obstacle/target regions plus the destination
+    # into observation.mask.{obstacle,target,dest}. Fresh AttnQueryHead params are
+    # absent from pi05_base and kept via missing_regex below.
     TrainConfig(
         name="pi05_obs_attn",
         model=pi0_config.Pi0Config(
             pi05=True,
             obstacle_attention=pi0_config.ObstacleAttentionConfig(
                 enabled=True,
-                supervised_layers=(6, 12, 17),
+                supervised_layers=(0, 1, 12, 17),
                 heatmap_sigma=20.0,
                 reverse_kl=False,
-                target_attn=False,
-                dest_attn=False,
+                target_attn=True,
+                dest_attn=True,
             ),
         ),
         data=LeRobotAlohaDataConfig(

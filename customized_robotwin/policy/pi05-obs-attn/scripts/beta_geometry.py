@@ -135,6 +135,8 @@ def load_episode_arrays(h5_path: str) -> dict:
             RA=f["joint_action/right_arm"][()],  # [T,6]
             LEP=f["endpose/left_endpose"][:, :3],  # [T,3] world
             REP=f["endpose/right_endpose"][:, :3],
+            LG=f["joint_action/left_gripper"][()].reshape(-1),  # [T], 0=closed, 1=open
+            RG=f["joint_action/right_gripper"][()].reshape(-1),
             bb_id=f["actor_bbox/id"][()],  # [T,N]
         )
         g = f["actor_bbox"]
@@ -156,6 +158,30 @@ def load_episode_arrays(h5_path: str) -> dict:
                 f"(obb_center/obb_half/obb_quat) and legacy aabb_min/aabb_max; "
                 f"got keys {list(g.keys())}"
             )
+
+        # Articulated furniture collision surfaces (doors/drawers) are logged
+        # separately. Merge them into the same per-frame table so swept-volume
+        # contact anchors include link-level obstacles when available.
+        if "link_bbox" in f and "id" in f["link_bbox"]:
+            links = f["link_bbox"]
+            if all(k in links for k in ("obb_center", "obb_half", "obb_quat")):
+                link_center = links["obb_center"][()].astype(np.float64)
+                link_half = links["obb_half"][()].astype(np.float64)
+                link_quat = links["obb_quat"][()].astype(np.float64)
+            elif all(k in links for k in ("aabb_min", "aabb_max")):
+                link_min = links["aabb_min"][()].astype(np.float64)
+                link_max = links["aabb_max"][()].astype(np.float64)
+                link_center = 0.5 * (link_min + link_max)
+                link_half = 0.5 * (link_max - link_min)
+                link_quat = np.zeros((*link_center.shape[:-1], 4), dtype=np.float64)
+                link_quat[..., 0] = 1.0
+            else:
+                link_center = None
+            if link_center is not None:
+                out["bb_id"] = np.concatenate([out["bb_id"], links["id"][()]], axis=1)
+                out["obb_center"] = np.concatenate([out["obb_center"], link_center], axis=1)
+                out["obb_half"] = np.concatenate([out["obb_half"], link_half], axis=1)
+                out["obb_quat"] = np.concatenate([out["obb_quat"], link_quat], axis=1)
         return out
 
 
@@ -296,6 +322,81 @@ def point_obb_dist(
     outside = np.clip(np.abs(local) - halves[None], 0.0, None)  # [P,K,3]
     d = np.linalg.norm(outside, axis=2)  # [P,K]
     return d.min(axis=0)  # [K]
+
+
+def point_obb_closest(
+    pts: np.ndarray,
+    centers: np.ndarray,
+    halves: np.ndarray,
+    quats: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Closest obstacle-side OBB points for a robot point cloud.
+
+    Returns ``(distance[K], closest_local[K,3], point_index[K])``. Local points
+    are in metres in each OBB frame. For a robot point inside a box, distance is
+    zero and the closest point is placed on the nearest face rather than inside
+    the volume, which gives projection code a stable surface anchor.
+    """
+    pts = np.asarray(pts, dtype=np.float64)
+    centers = np.asarray(centers, dtype=np.float64)
+    halves = np.asarray(halves, dtype=np.float64)
+    R = _quat_wxyz_to_mat(quats)  # [K,3,3], local -> world
+    delta = pts[:, None, :] - centers[None, :, :]  # [P,K,3]
+    local = np.einsum("pkj,kji->pki", delta, R)
+    clipped = np.clip(local, -halves[None], halves[None])
+    inside = np.all(np.abs(local) <= halves[None] + 1e-12, axis=-1)
+
+    # For inside points, project to the nearest face. np.put_along_axis avoids
+    # Python loops while preserving one surface point for every [P,K] pair.
+    margins = halves[None] - np.abs(local)
+    face_axis = np.argmin(margins, axis=-1)[..., None]
+    face_sign = np.take_along_axis(local, face_axis, axis=-1)
+    face_sign = np.where(face_sign < 0.0, -1.0, 1.0)
+    face_value = face_sign * np.take_along_axis(
+        np.broadcast_to(halves[None], local.shape), face_axis, axis=-1
+    )
+    inside_surface = local.copy()
+    np.put_along_axis(inside_surface, face_axis, face_value, axis=-1)
+    closest = np.where(inside[..., None], inside_surface, clipped)
+
+    distance = np.linalg.norm(local - clipped, axis=-1)
+    distance = np.where(inside, 0.0, distance)
+    point_index = np.argmin(distance, axis=0)
+    box_index = np.arange(centers.shape[0])
+    return distance[point_index, box_index], closest[point_index, box_index], point_index
+
+
+def obb_local_normalize(local: np.ndarray, halves: np.ndarray) -> np.ndarray:
+    """OBB-local metres -> dimensionless coordinates (box faces are +/-1)."""
+    return np.asarray(local, dtype=np.float64) / np.clip(np.asarray(halves), 1e-8, None)
+
+
+def obb_normalized_to_world(
+    normalized: np.ndarray,
+    centers: np.ndarray,
+    halves: np.ndarray,
+    quats: np.ndarray,
+) -> np.ndarray:
+    """Dimensionless OBB-local coordinates -> world points, with broadcasting."""
+    local = np.asarray(normalized, dtype=np.float64) * np.asarray(halves, dtype=np.float64)
+    R = _quat_wxyz_to_mat(quats)
+    return np.einsum("...i,...ji->...j", local, R) + np.asarray(centers, dtype=np.float64)
+
+
+def world_to_obb_normalized(
+    points: np.ndarray,
+    centers: np.ndarray,
+    halves: np.ndarray,
+    quats: np.ndarray,
+) -> np.ndarray:
+    """World points -> dimensionless OBB-local coordinates, with broadcasting."""
+    R = _quat_wxyz_to_mat(quats)
+    local = np.einsum(
+        "...j,...ji->...i",
+        np.asarray(points, dtype=np.float64) - np.asarray(centers, dtype=np.float64),
+        R,
+    )
+    return obb_local_normalize(local, halves)
 
 
 def obstacle_columns(bb_id: np.ndarray, obj_ids: np.ndarray, frame: int) -> np.ndarray:

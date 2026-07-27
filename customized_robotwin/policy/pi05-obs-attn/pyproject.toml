@@ -70,6 +70,13 @@ dev = [
 ]
 
 
+[tool.uv]
+# av 14.3.0/14.4.0 (what the resolver picked) are sdist-only on PyPI and need
+# FFmpeg 7.x dev libs to build from source (unavailable here; system/conda ffmpeg
+# are 4.x). Pin to 15.0.0, which ships self-contained manylinux wheels (bundled
+# ffmpeg, no build) and satisfies lerobot's `av>=14.2.0`.
+override-dependencies = ["av==15.0.0"]
+
 [tool.uv.sources]
 openpi-client = { workspace = true }
 lerobot = { git = "https://github.com/huggingface/lerobot", rev = "a445d9c9da6bea99a8972daa4fe1fdd053d711d2" }

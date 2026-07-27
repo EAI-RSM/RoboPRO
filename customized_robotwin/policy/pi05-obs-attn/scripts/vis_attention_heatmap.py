@@ -25,8 +25,6 @@ import openpi.models.model as _model
 import openpi.training.config as _config
 import openpi.training.data_loader as _data_loader
 
-_ROLE_INDEX = {"obstacle": 0, "target": 1, "dest": 2}
-
 
 def _grid_to_image(dist_1d: np.ndarray, grid: int, size: int = 224) -> np.ndarray:
     """[N] distribution -> [size, size] nearest-upsampled, max-normalized for display."""
@@ -45,12 +43,13 @@ def main(
     seed: int = 0,
     out: str = "./attn_vis",
 ) -> None:
-    if role not in _ROLE_INDEX:
-        raise ValueError(f"role must be one of {list(_ROLE_INDEX)}")
     train_config = _config.get_config(config)
     model = train_config.model.load(_model.restore_params(os.path.expanduser(params)))
     if model.obstacle_attention is None or not model.obstacle_attention.enabled:
         raise ValueError("obstacle_attention is not enabled on this config")
+    role_names = model.obstacle_attention.role_names
+    if role not in role_names:
+        raise ValueError(f"role must be enabled by the config; got {role!r}, enabled={role_names}")
     grid = model.obstacle_attention.attn_grid_h
 
     out_dir = os.path.expanduser(out)
@@ -64,6 +63,10 @@ def main(
     role_probs = np.asarray(preds["role_probs"])  # [S, B, R, N]
     gt_key = f"gt_{role}"
     gt = np.asarray(preds[gt_key]) if gt_key in preds else None
+    replacement_mask = getattr(observation, f"{role}_mask")
+    replacement_mask = np.asarray(replacement_mask) if replacement_mask is not None else None
+    if role == "obstacle" and replacement_mask is not None and observation.beta_mask is not None:
+        replacement_mask = replacement_mask * np.asarray(observation.beta_mask)
 
     # base_0_rgb is [-1, 1] -> [0, 1]; predict_attention preprocesses a copy so the
     # loader observation still holds the (already-resized) image.
@@ -71,20 +74,24 @@ def main(
     rgb = np.clip((rgb + 1.0) / 2.0, 0.0, 1.0)
 
     layer = role_probs.shape[0] - 1  # last supervised layer
-    r = _ROLE_INDEX[role]
+    r = role_names.index(role)
     n = min(num_samples, rgb.shape[0])
     for i in range(n):
         model_map = _grid_to_image(role_probs[layer, i, r], grid)
-        fig, axes = plt.subplots(1, 3, figsize=(12, 4))
+        fig, axes = plt.subplots(1, 4, figsize=(16, 4))
         axes[0].imshow(rgb[i])
         axes[0].set_title("base_0_rgb")
         axes[1].imshow(rgb[i])
-        if gt is not None:
-            axes[1].imshow(_grid_to_image(gt[i], grid), cmap="jet", alpha=0.5)
-        axes[1].set_title(f"GT {role} heatmap")
+        if replacement_mask is not None:
+            axes[1].imshow(replacement_mask[i], cmap="jet", alpha=0.5)
+        axes[1].set_title(f"replacement {role} mask")
         axes[2].imshow(rgb[i])
-        axes[2].imshow(model_map, cmap="jet", alpha=0.5)
-        axes[2].set_title(f"model attn (layer {layer})")
+        if gt is not None:
+            axes[2].imshow(_grid_to_image(gt[i], grid), cmap="jet", alpha=0.5)
+        axes[2].set_title(f"patchified GT {role}")
+        axes[3].imshow(rgb[i])
+        axes[3].imshow(model_map, cmap="jet", alpha=0.5)
+        axes[3].set_title(f"model attn (layer {layer})")
         for ax in axes:
             ax.axis("off")
         fig.tight_layout()
