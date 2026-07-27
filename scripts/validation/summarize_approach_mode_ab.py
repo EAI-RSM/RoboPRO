@@ -81,11 +81,12 @@ BUCKET_ORDER = [b for b, _, _ in BUCKET_EDGES]
 # Ordinal, so a single hue light -> dark rather than four categorical colours.
 BUCKET_COLOR = {"easy": "#dbe7f3", "medium": "#a9c4e0", "hard": "#6f96c4", "very hard": "#39587d"}
 
-# CAVEAT the boundaries are only ~2 z-voxels apart. The EDT measures voxel-centre to
-# voxel-centre, so eps* is optimistic by up to half a voxel: res/2 = 5 mm in xy but
-# zres/2 = 15 mm in z at the default zres=0.03, i.e. 0.17*rho and 0.5*rho. Four buckets is
-# about the finest that is resolvable at those settings, and the bias is one-directional --
-# scenes read one notch EASIER than they are.
+# CAVEAT the boundaries are only ~2 voxels apart. The EDT measures voxel-centre to
+# voxel-centre, so eps* is optimistic by up to half a voxel. At the A/B's grid (SEED_RES 0.02,
+# SEED_ZRES 0.03) that is 10 mm in xy and 15 mm in z, i.e. 0.33*rho and 0.5*rho against
+# buckets 1.0*rho wide. Four buckets is about the finest that resolves there, and the bias is
+# one-directional -- scenes read one notch EASIER than they are. Lower SEED_RES to sharpen the
+# buckets, at roughly quadratic cost in the metric.
 
 
 def clearance_bucket(eps, r=GRIPPER_R):

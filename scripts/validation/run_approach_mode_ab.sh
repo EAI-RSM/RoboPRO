@@ -57,6 +57,7 @@
 #   OUT_ROOT                  results dir                 (default results/phase4_approach_mode/<stamp>)
 #   SEED_VISUALS              1/0, save route figures     (default 1)
 #   SEED_OBSTACLES            all | occluders             (default all)
+#   SEED_RES / SEED_ZRES      clearance grid res (m)      (default 0.02 / 0.03)
 #   DEBUG                     1 -> ROBOTWIN_LOG_MOVE      (default 0)
 # Frozen curobo knobs -- identical in all cells, so the ONLY variable is the mode:
 #   CUROBO_MAX_ATTEMPTS(24) CUROBO_TRAJOPT_SEEDS(16) CUROBO_BATCH_GRAPH_SEEDS(1)
@@ -141,6 +142,12 @@ source set_env.sh
 export ROBOTWIN_BENCH_TASK=bench
 export SEED_VISUALS="${SEED_VISUALS:-1}"
 export SEED_OBSTACLES="${SEED_OBSTACLES:-all}"
+# Clearance-grid resolution for the seed build. 0.02 rather than clearance_metric_3d's own
+# 0.01: the voxel count (and so the IK + warm-solve cost, which is what the metric spends its
+# time on) falls ~4x, and the seed only initializes trajopt. Raise SEED_RES further if the
+# timing probe still says minutes per scene; lower it for a more faithful eps*.
+export SEED_RES="${SEED_RES:-0.02}"
+export SEED_ZRES="${SEED_ZRES:-0.03}"
 if [[ "$DEBUG" == "1" ]]; then
   export ROBOTWIN_LOG_MOVE=1
   echo "DEBUG=1 -> verbose per-move planning trace enabled in cell logs"

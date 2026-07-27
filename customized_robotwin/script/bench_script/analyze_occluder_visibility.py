@@ -2449,8 +2449,14 @@ def make_occluder_task():
                 # in env.collision_list except the target and pad, so table CLUTTER counts and
                 # the seed has something to route around even with no occluder. SEED_OBSTACLES=
                 # occluders restores the curated-ring-only field (eps* not comparable).
+                # res defaults to 0.02 here, NOT clearance_metric_3d's own 0.01: the grid is
+                # ~4x cheaper (x,y both halve) and the seed is only an INITIALIZATION that
+                # trajopt refines, so it does not need the tool's full fidelity. The cost is
+                # a coarser eps*, whose half-voxel optimism grows to res/2 = 10 mm.
                 cfg = sfc.SeedMetricConfig(
-                    obstacles=os.environ.get("SEED_OBSTACLES", "all").strip().lower())
+                    obstacles=os.environ.get("SEED_OBSTACLES", "all").strip().lower(),
+                    res=float(os.environ.get("SEED_RES", "0.02")),
+                    zres=float(os.environ.get("SEED_ZRES", "0.03")))
                 seed, res = sfc.build_seed(self, planner, tag, ik, grasp_q, start_q, None,
                                            start_xyz, goal_xyz, cfg=cfg, action_horizon=H)
                 if seed is None:
