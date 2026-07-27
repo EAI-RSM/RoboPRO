@@ -205,14 +205,18 @@ two variables: waypoint→direct AND no-seed→seed).
     `route_voxels`, `eps_gated`; cache hits tagged `reason="cached"` so build cost isn't
     double-counted). `planner.plan_path` now returns `attempts`/`trajopt_attempts`/`seeded`
     on both the success and failure branches.
-  - **Driver** `scripts/validation/run_approach_mode_ab.sh` — runs `off`/`direct`/`seed`
-    over the same seed set with frozen curobo knobs, one process + one log per cell, then
+  - **Driver** `scripts/validation/run_approach_mode_ab.sh` — runs **`direct` + `seed`** over
+    the same seed set with frozen curobo knobs, one process + one log per cell, then
     summarizes. Refuses to start if the vendored curobo lost the `seed_traj` patch (that
     would make the `seed` cell silently measure `direct`).
+  - **`off` is NOT in the default cell set** (2026-07-27, user's call): the around-box
+    waypoint is hardcoded for one-occluder-in-front, so on the general scenes this benchmark
+    targets it is a *different task*, not a control. `direct→seed` is the whole experiment.
+    Opt in with `MODES="off direct seed"` for a reference number.
   - **Summary** `scripts/validation/summarize_approach_mode_ab.py` — per-cell Wilson CI,
     usable-samples/hour, failure-stage breakdown, **seed firing rate**, paired McNemar for
-    `direct→seed` (the seed's effect) and `off→direct` (what the waypoint was worth), and a
-    3-panel figure. `--selftest` verifies loader/stats/figure on synthetic records.
+    `direct→seed` (and `off→direct` only if that cell was run), and a 3-panel figure.
+    `--selftest` verifies loader/stats/figure with and without the opt-in `off` cell.
   - **Firing rate is the gate:** a miss falls back to an unseeded plan silently, so a null
     `direct→seed` is unreadable unless the seed actually fired. The summary prints it first
     and warns when it is 0 or under 50%.

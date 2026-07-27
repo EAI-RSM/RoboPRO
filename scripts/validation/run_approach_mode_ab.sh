@@ -1,17 +1,20 @@
 #!/usr/bin/env bash
 # ============================================================================
-# Phase 4: APPROACH_MODE A/B/C  --  does the clearance-metric seed help?
+# Phase 4: APPROACH_MODE A/B  --  does the clearance-metric seed help?
 #
-# Three cells, same seed set, same scene, one variable each step:
-#   off     stock around-box waypoint  (today's expert; scene-specific heuristic)
-#   direct  waypoints OFF, pre_grasp planned straight from rest, NO seed
+# Two cells by default, same seed set, same scene, differing by exactly one thing:
+#   direct  waypoints OFF, pre_grasp planned straight from rest, NO seed  (the floor)
 #   seed    waypoints OFF, pre_grasp planned straight from rest, WITH the seed
 #
-# The comparison that attributes the SEED is direct -> seed: those two differ by
-# exactly one thing. off -> direct measures what the hand-tuned waypoint was worth,
-# i.e. how far the honest generalization floor sits below today's number. Neither
-# direct nor seed falls back to the waypoint, so the floor is not contaminated by
-# the heuristic (see SEED_TRAJECTORY_PLAN.md sec. "Phase 3+").
+# direct -> seed is the whole experiment: those two differ by only the seed, so any
+# success delta is attributable to it. Neither falls back to the around-box waypoint,
+# so a miss fails the candidate and the floor is not contaminated by the heuristic.
+#
+# The third mode, `off` (stock around-box waypoint), is deliberately NOT in the
+# default set. It is a hardcoded one-occluder-in-front heuristic, so on the general
+# scenes this benchmark is aiming at it is not a control -- it is a different task.
+# Opt in with MODES="off direct seed" if you ever want today's expert as a reference
+# number; the summary will then also report off -> direct.
 #
 # Pass-1 seed acceptance (visibility / stability / pad-blocked) does not touch the
 # approach mode, so all three cells see the SAME scenes -> the summary pairs them.
@@ -26,7 +29,7 @@
 # Parameters (override via env):
 #   NUM_SEEDS        seeds per cell                  (default 50)
 #   SEED_START       first seed                      (default 0)
-#   MODES            which cells to run              (default "off direct seed")
+#   MODES            which cells to run              (default "direct seed")
 #   OFFSET           occluder offset                 (default 0.2)
 #   CLUTTER_DENSITY  table clutter                   (default 0)
 #   BASE_CONFIG      bench task config               (default bench_demo_office_clean)
@@ -46,7 +49,7 @@ set -uo pipefail
 # ---- Parameters ----
 NUM_SEEDS="${NUM_SEEDS:-50}"
 SEED_START="${SEED_START:-0}"
-MODES="${MODES:-off direct seed}"
+MODES="${MODES:-direct seed}"
 OFFSET="${OFFSET:-0.2}"
 CLUTTER_DENSITY="${CLUTTER_DENSITY:-0}"
 BASE_CONFIG="${BASE_CONFIG:-bench_demo_office_clean}"
@@ -86,7 +89,7 @@ if ! grep -q "seed_traj" "$CUSTOMIZED/envs/curobo/src/curobo/wrap/reacher/motion
 fi
 
 echo "============================================================"
-echo " Phase 4: APPROACH_MODE A/B/C  (does the clearance seed help?)"
+echo " Phase 4: APPROACH_MODE A/B  (does the clearance seed help?)"
 echo "   modes        : $MODES"
 echo "   seeds        : $NUM_SEEDS (from $SEED_START)"
 echo "   scene        : occluder ON, offset=$OFFSET, clutter=$CLUTTER_DENSITY"

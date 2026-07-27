@@ -31,16 +31,19 @@ import sys
 import tempfile
 from pathlib import Path
 
-MODES = ["off", "direct", "seed"]
+MODES = ["direct", "seed", "off"]
 MODE_BLURB = {
-    "off": "stock around-box waypoint (today's expert)",
-    "direct": "waypoints OFF, direct pre_grasp, NO seed (generalization floor)",
+    "direct": "waypoints OFF, direct pre_grasp, NO seed (the floor)",
     "seed": "waypoints OFF, direct pre_grasp, WITH clearance seed (the method)",
+    "off": "stock around-box waypoint (opt-in reference; one-occluder heuristic)",
 }
-# The two comparisons worth making, and what each one isolates.
+# The experiment, and an optional reference comparison. `off` is not run by default:
+# the around-box waypoint is hardcoded for one-occluder-in-front, so on general scenes
+# it is a different task rather than a control. Pairs whose cells are absent are
+# skipped silently.
 PAIRS = [
-    ("direct", "seed", "attributes the SEED (these differ by only the seed)"),
-    ("off", "direct", "what the hand-tuned around-box waypoint was worth"),
+    ("direct", "seed", "THE EXPERIMENT -- these differ by only the seed"),
+    ("off", "direct", "optional reference: what the around-box waypoint was worth"),
 ]
 
 
@@ -259,9 +262,6 @@ def print_firing(fr: dict | None) -> None:
 def print_pair(a: str, b: str, why: str,
                ra: dict[int, dict], rb: dict[int, dict]) -> None:
     print(f"\n[PAIRED] {a} -> {b}   ({why})")
-    if not ra or not rb:
-        print("  SKIPPED (one of the two cells is missing)")
-        return
     shared = sorted(set(ra) & set(rb))
     if not shared:
         print("  SKIPPED (the two cells share no seeds)")
@@ -399,6 +399,11 @@ def summarize(root: Path, figure: bool = True) -> None:
 
     print("\n[CELLS]  rollout success (Wilson 95% CI)")
     for m in MODES:
+        # A mode with no folder at all simply was not requested (off is opt-in) -- say
+        # nothing. A mode WITH a folder but no usable records is a real failure worth
+        # flagging, and print_cell says so.
+        if cells[m] is None and not (root / m).is_dir():
+            continue
         print_cell(m, stats[m])
 
     print("\n[FAILURES]")
@@ -409,17 +414,22 @@ def summarize(root: Path, figure: bool = True) -> None:
     print_firing(seed_firing(data["seed"]))
 
     for a, b, why in PAIRS:
-        print_pair(a, b, why, data[a], data[b])
+        # Silently skip a pair whose cells were not both run -- `off` is opt-in, and a
+        # SKIPPED banner on every default run is noise, not information.
+        if data[a] and data[b]:
+            print_pair(a, b, why, data[a], data[b])
 
     if figure:
         make_figure(stats, root / "approach_mode_ab.png")
 
     print("\n" + "-" * 74)
-    print("Reading this: 'direct -> seed' is the seed's effect and is the only pair that")
-    print("changes exactly one thing. 'off -> direct' is the cost of dropping the")
-    print("hand-tuned around-box waypoint, i.e. how much of today's number came from a")
-    print("heuristic that is specific to one-occluder-in-front and will not generalize.")
-    print("Check SEED FIRING first: a seed that rarely builds cannot show an effect.")
+    print("Reading this: 'direct -> seed' IS the experiment -- both cells plan pre_grasp")
+    print("straight from rest with no waypoint fallback, so they differ by only the seed")
+    print("and the delta is attributable to it. Check SEED FIRING first: a seed that")
+    print("rarely builds cannot show an effect, and a null would mean nothing.")
+    if data["off"]:
+        print("The 'off' cell is a reference number only -- the around-box waypoint is a")
+        print("one-occluder-in-front heuristic, so it is a different task, not a control.")
 
 
 def _selftest() -> None:
@@ -494,7 +504,17 @@ def _selftest() -> None:
         summarize(root, figure=True)
         assert (root / "approach_mode_ab.png").is_file(), "figure not written"
 
-    print("\n[selftest] ALL PASS (loader/Wilson/McNemar/firing-rate/attempts/figure)")
+        # The DEFAULT run is direct+seed only (off is opt-in): a missing off cell must
+        # not crash, must drop the off->direct pair silently, and must still plot.
+        import shutil
+        shutil.rmtree(root / "off")
+        (root / "approach_mode_ab.png").unlink()
+        assert find_cell(root, "off") is None, "find_cell should report the removed cell"
+        summarize(root, figure=True)
+        assert (root / "approach_mode_ab.png").is_file(), "figure not written without off"
+
+    print("\n[selftest] ALL PASS (loader/Wilson/McNemar/firing-rate/attempts/figure,"
+          " with and without the opt-in off cell)")
 
 
 def main() -> None:
