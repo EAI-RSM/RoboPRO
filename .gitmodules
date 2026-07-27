@@ -1,0 +1,3 @@
+[submodule "customized_robotwin/lookahead"]
+	path = customized_robotwin/lookahead
+	url = git@gitlab.com:mahgoobi/sim_search.git
