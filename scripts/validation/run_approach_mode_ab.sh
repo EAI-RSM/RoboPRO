@@ -26,16 +26,37 @@
 #   NUM_SEEDS=50 bash scripts/validation/run_approach_mode_ab.sh
 #   MODES="direct seed" NUM_SEEDS=30 bash scripts/validation/run_approach_mode_ab.sh
 #
+# SCENES: the cells run on two scene types, the same NUM_SEEDS each, so the two are
+# weighted equally by construction:
+#   curated   the olive-oil occluder ring is always spawned (occluder offset OFFSET),
+#             clutter at CURATED_CLUTTER_DENSITY (default 0). This is the scene the
+#             clearance metric was built for.
+#   standard  no occluder; STANDARD_CLUTTER_DENSITY random objects at random positions
+#             and yaws from the office obstacle pool (default 8). Generalization test.
+#
+# !! KNOWN LIMITATION on the standard scene. The clearance metric's obstacle set is the
+# occluder ring ONLY -- occluder_footprints_3d() reads env.occluders and returns [] when
+# there is none, and table clutter is not in it. So on a standard scene the metric sees
+# an EMPTY world, the widest path is unconstrained, and the seed collapses to roughly a
+# straight line. Expect seed ~= direct there, by construction rather than by measurement.
+# curobo itself still avoids the clutter (the expert calls update_world() with clutter
+# included); it is specifically the metric that is blind to it. Teaching the metric to
+# ingest clutter actors is the fix, and it is not done yet -- until then, read a null on
+# the standard scene as "the method had nothing to route around", not as evidence.
+# The summary prints this warning itself whenever a scene's records show no occluders.
+#
 # Parameters (override via env):
-#   NUM_SEEDS        seeds per cell                  (default 50)
-#   SEED_START       first seed                      (default 0)
-#   MODES            which cells to run              (default "direct seed")
-#   OFFSET           occluder offset                 (default 0.2)
-#   CLUTTER_DENSITY  table clutter                   (default 0)
-#   BASE_CONFIG      bench task config               (default bench_demo_office_clean)
-#   OUT_ROOT         results dir                     (default results/phase4_approach_mode/<stamp>)
-#   SEED_VISUALS     1/0, save route figures in seed (default 1)
-#   DEBUG            1 -> ROBOTWIN_LOG_MOVE trace    (default 0)
+#   NUM_SEEDS                 seeds per cell, per scene   (default 50)
+#   SEED_START                first seed                  (default 0)
+#   MODES                     which modes to run          (default "direct seed")
+#   SCENES                    which scenes to run         (default "curated standard")
+#   OFFSET                    occluder offset, curated    (default 0.2)
+#   CURATED_CLUTTER_DENSITY   clutter on curated          (default 0)
+#   STANDARD_CLUTTER_DENSITY  clutter on standard         (default 8)
+#   BASE_CONFIG               bench task config           (default bench_demo_office_clean)
+#   OUT_ROOT                  results dir                 (default results/phase4_approach_mode/<stamp>)
+#   SEED_VISUALS              1/0, save route figures     (default 1)
+#   DEBUG                     1 -> ROBOTWIN_LOG_MOVE      (default 0)
 # Frozen curobo knobs -- identical in all cells, so the ONLY variable is the mode:
 #   CUROBO_MAX_ATTEMPTS(24) CUROBO_TRAJOPT_SEEDS(16) CUROBO_BATCH_GRAPH_SEEDS(1)
 #   CUROBO_ATTACH_SPHERE_RADIUS(0.001)
@@ -50,8 +71,14 @@ set -uo pipefail
 NUM_SEEDS="${NUM_SEEDS:-50}"
 SEED_START="${SEED_START:-0}"
 MODES="${MODES:-direct seed}"
+SCENES="${SCENES:-curated standard}"
 OFFSET="${OFFSET:-0.2}"
-CLUTTER_DENSITY="${CLUTTER_DENSITY:-0}"
+# Both scenes draw from the SAME seed range, so each scene gets NUM_SEEDS attempts and
+# the two are equally weighted. Seed acceptance is scene-dependent (a scene is rejected
+# for instability / a blocked pad), so the number of accepted seeds can still differ
+# between scenes -- the summary reports each cell's own n and pairs within a scene.
+CURATED_CLUTTER_DENSITY="${CURATED_CLUTTER_DENSITY:-0}"
+STANDARD_CLUTTER_DENSITY="${STANDARD_CLUTTER_DENSITY:-8}"
 BASE_CONFIG="${BASE_CONFIG:-bench_demo_office_clean}"
 DEBUG="${DEBUG:-0}"
 
@@ -91,8 +118,10 @@ fi
 echo "============================================================"
 echo " Phase 4: APPROACH_MODE A/B  (does the clearance seed help?)"
 echo "   modes        : $MODES"
-echo "   seeds        : $NUM_SEEDS (from $SEED_START)"
-echo "   scene        : occluder ON, offset=$OFFSET, clutter=$CLUTTER_DENSITY"
+echo "   scenes       : $SCENES"
+echo "   seeds        : $NUM_SEEDS per cell (from $SEED_START) -- equal across scenes"
+echo "   curated      : occluder ON, offset=$OFFSET, clutter=$CURATED_CLUTTER_DENSITY"
+echo "   standard     : occluder OFF, clutter=$STANDARD_CLUTTER_DENSITY (random objects/positions)"
 echo "   base_config  : $BASE_CONFIG"
 echo "   frozen knobs : MAX_ATTEMPTS=$CUROBO_MAX_ATTEMPTS TRAJOPT_SEEDS=$CUROBO_TRAJOPT_SEEDS"
 echo "                  BATCH_GRAPH_SEEDS=$CUROBO_BATCH_GRAPH_SEEDS ATTACH_SPHERE=$CUROBO_ATTACH_SPHERE_RADIUS"
@@ -109,33 +138,44 @@ if [[ "$DEBUG" == "1" ]]; then
   echo "DEBUG=1 -> verbose per-move planning trace enabled in cell logs"
 fi
 
-# One cell = one full analyze_occluder_visibility.py run under one APPROACH_MODE.
+# One cell = one full analyze_occluder_visibility.py run at one (scene, mode). Results
+# land in <OUT_ROOT>/<scene>/<mode>/<timestamp>/, which is what the summary walks.
 # A non-zero exit (often just the post-run plotting hiccuping AFTER records.jsonl is
 # written) is logged and we move on -- the summary reads whatever records.jsonl exists.
 run_cell () {
-  local mode="$1"
-  local logf="$LOG_DIR/${mode}.log"
+  local scene="$1" mode="$2"
+  local logf="$LOG_DIR/${scene}_${mode}.log"
+  local occ_prob clutter
+  case "$scene" in
+    curated)  occ_prob=0; clutter="$CURATED_CLUTTER_DENSITY" ;;   # occluder always spawned
+    standard) occ_prob=1; clutter="$STANDARD_CLUTTER_DENSITY" ;;  # occluder never spawned
+    *) echo "!!! unknown scene '$scene' -- skipping"; return ;;
+  esac
   echo ""
-  echo ">>> [$(date +%T)] START  APPROACH_MODE=$mode"
+  echo ">>> [$(date +%T)] START  scene=$scene APPROACH_MODE=$mode (clutter=$clutter)"
   # -u: stdout is redirected to a file, so without it Python block-buffers and the cell
   # log stays EMPTY for hours on a 50-seed run. Unbuffered keeps `tail -f` live.
   if APPROACH_MODE="$mode" "$PYTHON" -u script/bench_script/analyze_occluder_visibility.py \
         --base-config "$BASE_CONFIG" --seed-start "$SEED_START" --num-seeds "$NUM_SEEDS" \
-        --rollout --out-dir "$OUT_ROOT" --run-type "$mode" \
-        --offsets "$OFFSET" --clutter-densities "$CLUTTER_DENSITY" --no-occluder-prob 0 \
+        --rollout --out-dir "$OUT_ROOT/$scene" --run-type "$mode" \
+        --offsets "$OFFSET" --clutter-densities "$clutter" --no-occluder-prob "$occ_prob" \
         >"$logf" 2>&1; then
-    echo "<<< [$(date +%T)] DONE   $mode   (log: $logf)"
+    echo "<<< [$(date +%T)] DONE   $scene/$mode   (log: $logf)"
   else
     local rc=$?
-    echo "!!! [$(date +%T)] FAILED $mode (exit $rc) -- see $logf (records.jsonl may still be complete)"
+    echo "!!! [$(date +%T)] FAILED $scene/$mode (exit $rc) -- see $logf (records.jsonl may still be complete)"
   fi
 }
 
-for mode in $MODES; do
-  case "$mode" in
-    off|direct|seed) run_cell "$mode" ;;
-    *) echo "!!! unknown mode '$mode' (expected off|direct|seed) -- skipping" ;;
-  esac
+# Scene-major order: each scene's cells run back to back, so a run killed part-way still
+# leaves at least one COMPLETE scene rather than two half-finished ones.
+for scene in $SCENES; do
+  for mode in $MODES; do
+    case "$mode" in
+      off|direct|seed) run_cell "$scene" "$mode" ;;
+      *) echo "!!! unknown mode '$mode' (expected off|direct|seed) -- skipping" ;;
+    esac
+  done
 done
 
 # ---- Paired summary ----
@@ -146,7 +186,7 @@ echo ">>> [$(date +%T)] Summarizing ..."
 
 echo ""
 echo "All done. Results under: $OUT_ROOT"
-echo "  per cell   : $OUT_ROOT/<mode>/<timestamp>/records.jsonl"
-echo "  videos     : $OUT_ROOT/<mode>/<timestamp>/{success,fail}/video/"
-echo "  seed routes: $OUT_ROOT/seed/<timestamp>/seed_route_visuals/episode<N>_<arm>/"
+echo "  per cell   : $OUT_ROOT/<scene>/<mode>/<timestamp>/records.jsonl"
+echo "  videos     : $OUT_ROOT/<scene>/<mode>/<timestamp>/{success,fail}/video/"
+echo "  seed routes: $OUT_ROOT/<scene>/seed/<timestamp>/seed_route_visuals/episode<N>_<arm>/"
 echo "  summary    : $OUT_ROOT/summary.txt"

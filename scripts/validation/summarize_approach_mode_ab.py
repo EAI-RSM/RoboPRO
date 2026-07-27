@@ -63,6 +63,20 @@ TERMINAL_PLACEMENT_STAGES = ("place_actor",)
 
 # --------------------------------------------------------------------------- io
 
+def find_scenes(root: Path) -> list[tuple[str, Path]]:
+    """The scene roots under `root`, as (label, path).
+
+    Two layouts are supported: the current one, <root>/<scene>/<mode>/<ts>/, and the
+    older flat <root>/<mode>/<ts>/ from before scenes existed. Flat is detected by a
+    mode folder sitting directly under root and reported with an empty label, so old
+    result folders keep summarizing without being moved."""
+    if any((root / m).is_dir() for m in MODES):
+        return [("", root)]
+    scenes = [d for d in sorted(root.iterdir())
+              if d.is_dir() and any((d / m).is_dir() for m in MODES)]
+    return [(d.name, d) for d in scenes]
+
+
 def find_cell(root: Path, mode: str) -> Path | None:
     """Newest <root>/<mode>/<timestamp>/ that actually has a records.jsonl.
 
@@ -106,6 +120,10 @@ def load_records(cell_dir: Path | None) -> dict[int, dict]:
             "plan_effort": r.get("rollout_plan_effort") or [],
             "seed_stats": r.get("rollout_seed_stats") or [],
             "failure_stage": r.get("rollout_failure_stage"),
+            # How many occluders this scene actually spawned. On a standard scene this is
+            # 0, which is what triggers the "metric had nothing to route around" warning.
+            "num_occluders": r.get("num_occluders"),
+            "clutter_density": r.get("clutter_density"),
         }
     return out
 
@@ -278,6 +296,31 @@ def print_cell(mode: str, st: dict | None) -> None:
               f"the '{mode}' cell -- the cells may not differ as intended")
 
 
+def print_scene_shape(data: dict[str, dict[int, dict]]) -> bool:
+    """Describe what the cells actually contained, and warn when the metric was blind.
+
+    Returns True if this scene had no occluders in any cell. That is the case where the
+    clearance metric sees an EMPTY obstacle set (occluder_footprints_3d reads
+    env.occluders; table clutter is NOT in it), so the widest path is unconstrained and
+    the seed collapses toward a straight line. A null seed-vs-direct there means the
+    method had nothing to route around -- it is not evidence the method does not work."""
+    occ = {v["num_occluders"] for d in data.values() for v in d.values()
+           if v["num_occluders"] is not None}
+    clut = {v["clutter_density"] for d in data.values() for v in d.values()
+            if v["clutter_density"] is not None}
+    if occ or clut:
+        print(f"  scene contents: occluders={sorted(occ) or 'unrecorded'}  "
+              f"clutter_density={sorted(clut) or 'unrecorded'}")
+    blind = bool(occ) and occ == {0}
+    if blind:
+        print("  !! NO OCCLUDERS in this scene. The clearance metric's obstacle set is the")
+        print("     occluder ring only -- table clutter is not in it -- so the metric saw an")
+        print("     empty world and the seed is near-degenerate (roughly a straight line).")
+        print("     Read seed ~= direct here as 'nothing to route around', NOT as a result.")
+        print("     curobo still avoids the clutter; it is the metric that is blind to it.")
+    return blind
+
+
 def print_firing(fr: dict | None) -> None:
     print("\n[SEED FIRING]  did the method actually engage?")
     if fr is None:
@@ -384,7 +427,7 @@ MODE_COLOR = {"direct": "#4C72B0", "seed": "#C4632A", "off": "#4A4A4A"}
 INK, INK_MUTED = "#1a1a19", "#5c5c58"
 
 
-def make_figure(stats: dict[str, dict | None], out_path: Path) -> None:
+def make_figure(stats: dict[str, dict | None], out_path: Path, label: str = "") -> None:
     """Three panels: success rate with Wilson CI, usable samples/hour, median
     pre_grasp attempts -- one bar per mode. Skips panels that have no data."""
     import matplotlib
@@ -444,7 +487,9 @@ def make_figure(stats: dict[str, dict | None], out_path: Path) -> None:
         ax.set_axisbelow(True)
         for side in ("top", "right"):
             ax.spines[side].set_visible(False)
-    fig.suptitle("Phase 4: grasp-approach mode  --  " + " vs ".join(cells), fontsize=13)
+    scene = f"{label} scene  --  " if label else ""
+    fig.suptitle(f"Phase 4: {scene}grasp-approach mode  --  " + " vs ".join(cells),
+                 fontsize=13)
     fig.tight_layout()
     out_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(out_path, dpi=130)
@@ -453,7 +498,8 @@ def make_figure(stats: dict[str, dict | None], out_path: Path) -> None:
 
 
 def make_adjusted_figure(data: dict[str, dict[int, dict]], out_path: Path,
-                         stages: tuple[str, ...] = TERMINAL_PLACEMENT_STAGES) -> None:
+                         stages: tuple[str, ...] = TERMINAL_PLACEMENT_STAGES,
+                         label: str = "") -> None:
     """Success rate as measured vs. with terminal-placement failures dropped.
 
     Two bars per mode in that mode's own hue -- colour carries the MODE, the hatch
@@ -516,7 +562,8 @@ def make_adjusted_figure(data: dict[str, dict[int, dict]], out_path: Path,
                        Patch(facecolor="#b9b9b4", edgecolor="white", hatch="//",
                              label=f"excluding failures at {'/'.join(stages)}")],
               loc="upper left", frameon=False, fontsize=10)
-    ax.set_title("Success rate with the known-broken final placement step removed\n"
+    ax.set_title((f"{label} scene: " if label else "")
+                 + "Success rate with the known-broken final placement step removed\n"
                  f"right-hand bar is conditional: given the run reached past "
                  f"{'/'.join(stages)}",
                  fontsize=12, color=INK)
@@ -531,17 +578,41 @@ def make_adjusted_figure(data: dict[str, dict[int, dict]], out_path: Path,
 
 def summarize(root: Path, figure: bool = True,
               stages: tuple[str, ...] = TERMINAL_PLACEMENT_STAGES) -> None:
+    """Summarize every scene under `root`, each one independently.
+
+    Cells are paired WITHIN a scene only. curated vs standard are different scenes with
+    different obstacle sets, so a cross-scene pairing would not be a controlled
+    comparison -- the two are read side by side, descriptively."""
+    scenes = find_scenes(root)
+    if not scenes:
+        print(f"no cells found under {root} (expected <root>/<scene>/<mode>/<ts>/ or "
+              f"<root>/<mode>/<ts>/)")
+        return
+    print("=" * 74)
+    print("PHASE 4  --  APPROACH_MODE A/B SUMMARY")
+    print(f"root: {root}")
+    if len(scenes) > 1 or scenes[0][0]:
+        print(f"scenes: {', '.join(label or '(flat)' for label, _ in scenes)}"
+              "   -- paired within a scene; across scenes is descriptive only")
+    print("=" * 74)
+    for label, scene_root in scenes:
+        summarize_scene(scene_root, label, figure=figure, stages=stages)
+
+
+def summarize_scene(root: Path, label: str = "", figure: bool = True,
+                    stages: tuple[str, ...] = TERMINAL_PLACEMENT_STAGES) -> None:
     cells = {m: find_cell(root, m) for m in MODES}
     data = {m: load_records(cells[m]) for m in MODES}
     stats = {m: cell_stats(data[m]) for m in MODES}
 
-    print("=" * 74)
-    print("PHASE 4  --  APPROACH_MODE A/B SUMMARY")
-    print(f"root: {root}")
-    print("=" * 74)
+    if label:
+        print("\n" + "#" * 74)
+        print(f"# SCENE: {label}")
+        print("#" * 74)
     for m in MODES:
         if cells[m]:
             print(f"  {m:<7} <- {cells[m].relative_to(root)}   ({MODE_BLURB[m]})")
+    print_scene_shape(data)
 
     print("\n[CELLS]  rollout success (Wilson 95% CI)")
     for m in MODES:
@@ -577,8 +648,9 @@ def summarize(root: Path, figure: bool = True,
                 print_pair(a, b, "same pair, terminal-placement failures dropped", fa, fb)
 
     if figure:
-        make_figure(stats, root / "approach_mode_ab.png")
-        make_adjusted_figure(data, root / "approach_mode_placement_adjusted.png", stages)
+        make_figure(stats, root / "approach_mode_ab.png", label)
+        make_adjusted_figure(data, root / "approach_mode_placement_adjusted.png",
+                             stages, label)
 
     print("\n" + "-" * 74)
     print("Reading this: 'direct -> seed' IS the experiment -- both cells plan pre_grasp")
@@ -598,8 +670,10 @@ def _selftest() -> None:
     """End-to-end check on synthetic records: exercises the loader, the stats, both
     paired comparisons and the figure, with a known answer. No sim/GPU needed."""
     # Cook a case with a deliberate signal: seed wins 8 discordant pairs, loses 0.
-    def rec(seed, ok, mode, attempts, seeded_route=None, secs=100.0, stage="pre_grasp"):
+    def rec(seed, ok, mode, attempts, seeded_route=None, secs=100.0, stage="pre_grasp",
+            n_occ=1, clutter=0):
         r = {"seed": seed, "rollout_success": ok, "approach_mode": mode,
+             "num_occluders": n_occ, "clutter_density": clutter,
              "rollout_seconds": secs, "rollout_failure_stage": None if ok else stage,
              "rollout_plan_effort": [{"stage": "pre_grasp", "arm": "left", "status": "Success",
                                       "attempts": attempts, "trajopt_attempts": 2 * attempts,
@@ -686,9 +760,15 @@ def _selftest() -> None:
         wider, n_wider = drop_terminal_placement(data["direct"], ("place_actor", "pre_grasp"))
         assert n_wider == 16 and len(wider) == 4, (n_wider, len(wider))
 
+        assert find_scenes(root) == [("", root)], "flat layout should report one unnamed scene"
         summarize(root, figure=True)
         assert (root / "approach_mode_ab.png").is_file(), "figure not written"
         assert (root / "approach_mode_placement_adjusted.png").is_file(), "adjusted figure"
+
+        # Scene-shape reporting: 1 occluder here is not "blind"; a 0-occluder scene is.
+        assert print_scene_shape(data) is False, "occluded scene wrongly flagged blind"
+        blind = {"seed": {0: dict(data["seed"][0], num_occluders=0, clutter_density=8)}}
+        assert print_scene_shape(blind) is True, "0-occluder scene not flagged blind"
 
         # The DEFAULT run is direct+seed only (off is opt-in): a missing off cell must
         # not crash, must drop the off->direct pair silently, and must still plot.
@@ -701,8 +781,41 @@ def _selftest() -> None:
         assert (root / "approach_mode_ab.png").is_file(), "figure not written without off"
         assert (root / "approach_mode_placement_adjusted.png").is_file(), "adjusted fig"
 
+    # ---- two-scene layout: <root>/<scene>/<mode>/<ts>/, summarized independently ----
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        # standard = no occluder + clutter 8; the metric is blind there, so seed == direct
+        # is the EXPECTED shape and the warning must fire.
+        scene_plan = {
+            "curated":  (1, 0, {"direct": 4, "seed": 12}),
+            "standard": (0, 8, {"direct": 7, "seed": 7}),
+        }
+        for scene, (n_occ, clutter, wins) in scene_plan.items():
+            for mode, k in wins.items():
+                d = root / scene / mode / "20260727-120000"
+                d.mkdir(parents=True)
+                with (d / "records.jsonl").open("w") as fh:
+                    for i in range(20):
+                        fh.write(json.dumps(rec(i, i < k, mode, 5, mode == "seed",
+                                                stage="place_actor" if i >= 14 else "pre_grasp",
+                                                n_occ=n_occ, clutter=clutter)) + "\n")
+        found = find_scenes(root)
+        assert [lbl for lbl, _ in found] == ["curated", "standard"], found
+        # equal weighting: same seed count per cell in both scenes
+        for scene, _ in found:
+            for mode in ("direct", "seed"):
+                assert len(load_records(find_cell(root / scene, mode))) == 20, (scene, mode)
+        assert print_scene_shape({"seed": load_records(find_cell(root / "standard", "seed"))})
+        assert not print_scene_shape({"seed": load_records(find_cell(root / "curated", "seed"))})
+        summarize(root, figure=True)
+        for scene, _ in found:
+            assert (root / scene / "approach_mode_ab.png").is_file(), scene
+            assert (root / scene / "approach_mode_placement_adjusted.png").is_file(), scene
+        # figures go in the SCENE folder, never collide at the root
+        assert not (root / "approach_mode_ab.png").exists(), "scene figures collided at root"
+
     print("\n[selftest] ALL PASS (loader/Wilson/McNemar/firing-rate/attempts/"
-          "placement-adjusted/figures, with and without the opt-in off cell)")
+          "placement-adjusted/figures, flat + two-scene layouts, blind-scene warning)")
 
 
 def main() -> None:
