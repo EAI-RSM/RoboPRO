@@ -1,0 +1,88 @@
+{
+  "schema_version": "1.0.0",
+  "source_root": "customized_robotwin/data/action_validation_suite_v6",
+  "claims": [
+    {
+      "id": "unified_graph",
+      "title": "Unified physics- and action-aware graph",
+      "episode": "put_sauce_can_in_cabinet/relation_validation_d14",
+      "relations": ["in", "contains", "visible_to", "reachable_by", "held_by"],
+      "camera": "countertop_camera"
+    },
+    {
+      "id": "spatial_visibility_reachability",
+      "title": "Containment, visibility, and reachability",
+      "episode": "put_sauce_can_in_cabinet/relation_validation_d14",
+      "relations": ["in", "contains", "visible_to", "reachable_by"],
+      "camera": "countertop_camera"
+    },
+    {
+      "id": "temporal_actions_and_tools",
+      "title": "Temporal high-level actions and tool calls",
+      "episode": "put_sauce_can_in_cabinet/relation_validation_d14",
+      "relations": ["held_by", "in"],
+      "camera": "countertop_camera"
+    },
+    {
+      "id": "articulation_actions",
+      "title": "Articulation-aware actions",
+      "episode": "put_rubikscube_in_drawer/relation_validation_d14",
+      "relations": ["in", "contains", "reachable_by"],
+      "camera": "countertop_camera"
+    },
+    {
+      "id": "planner_attempts",
+      "title": "Planner attempts versus executed actions",
+      "episode": "chain_heat_hamburger_ks/relation_validation_d14",
+      "relations": ["reachable_by", "held_by"],
+      "camera": "countertop_camera"
+    },
+    {
+      "id": "observed_effects",
+      "title": "Observed action effects",
+      "episode": "chain_heat_hamburger_ks/relation_validation_d14",
+      "relations": ["held_by", "in", "contains"],
+      "camera": "countertop_camera"
+    },
+    {
+      "id": "sequential_dual_arm",
+      "title": "Sequential dual-arm representation",
+      "episode": "set_up_table/relation_validation_d14",
+      "relations": ["held_by", "reachable_by", "in"],
+      "camera": "countertop_camera"
+    },
+    {
+      "id": "provider_neutral_contract",
+      "title": "Provider-neutral policy action contract",
+      "episode": "put_sauce_can_in_cabinet/relation_validation_d14",
+      "relations": [],
+      "camera": "countertop_camera"
+    },
+    {
+      "id": "provider_provenance",
+      "title": "Configurable provider provenance",
+      "episode": "put_sauce_can_in_cabinet/relation_validation_d14",
+      "relations": [],
+      "camera": "countertop_camera"
+    },
+    {
+      "id": "cross_task_validation",
+      "title": "Cross-task scientific validation",
+      "episodes": [
+        "put_sauce_can_in_cabinet/relation_validation_d14",
+        "put_rubikscube_in_drawer/relation_validation_d14",
+        "set_up_table/relation_validation_d14",
+        "chain_heat_hamburger_ks/relation_validation_d14"
+      ],
+      "relations": ["in", "contains", "visible_to", "reachable_by"],
+      "camera": "countertop_camera"
+    }
+  ],
+  "limitations": [
+    "occludes and blocks are not canonical exported relations",
+    "simultaneous high-level dual-arm scenarios are not currently validated",
+    "reachable_by is collision-aware IK reachability, not full grasp or trajectory feasibility",
+    "Pi0 and Pi0.5 require a semantic adapter for high-level action nodes",
+    "XVLA adapter is not installed"
+  ]
+}

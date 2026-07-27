@@ -1,0 +1,391 @@
+{
+  "claim": "Hamburger-microwave physics-aware graph",
+  "source_hdf5": "customized_robotwin/data/action_validation_suite_v6/chain_heat_hamburger_ks/relation_validation_d14/data/episode0.hdf5",
+  "source_video": "customized_robotwin/data/action_validation_suite_v6/chain_heat_hamburger_ks/relation_validation_d14/video/episode0.mp4",
+  "camera": "countertop_camera",
+  "keyframes": [
+    {
+      "frame": 122,
+      "title": "Contained Before Contact",
+      "caption": "The hamburger is inside the microwave while transport remains active.",
+      "active_action": {
+        "id": 47,
+        "type": "transport",
+        "phase": "transition",
+        "arm": "left",
+        "start_frame": 116,
+        "end_frame": 137,
+        "status": "succeeded",
+        "tool_call": {
+          "contract_version": "1.0.0",
+          "decision": "ACT",
+          "provenance": "expert_executed_action",
+          "provider": "rule_based",
+          "result": {
+            "end_frame": 137,
+            "observed_effects": [],
+            "start_frame": 116,
+            "status": "succeeded"
+          },
+          "tool": {
+            "arguments": {
+              "action_type": "transport",
+              "arm": "left",
+              "destination_object_id": null,
+              "effector_object_id": -2,
+              "parameters": {
+                "primitive": "move",
+                "target_pose": [
+                  -0.39495617666297156,
+                  0.12133662586186597,
+                  0.8443040251731873,
+                  0.696259081379631,
+                  -0.12276926161051974,
+                  0.12276926161051974,
+                  0.696259081379631
+                ]
+              },
+              "target_object_id": 112
+            },
+            "name": "execute_high_level_action"
+          }
+        },
+        "observed_effects": []
+      },
+      "relations": [
+        {
+          "relation": "in",
+          "source": "006_hamburg",
+          "destination": "microwave"
+        },
+        {
+          "relation": "contains",
+          "source": "microwave",
+          "destination": "006_hamburg"
+        },
+        {
+          "relation": "held_by",
+          "source": "006_hamburg",
+          "destination": "left_ee"
+        },
+        {
+          "relation": "visible_to",
+          "source": "006_hamburg",
+          "destination": "countertop_camera"
+        }
+      ],
+      "graph_outputs": {
+        "full_scene_graph": "graphs/full_scene_graph/graph_0122.png",
+        "action_relevant_subgraph": "graphs/action_relevant_subgraph/graph_0122.png"
+      }
+    },
+    {
+      "frame": 123,
+      "title": "Container Contact Established",
+      "caption": "collides_with appears between the hamburger and microwave.",
+      "active_action": {
+        "id": 47,
+        "type": "transport",
+        "phase": "transition",
+        "arm": "left",
+        "start_frame": 116,
+        "end_frame": 137,
+        "status": "succeeded",
+        "tool_call": {
+          "contract_version": "1.0.0",
+          "decision": "ACT",
+          "provenance": "expert_executed_action",
+          "provider": "rule_based",
+          "result": {
+            "end_frame": 137,
+            "observed_effects": [],
+            "start_frame": 116,
+            "status": "succeeded"
+          },
+          "tool": {
+            "arguments": {
+              "action_type": "transport",
+              "arm": "left",
+              "destination_object_id": null,
+              "effector_object_id": -2,
+              "parameters": {
+                "primitive": "move",
+                "target_pose": [
+                  -0.39495617666297156,
+                  0.12133662586186597,
+                  0.8443040251731873,
+                  0.696259081379631,
+                  -0.12276926161051974,
+                  0.12276926161051974,
+                  0.696259081379631
+                ]
+              },
+              "target_object_id": 112
+            },
+            "name": "execute_high_level_action"
+          }
+        },
+        "observed_effects": []
+      },
+      "relations": [
+        {
+          "relation": "in",
+          "source": "006_hamburg",
+          "destination": "microwave"
+        },
+        {
+          "relation": "contains",
+          "source": "microwave",
+          "destination": "006_hamburg"
+        },
+        {
+          "relation": "collides_with",
+          "source": "microwave",
+          "destination": "006_hamburg"
+        },
+        {
+          "relation": "collides_with",
+          "source": "006_hamburg",
+          "destination": "microwave"
+        },
+        {
+          "relation": "held_by",
+          "source": "006_hamburg",
+          "destination": "left_ee"
+        },
+        {
+          "relation": "visible_to",
+          "source": "006_hamburg",
+          "destination": "countertop_camera"
+        }
+      ],
+      "graph_outputs": {
+        "full_scene_graph": "graphs/full_scene_graph/graph_0123.png",
+        "action_relevant_subgraph": "graphs/action_relevant_subgraph/graph_0123.png"
+      }
+    },
+    {
+      "frame": 128,
+      "title": "Contact Re-established",
+      "caption": "The transient object-container contact appears again during transport.",
+      "active_action": {
+        "id": 47,
+        "type": "transport",
+        "phase": "transition",
+        "arm": "left",
+        "start_frame": 116,
+        "end_frame": 137,
+        "status": "succeeded",
+        "tool_call": {
+          "contract_version": "1.0.0",
+          "decision": "ACT",
+          "provenance": "expert_executed_action",
+          "provider": "rule_based",
+          "result": {
+            "end_frame": 137,
+            "observed_effects": [],
+            "start_frame": 116,
+            "status": "succeeded"
+          },
+          "tool": {
+            "arguments": {
+              "action_type": "transport",
+              "arm": "left",
+              "destination_object_id": null,
+              "effector_object_id": -2,
+              "parameters": {
+                "primitive": "move",
+                "target_pose": [
+                  -0.39495617666297156,
+                  0.12133662586186597,
+                  0.8443040251731873,
+                  0.696259081379631,
+                  -0.12276926161051974,
+                  0.12276926161051974,
+                  0.696259081379631
+                ]
+              },
+              "target_object_id": 112
+            },
+            "name": "execute_high_level_action"
+          }
+        },
+        "observed_effects": []
+      },
+      "relations": [
+        {
+          "relation": "in",
+          "source": "006_hamburg",
+          "destination": "microwave"
+        },
+        {
+          "relation": "contains",
+          "source": "microwave",
+          "destination": "006_hamburg"
+        },
+        {
+          "relation": "collides_with",
+          "source": "microwave",
+          "destination": "006_hamburg"
+        },
+        {
+          "relation": "collides_with",
+          "source": "006_hamburg",
+          "destination": "microwave"
+        },
+        {
+          "relation": "held_by",
+          "source": "006_hamburg",
+          "destination": "left_ee"
+        }
+      ],
+      "graph_outputs": {
+        "full_scene_graph": "graphs/full_scene_graph/graph_0128.png",
+        "action_relevant_subgraph": "graphs/action_relevant_subgraph/graph_0128.png"
+      }
+    },
+    {
+      "frame": 142,
+      "title": "Release Phase",
+      "caption": "The hamburger remains contained as the left gripper begins release.",
+      "active_action": {
+        "id": 48,
+        "type": "release",
+        "phase": "final_descent",
+        "arm": "left",
+        "start_frame": 138,
+        "end_frame": 159,
+        "status": "succeeded",
+        "tool_call": {
+          "contract_version": "1.0.0",
+          "decision": "ACT",
+          "provenance": "expert_executed_action",
+          "provider": "rule_based",
+          "result": {
+            "end_frame": 159,
+            "observed_effects": [
+              {
+                "after": false,
+                "before": true,
+                "destination": -2,
+                "relation": "held_by",
+                "source": 112
+              }
+            ],
+            "start_frame": 138,
+            "status": "succeeded"
+          },
+          "tool": {
+            "arguments": {
+              "action_type": "release",
+              "arm": "left",
+              "destination_object_id": null,
+              "effector_object_id": -2,
+              "parameters": {
+                "primitive": "gripper",
+                "target_gripper_pos": 1.0
+              },
+              "target_object_id": 112
+            },
+            "name": "execute_high_level_action"
+          }
+        },
+        "observed_effects": [
+          {
+            "after": false,
+            "before": true,
+            "destination": -2,
+            "relation": "held_by",
+            "source": 112
+          }
+        ]
+      },
+      "relations": [
+        {
+          "relation": "in",
+          "source": "006_hamburg",
+          "destination": "microwave"
+        },
+        {
+          "relation": "contains",
+          "source": "microwave",
+          "destination": "006_hamburg"
+        },
+        {
+          "relation": "collides_with",
+          "source": "microwave",
+          "destination": "006_hamburg"
+        },
+        {
+          "relation": "collides_with",
+          "source": "006_hamburg",
+          "destination": "microwave"
+        }
+      ],
+      "graph_outputs": {
+        "full_scene_graph": "graphs/full_scene_graph/graph_0142.png",
+        "action_relevant_subgraph": "graphs/action_relevant_subgraph/graph_0142.png"
+      }
+    }
+  ],
+  "tool_call_example": {
+    "contract_version": "1.0.0",
+    "decision": "ACT",
+    "provenance": "expert_executed_action",
+    "provider": "rule_based",
+    "result": {
+      "end_frame": 137,
+      "observed_effects": [],
+      "start_frame": 116,
+      "status": "succeeded"
+    },
+    "tool": {
+      "arguments": {
+        "action_type": "transport",
+        "arm": "left",
+        "destination_object_id": null,
+        "effector_object_id": -2,
+        "parameters": {
+          "primitive": "move",
+          "target_pose": [
+            -0.39495617666297156,
+            0.12133662586186597,
+            0.8443040251731873,
+            0.696259081379631,
+            -0.12276926161051974,
+            0.12276926161051974,
+            0.696259081379631
+          ]
+        },
+        "target_object_id": 112
+      },
+      "name": "execute_high_level_action"
+    }
+  },
+  "selection_method": "Exported action boundaries and relation transition frames",
+  "graph_views": {
+    "full_scene_graph": {
+      "definition": "All present entities and all implemented relations at the selected frame, positioned from exported world coordinates"
+    },
+    "action_relevant_subgraph": {
+      "definition": "One-hop action-centered projection over target, destination, effector, and selected camera",
+      "seed_nodes": [
+        "active_action",
+        "006_hamburg",
+        "microwave",
+        "left_ee",
+        "countertop_camera"
+      ],
+      "relations": [
+        "target",
+        "agent",
+        "in",
+        "contains",
+        "collides_with",
+        "held_by",
+        "reachable_by",
+        "visible_to"
+      ]
+    }
+  }
+}
