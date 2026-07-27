@@ -2372,8 +2372,14 @@ def make_occluder_task():
                 start_q = _np.asarray([full_q[i] for i in idx], dtype=float)
                 ik = cm._build_ik_solver(planner)
                 H = int(planner.motion_gen.trajopt_solver.action_horizon)
+                # Obstacle set the clearance field measures against. Default "all" = every mesh
+                # in env.collision_list except the target and pad, so table CLUTTER counts and
+                # the seed has something to route around even with no occluder. SEED_OBSTACLES=
+                # occluders restores the curated-ring-only field (eps* not comparable).
+                cfg = sfc.SeedMetricConfig(
+                    obstacles=os.environ.get("SEED_OBSTACLES", "all").strip().lower())
                 seed, res = sfc.build_seed(self, planner, tag, ik, grasp_q, start_q, None,
-                                           start_xyz, goal_xyz, action_horizon=H)
+                                           start_xyz, goal_xyz, cfg=cfg, action_horizon=H)
                 if seed is None:
                     print(f"[seed] arm={tag}: build_seed produced NO route ({res.reason}) -> stock fallback "
                           f"({res.seconds:.1f}s)")

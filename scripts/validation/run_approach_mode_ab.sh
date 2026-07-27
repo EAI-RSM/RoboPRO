@@ -34,16 +34,11 @@
 #   standard  no occluder; STANDARD_CLUTTER_DENSITY random objects at random positions
 #             and yaws from the office obstacle pool (default 8). Generalization test.
 #
-# !! KNOWN LIMITATION on the standard scene. The clearance metric's obstacle set is the
-# occluder ring ONLY -- occluder_footprints_3d() reads env.occluders and returns [] when
-# there is none, and table clutter is not in it. So on a standard scene the metric sees
-# an EMPTY world, the widest path is unconstrained, and the seed collapses to roughly a
-# straight line. Expect seed ~= direct there, by construction rather than by measurement.
-# curobo itself still avoids the clutter (the expert calls update_world() with clutter
-# included); it is specifically the metric that is blind to it. Teaching the metric to
-# ingest clutter actors is the fix, and it is not done yet -- until then, read a null on
-# the standard scene as "the method had nothing to route around", not as evidence.
-# The summary prints this warning itself whenever a scene's records show no occluders.
+# The clearance metric now measures against the WHOLE scene obstacle set (clutter as well as
+# the occluder ring) -- clearance_metric_3d --obstacles, default "all", which walks the same
+# env.collision_list curobo's update_world uses, minus the target and pad. So the seed has
+# something to route around on the standard scene too. Set SEED_OBSTACLES=occluders to restore
+# the old curated-ring-only field (eps* is NOT comparable across the two).
 #
 # Parameters (override via env):
 #   NUM_SEEDS                 seeds per cell, per scene   (default 50)
@@ -56,6 +51,7 @@
 #   BASE_CONFIG               bench task config           (default bench_demo_office_clean)
 #   OUT_ROOT                  results dir                 (default results/phase4_approach_mode/<stamp>)
 #   SEED_VISUALS              1/0, save route figures     (default 1)
+#   SEED_OBSTACLES            all | occluders             (default all)
 #   DEBUG                     1 -> ROBOTWIN_LOG_MOVE      (default 0)
 # Frozen curobo knobs -- identical in all cells, so the ONLY variable is the mode:
 #   CUROBO_MAX_ATTEMPTS(24) CUROBO_TRAJOPT_SEEDS(16) CUROBO_BATCH_GRAPH_SEEDS(1)
@@ -133,6 +129,7 @@ cd "$CUSTOMIZED"
 source set_env.sh
 export ROBOTWIN_BENCH_TASK=bench
 export SEED_VISUALS="${SEED_VISUALS:-1}"
+export SEED_OBSTACLES="${SEED_OBSTACLES:-all}"
 if [[ "$DEBUG" == "1" ]]; then
   export ROBOTWIN_LOG_MOVE=1
   echo "DEBUG=1 -> verbose per-move planning trace enabled in cell logs"

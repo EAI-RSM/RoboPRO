@@ -299,11 +299,12 @@ def print_cell(mode: str, st: dict | None) -> None:
 def print_scene_shape(data: dict[str, dict[int, dict]]) -> bool:
     """Describe what the cells actually contained, and warn when the metric was blind.
 
-    Returns True if this scene had no occluders in any cell. That is the case where the
-    clearance metric sees an EMPTY obstacle set (occluder_footprints_3d reads
-    env.occluders; table clutter is NOT in it), so the widest path is unconstrained and
-    the seed collapses toward a straight line. A null seed-vs-direct there means the
-    method had nothing to route around -- it is not evidence the method does not work."""
+    Returns True if this scene had no occluders in any cell. Since 2026-07-27 the metric
+    measures against the whole scene obstacle set (clearance_metric_3d --obstacles, default
+    "all"), so table clutter counts and a no-occluder scene is still meaningful -- provided
+    there IS clutter. The combination that leaves the metric with nothing to route around is
+    no occluders AND no clutter, and that is what the warning below fires on. Under the
+    legacy SEED_OBSTACLES=occluders the old caveat applies to any no-occluder scene."""
     occ = {v["num_occluders"] for d in data.values() for v in d.values()
            if v["num_occluders"] is not None}
     clut = {v["clutter_density"] for d in data.values() for v in d.values()
@@ -311,14 +312,18 @@ def print_scene_shape(data: dict[str, dict[int, dict]]) -> bool:
     if occ or clut:
         print(f"  scene contents: occluders={sorted(occ) or 'unrecorded'}  "
               f"clutter_density={sorted(clut) or 'unrecorded'}")
-    blind = bool(occ) and occ == {0}
-    if blind:
-        print("  !! NO OCCLUDERS in this scene. The clearance metric's obstacle set is the")
-        print("     occluder ring only -- table clutter is not in it -- so the metric saw an")
-        print("     empty world and the seed is near-degenerate (roughly a straight line).")
+    no_occ = bool(occ) and occ == {0}
+    no_clutter = bool(clut) and clut == {0}
+    if no_occ and no_clutter:
+        print("  !! NO OCCLUDERS AND NO CLUTTER. The clearance metric has nothing to route")
+        print("     around, so the widest path is unconstrained and the seed is degenerate.")
         print("     Read seed ~= direct here as 'nothing to route around', NOT as a result.")
-        print("     curobo still avoids the clutter; it is the metric that is blind to it.")
-    return blind
+    elif no_occ:
+        print("  note: no occluders; the metric measures against the table clutter instead")
+        print("        (--obstacles all). Under the legacy SEED_OBSTACLES=occluders this")
+        print("        scene would leave the metric with an empty world -- check the cell log")
+        print("        for '[footprint] obstacle set = ...' to see which was used.")
+    return no_occ and no_clutter
 
 
 def print_firing(fr: dict | None) -> None:
@@ -766,9 +771,9 @@ def _selftest() -> None:
         assert (root / "approach_mode_placement_adjusted.png").is_file(), "adjusted figure"
 
         # Scene-shape reporting: 1 occluder here is not "blind"; a 0-occluder scene is.
-        assert print_scene_shape(data) is False, "occluded scene wrongly flagged blind"
-        blind = {"seed": {0: dict(data["seed"][0], num_occluders=0, clutter_density=8)}}
-        assert print_scene_shape(blind) is True, "0-occluder scene not flagged blind"
+        assert print_scene_shape(data) is False, "occluded scene wrongly flagged blind"  # occ=1
+        blind = {"seed": {0: dict(data["seed"][0], num_occluders=0, clutter_density=0)}}
+        assert print_scene_shape(blind) is True, "empty scene (no occluder, no clutter) not flagged"
 
         # The DEFAULT run is direct+seed only (off is opt-in): a missing off cell must
         # not crash, must drop the off->direct pair silently, and must still plot.
@@ -805,8 +810,13 @@ def _selftest() -> None:
         for scene, _ in found:
             for mode in ("direct", "seed"):
                 assert len(load_records(find_cell(root / scene, mode))) == 20, (scene, mode)
-        assert print_scene_shape({"seed": load_records(find_cell(root / "standard", "seed"))})
+        # Neither scene is "blind" now: standard has no occluder but 8 clutter objects, which
+        # the metric measures against under --obstacles all. Only a scene with NEITHER is.
+        std = load_records(find_cell(root / "standard", "seed"))
+        assert not print_scene_shape({"seed": std}), "clutter-only scene wrongly flagged blind"
         assert not print_scene_shape({"seed": load_records(find_cell(root / "curated", "seed"))})
+        empty = {"seed": {s: dict(v, num_occluders=0, clutter_density=0) for s, v in std.items()}}
+        assert print_scene_shape(empty), "no-occluder AND no-clutter scene must be flagged"
         summarize(root, figure=True)
         for scene, _ in found:
             assert (root / scene / "approach_mode_ab.png").is_file(), scene

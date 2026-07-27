@@ -54,6 +54,11 @@ class SeedMetricConfig:
     ik_seeds: int = 30           # IK seeds per solve
     chunk: int = 256
     occ_shape: str = "mesh"      # true tapering collision mesh (vs "extruded")
+    # Which actors the clearance field measures against. "all" = every mesh in
+    # env.collision_list except the target and pad, so table CLUTTER is an obstacle too and the
+    # seed routes around it -- required for the seed to do anything on a scene with no occluder.
+    # "occluders" restores the curated-ring-only behaviour. See clearance_metric_3d.--obstacles.
+    obstacles: str = "all"
     free_only: bool = False      # keep the OBSTACLE/BEYOND split off the FREE labels
 
 
@@ -164,10 +169,14 @@ def compute_route_configs(env, planner, arm, ik, grasp_q, start_xyz, goal_xyz,
         return RouteResult(None, None, None, False, 0.0, "no converged warm branch on any FREE voxel",
                            label=label, XX=XX, YY=YY, zs=zs, seconds=time.perf_counter() - t0)
 
-    # occluder clearance field (edt) -- the widest-path values come from this
-    foots = cm.occluder_footprints_3d(env)
-    occ_ps = ([np.array(o.get_pose().p) for o in env.occluders]
-              if getattr(env, "occluders", None) else [])
+    # obstacle clearance field (edt) -- the widest-path values come from this. Under
+    # cfg.obstacles="all" this covers table clutter as well as the occluder ring, so the route
+    # squeezes between whatever is actually on the table (see clearance_metric_3d.--obstacles).
+    foots = cm.occluder_footprints_3d(env, obstacles=cfg.obstacles)
+    # Centres track the obstacle set actually used (cylinder fallback + plot markers).
+    occ_ps = cm.obstacle_centers(foots) or (
+        [np.array(o.get_pose().p) for o in env.occluders]
+        if getattr(env, "occluders", None) else [])
     edt = cm.occluder_clearance_3d(foots, occ_ps, XX, YY, zs, cfg.res, cfg.zres,
                                    cm.OCC_HALF_FOOTPRINT, shape=cfg.occ_shape)
 

@@ -1016,9 +1016,85 @@ def phase2_vertical_report(out_dir, args, zs, free_vol, q_warm_2d, q_warm_3d):
 
 
 # ----------------------------------------------------------------------------- step 3: 3D occluder EDT
-def occluder_footprints_3d(env):
-    """Per occluder, the posed COLLISION geometry (base<id>.glb -- the exact mesh file curobo's world
-    model loads for this actor, see _bench_base_task.update_world). We keep three things:
+_MESH_CACHE: dict = {}
+
+
+def _load_collision_mesh(path):
+    """The collision mesh at `path`, in the actor's own local frame, cached by path.
+
+    Two forms, matching _bench_base_task.update_world: a single mesh FILE (base<id>.glb for
+    the convex assets, coacd_collision.obj for the objaverse ones), or a DIRECTORY of convex
+    parts, which we concatenate into one mesh -- the union is what the actor collides as.
+    Returns (vertices, faces) or None. Never raises; a missing asset just drops that obstacle
+    from the metric (and is reported by the caller)."""
+    if path in _MESH_CACHE:
+        return _MESH_CACHE[path]
+    out = None
+    try:
+        import trimesh
+        if os.path.isdir(path):
+            parts = []
+            for fn in sorted(os.listdir(path)):
+                if fn.lower().endswith((".obj", ".glb", ".ply", ".stl")):
+                    try:
+                        parts.append(trimesh.load(os.path.join(path, fn), force="mesh"))
+                    except Exception:
+                        continue
+            m = trimesh.util.concatenate(parts) if parts else None
+        else:
+            m = trimesh.load(path, force="mesh")
+        if m is not None and len(getattr(m, "vertices", [])):
+            out = (np.asarray(m.vertices, dtype=float), np.asarray(m.faces))
+    except Exception:
+        out = None
+    _MESH_CACHE[path] = out
+    return out
+
+
+def scene_obstacle_entries(env, obstacles="all"):
+    """The (actor, collision_path) pairs the clearance metric should treat as obstacles.
+
+    obstacles="occluders": the curated olive-oil ring only (env.occluders) -- the pre-2026-07-27
+      behaviour, kept so old eps* numbers can be reproduced.
+    obstacles="all": everything in env.collision_list, which is the SAME registry curobo's
+      update_world consumes, minus the two actors that must never be obstacles -- the target
+      being grasped and the destination pad. This picks up procedural table clutter (registered
+      with its own per-object collision mesh, is_obstacle=True) and the occluders (registered
+      without the flag) in one pass, so the metric's world matches the planner's.
+
+    The table and walls are NOT here: the office base task puts them in cuboid_collision_list,
+    a separate list. That is load-bearing -- a tabletop in the obstacle set would swamp the EDT
+    and drive eps* to zero everywhere."""
+    if obstacles == "occluders":
+        occs = getattr(env, "occluders", None) or []
+        path = os.path.join(os.environ["BENCH_ROOT"], OCCLUDER_COLLISION)
+        return [(o, path) for o in occs]
+
+    skip = set()
+    for attr in ("target_obj", "des_obj"):
+        a = getattr(env, attr, None)
+        if a is not None:
+            skip.add(id(a))
+    out = []
+    for info in (getattr(env, "collision_list", None) or []):
+        actor = info.get("actor")
+        path = info.get("collision_path")
+        if actor is None or not path or id(actor) in skip:
+            continue
+        # Articulated entries carry a "link" and are posed per-link; the metric's rigid
+        # pose-the-whole-mesh transform would place them wrong, so leave them out rather
+        # than put a misplaced solid in the field.
+        if "link" in info:
+            continue
+        out.append((actor, path))
+    return out
+
+
+def occluder_footprints_3d(env, obstacles="all"):
+    """Per obstacle, the posed COLLISION geometry -- the exact mesh files curobo's world model
+    loads for these actors (see _bench_base_task.update_world). `obstacles` selects the set:
+    "all" (scene obstacles: clutter + occluders) or "occluders" (the curated ring only); see
+    scene_obstacle_entries. We keep three things:
 
       * "mesh"  the full posed triangle mesh in WORLD coordinates -- the ground truth. Used by the
                 --occ-shape mesh path (true per-height cross-sections) and by the 3D render.
@@ -1033,27 +1109,29 @@ def occluder_footprints_3d(env):
     gripper is free to pass over -- the whole point of going 3D.
 
     "center" is the actor's world spawn position (marker only). Returns a list of
-    dict(poly=(K,2)|None, zlo, zhi, mesh=Trimesh|None, center=(3,)); None if the mesh can't load
-    (caller falls back to cylinders)."""
-    occs = getattr(env, "occluders", None)
-    if not occs:
+    dict(poly=(K,2)|None, zlo, zhi, mesh=Trimesh|None, center=(3,)); None if NOTHING could be
+    loaded (caller falls back to cylinders). An empty list means there were no obstacles."""
+    entries = scene_obstacle_entries(env, obstacles)
+    if not entries:
         return []
     try:
         import trimesh
         import transforms3d as t3d
         from scipy.spatial import ConvexHull
-        path = os.path.join(os.environ["BENCH_ROOT"], OCCLUDER_COLLISION)
-        m0 = trimesh.load(path, force="mesh")                        # same mesh for every bottle
-        V0, F0 = np.asarray(m0.vertices), np.asarray(m0.faces)
     except Exception as e:
-        print(f"[footprint] could not load occluder collision mesh ({e}); falling back to cylinders")
+        print(f"[footprint] geometry deps unavailable ({e}); falling back to cylinders")
         return None
-    out = []
-    for occ in occs:
-        pose = occ.get_pose()
+    out, missed = [], 0
+    for actor, path in entries:
+        loaded = _load_collision_mesh(path)
+        if loaded is None:
+            missed += 1
+            continue
+        V0, F0 = loaded
+        pose = actor.get_pose()
         R = t3d.quaternions.quat2mat(np.asarray(pose.q, dtype=float))   # SAPIEN quat is wxyz
         try:                                    # curobo scales the same mesh by the actor's scale
-            sc = np.asarray(occ.scale, dtype=float)
+            sc = np.asarray(actor.scale, dtype=float)
         except Exception:
             sc = 1.0
         Vw = (V0 * sc) @ R.T + np.asarray(pose.p, dtype=float)          # (V,3) posed world verts
@@ -1067,7 +1145,20 @@ def occluder_footprints_3d(env):
             mesh = None
         out.append(dict(poly=poly, zlo=float(Vw[:, 2].min()), zhi=float(Vw[:, 2].max()),
                         mesh=mesh, center=np.asarray(pose.p, dtype=float)))
+    if missed:
+        # Loud: a dropped obstacle is a hole in the clearance field, and eps* would come out
+        # optimistic through a gap that is not really there.
+        print(f"\033[93m[footprint] {missed}/{len(entries)} obstacle mesh(es) failed to load and "
+              f"are NOT in the clearance field -- eps* is optimistic by that much\033[0m")
+    if not out:
+        return None
     return out
+
+
+def obstacle_centers(foots):
+    """World centres of the posed obstacles, for the cylinder fallback and the plot markers.
+    Derived from the footprints so it always matches the obstacle set actually used."""
+    return [np.asarray(f["center"], dtype=float) for f in (foots or [])]
 
 
 def occluder_slice_polys(f, z):
@@ -1105,6 +1196,38 @@ def occluder_mask_3d(foots, XX, YY, zs, shape="mesh"):
     cols = np.column_stack([XX.ravel(), YY.ravel()])
     mask = np.zeros((nz, ny, nx), dtype=bool)
 
+    # Per-obstacle bounding-box clip. contains_points over the FULL grid costs
+    # O(nz x n_obstacles x ny x nx), which is fine for one bottle and not fine for a cluttered
+    # table. Each cross-section only ever occupies its own xy bbox, so we test just that
+    # sub-grid: the cost becomes proportional to the obstacles' combined area, not the table's.
+    # Only valid on a regular ascending grid, which is how run() builds it; otherwise fall back
+    # to the full-grid test.
+    xs1d, ys1d = XX[0, :], YY[:, 0]
+    regular = (nx > 1 and ny > 1
+               and bool(np.all(np.diff(xs1d) > 0)) and bool(np.all(np.diff(ys1d) > 0)))
+
+    def _stamp(loops, closed=True):
+        """Boolean (ny,nx) coverage of one slice's loops, evaluated on the bbox sub-grid.
+
+        closed=True is for mesh cross-sections, whose loops repeat their first vertex at the
+        end. Do NOT pass it for a plain polygon: Path(verts, closed=True) turns the LAST vertex
+        into the CLOSEPOLY marker, so a 4-corner hull would silently become a triangle."""
+        cp = MplPath.make_compound_path(*[MplPath(l, closed=closed) for l in loops])
+        hit = np.zeros((ny, nx), dtype=bool)
+        if not regular:
+            return cp.contains_points(cols).reshape(ny, nx)
+        allpts = np.vstack(loops)
+        # +-1 cell of slack so a loop edge falling between samples still covers its cell
+        ix0 = max(0, int(np.searchsorted(xs1d, allpts[:, 0].min())) - 1)
+        ix1 = min(nx, int(np.searchsorted(xs1d, allpts[:, 0].max())) + 1)
+        iy0 = max(0, int(np.searchsorted(ys1d, allpts[:, 1].min())) - 1)
+        iy1 = min(ny, int(np.searchsorted(ys1d, allpts[:, 1].max())) + 1)
+        if ix0 >= ix1 or iy0 >= iy1:
+            return hit
+        sub = np.column_stack([XX[iy0:iy1, ix0:ix1].ravel(), YY[iy0:iy1, ix0:ix1].ravel()])
+        hit[iy0:iy1, ix0:ix1] = cp.contains_points(sub).reshape(iy1 - iy0, ix1 - ix0)
+        return hit
+
     if shape == "mesh" and foots and any(f.get("mesh") is not None for f in foots):
         rescued = 0
         for iz, z in enumerate(zs):
@@ -1113,8 +1236,7 @@ def occluder_mask_3d(foots, XX, YY, zs, shape="mesh"):
                 if not loops:
                     continue
                 # compound path so an inner loop punches a hole rather than filling it
-                cp = MplPath.make_compound_path(*[MplPath(l, closed=True) for l in loops])
-                hit = cp.contains_points(cols).reshape(ny, nx)
+                hit = _stamp(loops)
                 if not hit.any():                       # thin-feature rescue (see docstring)
                     for l in loops:
                         c = l.mean(axis=0)
@@ -1133,7 +1255,7 @@ def occluder_mask_3d(foots, XX, YY, zs, shape="mesh"):
     inxy = np.zeros((len(foots), ny, nx), dtype=bool)      # per-occluder in-footprint (xy), cached
     for i, f in enumerate(foots):
         if f["poly"] is not None:
-            inxy[i] = MplPath(f["poly"]).contains_points(cols).reshape(ny, nx)
+            inxy[i] = _stamp([np.asarray(f["poly"], dtype=float)], closed=False)
     for iz, z in enumerate(zs):
         for i, f in enumerate(foots):
             if f["poly"] is not None and f["zlo"] - 1e-9 <= z <= f["zhi"] + 1e-9:
@@ -1834,12 +1956,16 @@ def run(args):
 
     # --- step 3: 3D occluder clearance (extruded posed footprints, m) ---
     with tm.section("occluder_edt"):
-        foots = occluder_footprints_3d(env)
+        foots = occluder_footprints_3d(env, obstacles=args.obstacles)
         if foots:
+            print(f"[footprint] obstacle set = {args.obstacles} -> {len(foots)} solid(s)")
             for i, f in enumerate(foots):
                 if f["poly"] is not None:
                     bb = tuple(np.round(f["poly"].max(0) - f["poly"].min(0), 3))
-                    print(f"[footprint] occ {i}: z-range [{f['zlo']:.3f},{f['zhi']:.3f}]  bbox(x,y)={bb}")
+                    print(f"[footprint] obs {i}: z-range [{f['zlo']:.3f},{f['zhi']:.3f}]  bbox(x,y)={bb}")
+        # occ_ps drives the cylinder fallback and the plot markers; derive it from the
+        # footprints so it tracks whatever obstacle set was actually used.
+        occ_ps = obstacle_centers(foots) or occ_ps
         edt = occluder_clearance_3d(foots, occ_ps, XX, YY, zs, args.res, args.zres, OCC_HALF_FOOTPRINT,
                                     shape=args.occ_shape)
     print(f"[edt] occluder solid = {args.occ_shape}"
@@ -1919,6 +2045,15 @@ def main():
                          "solid: the widest footprint held constant to the cap, which invents up to "
                          "~4cm of phantom obstacle around the neck. CHANGING THIS CHANGES eps*; pass "
                          "'extruded' to reproduce pre-2026-07-24 numbers.")
+    ap.add_argument("--obstacles", choices=["all", "occluders"], default="all",
+                    help="which actors the clearance field measures against. 'all' = every mesh in "
+                         "env.collision_list (the registry curobo's update_world uses) except the "
+                         "target and the pad, so procedural table CLUTTER counts as an obstacle "
+                         "alongside the occluder ring -- the metric's world then matches the "
+                         "planner's. 'occluders' = the curated olive-oil ring only, the "
+                         "pre-2026-07-27 behaviour. CHANGING THIS CHANGES eps* AND WHAT IT MEANS: "
+                         "under 'all' eps* is clearance to the nearest scene obstacle, not to the "
+                         "occluder, so values are not comparable across the two.")
     ap.add_argument("--gate-tau", type=float, default=0.35,
                     help="joint-space gate (rad): union adjacent FREE voxels only if the max per-joint "
                          "warm-config jump is <= tau. Set from the phase-0/2 histogram gap (~0.2-0.35). "
