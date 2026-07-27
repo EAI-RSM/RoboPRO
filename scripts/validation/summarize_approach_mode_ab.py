@@ -60,6 +60,78 @@ PAIRS = [
 # story (that is the step immediately before place_actor).
 TERMINAL_PLACEMENT_STAGES = ("place_actor",)
 
+# ---- scene difficulty from the clearance metric -----------------------------------------
+# eps* is the radius of the widest sphere that can traverse the route, so on its own it is
+# just a length. Normalizing by the gripper half-width r gives rho = eps*/r, the margin in
+# GRIPPER RADII, which is what actually decides whether the arm fits through -- and it is the
+# same comparison clearance_metric_3d.feasibility() already makes (margin = eps* - r).
+GRIPPER_R = 0.03            # m; matches clearance_metric_3d --gripper-r default
+# Boundaries, easy -> very hard, in units of rho:
+#   3.0  the corridor clears the gripper CARRYING the bottle (~0.03 + ~0.05 half-width of the
+#        0.099 m body = 0.08 m ~ 2.7r). Above it, clearance is not the binding constraint.
+#   2.0  one full gripper DIAMETER of corridor: a positioning error the size of the gripper
+#        still does not cause contact. The least principled boundary -- expect it to move.
+#   1.0  sphere feasibility. Below it no sphere-abstracted gripper fits the corridor. Called
+#        "very hard/impossible" rather than impossible because a jaw gripper is thin in one
+#        axis and can rotate into a gap, and because the metric is structurally TIGHTER than
+#        the rollout (sufficient-not-necessary joint gate, one orientation/grasp/arm).
+BUCKET_EDGES = [("easy", 3.0, math.inf), ("medium", 2.0, 3.0),
+                ("hard", 1.0, 2.0), ("very hard", 0.0, 1.0)]
+BUCKET_ORDER = [b for b, _, _ in BUCKET_EDGES]
+# Ordinal, so a single hue light -> dark rather than four categorical colours.
+BUCKET_COLOR = {"easy": "#dbe7f3", "medium": "#a9c4e0", "hard": "#6f96c4", "very hard": "#39587d"}
+
+# CAVEAT the boundaries are only ~2 z-voxels apart. The EDT measures voxel-centre to
+# voxel-centre, so eps* is optimistic by up to half a voxel: res/2 = 5 mm in xy but
+# zres/2 = 15 mm in z at the default zres=0.03, i.e. 0.17*rho and 0.5*rho. Four buckets is
+# about the finest that is resolvable at those settings, and the bias is one-directional --
+# scenes read one notch EASIER than they are.
+
+
+def clearance_bucket(eps, r=GRIPPER_R):
+    """Difficulty bucket for a scene from its gated eps*. None when eps* is unknown.
+
+    eps* = inf means no obstacles at all (nothing to squeeze past) -> easy."""
+    if eps is None:
+        return None
+    try:
+        e = float(eps)
+    except (TypeError, ValueError):
+        return None
+    if math.isnan(e):
+        return None
+    if math.isinf(e):
+        return "easy"
+    rho = e / float(r)
+    for name, lo, hi in BUCKET_EDGES:
+        if lo <= rho < hi:
+            return name
+    return "very hard" if rho < 0 else "easy"
+
+
+def scene_eps_by_seed(data: dict[str, dict[int, dict]]) -> dict[int, float]:
+    """seed -> gated eps* for that scene, joined across the modes of one scene.
+
+    eps* is a property of the SCENE, not of the approach mode: it depends on the geometry,
+    the arm and the grasp orientation, which is exactly what the expert's seed cache is keyed
+    on ((arm, scene signature)), and the formation is drawn from the seed rather than the
+    mode. So a seed measured in the seed cell describes the identical scene the direct cell
+    ran, and joining by seed is exact rather than an approximation. That matters because only
+    the seed cell builds routes -- without the join, direct would have no difficulty at all.
+
+    When several routes were built for one episode (one per arm), the SMALLEST eps* wins: it
+    is the tighter corridor, and it is the conservative choice."""
+    out: dict[int, float] = {}
+    for cell in data.values():
+        for seed, v in cell.items():
+            vals = [s["eps_gated"] for s in (v.get("seed_stats") or [])
+                    if s.get("built") and s.get("eps_gated") is not None]
+            if not vals:
+                continue
+            e = min(float(x) for x in vals)
+            out[seed] = min(out[seed], e) if seed in out else e
+    return out
+
 
 # --------------------------------------------------------------------------- io
 
@@ -407,6 +479,51 @@ def print_adjusted(mode: str, res: dict[int, dict], stages: tuple[str, ...]) -> 
           f"   (dropped {dropped})")
 
 
+def bucket_cell_stats(res: dict[int, dict], eps: dict[int, float],
+                      stages: tuple[str, ...], r=GRIPPER_R) -> dict[str, dict]:
+    """bucket -> placement-adjusted stats for one cell. Terminal-placement failures are
+    dropped FIRST, then the survivors are bucketed, so each bar answers 'of the runs that got
+    past the broken final descent in this difficulty band, how many succeeded'."""
+    kept, _ = drop_terminal_placement(res, stages)
+    out: dict[str, dict] = {}
+    for b in BUCKET_ORDER:
+        sub = {s: v for s, v in kept.items() if clearance_bucket(eps.get(s), r) == b}
+        st = cell_stats(sub)
+        if st is not None:
+            out[b] = st
+    return out
+
+
+def print_buckets(data: dict[str, dict[int, dict]], eps: dict[int, float],
+                  stages: tuple[str, ...], r=GRIPPER_R) -> None:
+    """Difficulty mix of the scenes, then the placement-adjusted rate per bucket per mode."""
+    cells = [m for m in MODES if data.get(m)]
+    if not cells:
+        return
+    all_seeds = sorted({s for m in cells for s in data[m]})
+    have = [s for s in all_seeds if s in eps]
+    print(f"\n[DIFFICULTY]  eps* / gripper r ({r:.3f} m) -> "
+          f"{'/'.join(BUCKET_ORDER)} at rho >= 3 / 2 / 1 / below")
+    if not have:
+        print("  no eps* recorded -- only the seed cell builds routes, so run that cell for")
+        print("  this scene (the difficulty of a scene does not depend on the approach mode).")
+        return
+    if len(have) < len(all_seeds):
+        print(f"  note: eps* known for {len(have)}/{len(all_seeds)} seeds; the rest had no")
+        print("        route built (build miss) and are left OUT of every bucket below.")
+    mix = {b: sum(1 for s in have if clearance_bucket(eps[s], r) == b) for b in BUCKET_ORDER}
+    print("  scene mix : " + "  ".join(f"{b}={mix[b]}" for b in BUCKET_ORDER))
+    per = {m: bucket_cell_stats(data[m], eps, stages, r) for m in cells}
+    print(f"  placement-adjusted success per bucket (failures at {'/'.join(stages)} dropped):")
+    for b in BUCKET_ORDER:
+        if not any(b in per[m] for m in cells):
+            continue
+        row = "  ".join(
+            (f"{m} {per[m][b]['k']}/{per[m][b]['n']}={per[m][b]['rate']:5.1%}"
+             if b in per[m] else f"{m} --") for m in cells)
+        print(f"    {b:<10} {row}")
+
+
 def print_failure_stages(mode: str, res: dict[int, dict]) -> None:
     """Where the failures died. In direct/seed mode a pile-up at 'pre_grasp' is the
     expected shape (no waypoint fallback); a pile-up elsewhere means the mode change
@@ -579,6 +696,139 @@ def make_adjusted_figure(data: dict[str, dict[int, dict]], out_path: Path,
     print(f"saved figure -> {out_path}")
 
 
+def make_bucket_success_figure(scenes: list[tuple[str, dict, dict]], out_path: Path,
+                               stages: tuple[str, ...] = TERMINAL_PLACEMENT_STAGES,
+                               r: float = GRIPPER_R) -> None:
+    """Placement-adjusted success rate per difficulty bucket, one panel per scene, one bar
+    series per mode -- the 2x2 broken out by how hard the scene actually was.
+
+    Colour carries the MODE (the thing being compared); the x axis carries difficulty, which
+    is ordinal and belongs on an axis rather than in a palette. Panels share a y axis so the
+    two scenes are read against each other. Bars with no scenes in that bucket are simply
+    absent, and their n is written as 0 so an empty band is not mistaken for a zero rate."""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    import numpy as np
+
+    panels = [(lbl, d, e) for lbl, d, e in scenes if any(d.get(m) for m in MODES)]
+    if not panels:
+        print("no cell data -> skipping bucket-success figure")
+        return
+    fig, axes = plt.subplots(1, len(panels), figsize=(6.2 * len(panels), 5.4),
+                             sharey=True, squeeze=False)
+    axes = axes[0]
+    any_data = False
+    for ax, (label, data, eps) in zip(axes, panels):
+        cells = [m for m in MODES if data.get(m)]
+        per = {m: bucket_cell_stats(data[m], eps, stages, r) for m in cells}
+        x = np.arange(len(BUCKET_ORDER))
+        w = 0.8 / max(1, len(cells))
+        for j, m in enumerate(cells):
+            xs, ys, elo, ehi, labs = [], [], [], [], []
+            for i, b in enumerate(BUCKET_ORDER):
+                st = per[m].get(b)
+                if st is None:
+                    continue
+                any_data = True
+                xi = x[i] + (j - (len(cells) - 1) / 2) * (w + 0.02)
+                xs.append(xi); ys.append(st["rate"])
+                elo.append(max(0.0, st["rate"] - st["ci"][0]))
+                ehi.append(max(0.0, st["ci"][1] - st["rate"]))
+                labs.append(f"{st['k']}/{st['n']}")
+            if not xs:
+                continue
+            ax.bar(xs, ys, width=w, color=MODE_COLOR[m], edgecolor="white", linewidth=1.6,
+                   label=m, zorder=2)
+            ax.errorbar(xs, ys, yerr=[elo, ehi], fmt="none", ecolor=INK, capsize=4, zorder=3)
+            for xi, yi, hi, t in zip(xs, ys, ehi, labs):
+                ax.text(xi, yi + hi + 0.02, t, ha="center", va="bottom", fontsize=8.5, color=INK)
+        # bucket occupancy, so an absent bar reads as "no scenes here", not "0% success"
+        for i, b in enumerate(BUCKET_ORDER):
+            n_b = sum(1 for s in eps if clearance_bucket(eps[s], r) == b)
+            ax.text(x[i], -0.075, f"n={n_b}", ha="center", va="top", fontsize=8.5,
+                    color=INK_MUTED)
+        ax.set_xticks(x)
+        ax.set_xticklabels(BUCKET_ORDER, fontsize=10, color=INK)
+        ax.set_title(f"{label or 'all'} scene", fontsize=12, color=INK)
+        ax.set_ylim(0, 1.12)
+        ax.yaxis.set_major_formatter(lambda v, _: f"{v:.0%}")
+        ax.grid(True, axis="y", alpha=0.25)
+        ax.set_axisbelow(True)
+        for side in ("top", "right"):
+            ax.spines[side].set_visible(False)
+    if not any_data:
+        plt.close(fig)
+        print("no eps* recorded -> skipping bucket-success figure")
+        return
+    axes[0].set_ylabel("rollout success rate", color=INK)
+    axes[0].legend(frameon=False, fontsize=10, loc="upper right")
+    fig.suptitle("Success by scene difficulty (eps*/gripper r), final-placement failures removed",
+                 fontsize=13)
+    fig.tight_layout()
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(out_path, dpi=130)
+    plt.close(fig)
+    print(f"saved figure -> {out_path}")
+
+
+def make_distribution_figure(scenes: list[tuple[str, dict, dict]], out_path: Path,
+                             r: float = GRIPPER_R) -> None:
+    """What the generator actually produced: the distribution of scene difficulty, one panel
+    per scene type, on the shared rho = eps*/r axis so curated and standard are comparable.
+
+    Bucket bands are shaded with one hue light->dark (difficulty is ordinal, not categorical)
+    and the bars are neutral, so the histogram shape is what carries the information."""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    import numpy as np
+
+    panels = [(lbl, e) for lbl, _, e in scenes if e]
+    if not panels:
+        print("no eps* recorded -> skipping distribution figure")
+        return
+    finite = [v / r for _, e in panels for v in e.values() if math.isfinite(v)]
+    hi = max(4.0, (max(finite) if finite else 4.0) * 1.05)
+    bins = np.linspace(0, hi, 25)
+
+    fig, axes = plt.subplots(1, len(panels), figsize=(6.2 * len(panels), 5.0),
+                             sharey=True, squeeze=False)
+    axes = axes[0]
+    for ax, (label, eps) in zip(axes, panels):
+        rhos = [v / r for v in eps.values() if math.isfinite(v)]
+        n_inf = sum(1 for v in eps.values() if math.isinf(v))
+        counts = {b: sum(1 for v in eps.values() if clearance_bucket(v, r) == b)
+                  for b in BUCKET_ORDER}
+        for b, lo, bhi in BUCKET_EDGES:
+            right = min(bhi, hi)
+            if lo >= hi:
+                continue
+            ax.axvspan(lo, right, color=BUCKET_COLOR[b], alpha=0.55, zorder=0, lw=0)
+            # Band label INSIDE the axes: above them it collides with the title, and the
+            # top-most band is wide enough that a midpoint label drifts far to the right.
+            ax.text((lo + right) / 2, 0.97, f"{b}\n{counts[b]}",
+                    transform=ax.get_xaxis_transform(), ha="center", va="top",
+                    fontsize=9, color=INK_MUTED, linespacing=1.4)
+        if rhos:
+            ax.hist(rhos, bins=bins, color="#3d3d3a", edgecolor="white", linewidth=0.8, zorder=2)
+        extra = f"   ({n_inf} unbounded)" if n_inf else ""
+        ax.set_title(f"{label or 'all'}  --  n={len(eps)} scenes{extra}", fontsize=12, color=INK)
+        ax.set_xlabel(r"scene difficulty   $\rho$ = eps* / gripper r", color=INK)
+        ax.set_xlim(0, hi)
+        ax.grid(True, axis="y", alpha=0.25)
+        ax.set_axisbelow(True)
+        for side in ("top", "right"):
+            ax.spines[side].set_visible(False)
+    axes[0].set_ylabel("scenes", color=INK)
+    fig.suptitle("Distribution of generated scenes by clearance difficulty", fontsize=13)
+    fig.tight_layout()
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(out_path, dpi=130)
+    plt.close(fig)
+    print(f"saved figure -> {out_path}")
+
+
 # ------------------------------------------------------------------------- main
 
 def summarize(root: Path, figure: bool = True,
@@ -600,12 +850,21 @@ def summarize(root: Path, figure: bool = True,
         print(f"scenes: {', '.join(label or '(flat)' for label, _ in scenes)}"
               "   -- paired within a scene; across scenes is descriptive only")
     print("=" * 74)
+    collected = []
     for label, scene_root in scenes:
-        summarize_scene(scene_root, label, figure=figure, stages=stages)
+        data = summarize_scene(scene_root, label, figure=figure, stages=stages)
+        collected.append((label, data, scene_eps_by_seed(data)))
+
+    # Cross-scene figures live at the ROOT: difficulty is the one axis on which curated and
+    # standard are directly comparable (rho is dimensionless), so they belong side by side.
+    if figure and collected:
+        make_bucket_success_figure(collected, root / "success_by_difficulty.png", stages)
+        make_distribution_figure(collected, root / "scene_difficulty_distribution.png")
 
 
 def summarize_scene(root: Path, label: str = "", figure: bool = True,
-                    stages: tuple[str, ...] = TERMINAL_PLACEMENT_STAGES) -> None:
+                    stages: tuple[str, ...] = TERMINAL_PLACEMENT_STAGES
+                    ) -> dict[str, dict[int, dict]]:
     cells = {m: find_cell(root, m) for m in MODES}
     data = {m: load_records(cells[m]) for m in MODES}
     stats = {m: cell_stats(data[m]) for m in MODES}
@@ -642,6 +901,8 @@ def summarize_scene(root: Path, label: str = "", figure: bool = True,
         if data[m]:
             print_adjusted(m, data[m], stages)
 
+    print_buckets(data, scene_eps_by_seed(data), stages)
+
     for a, b, why in PAIRS:
         # Silently skip a pair whose cells were not both run -- `off` is opt-in, and a
         # SKIPPED banner on every default run is noise, not information.
@@ -669,6 +930,7 @@ def summarize_scene(root: Path, label: str = "", figure: bool = True,
     if data["off"]:
         print("The 'off' cell is a reference number only -- the around-box waypoint is a")
         print("one-occluder-in-front heuristic, so it is a different task, not a control.")
+    return data
 
 
 def _selftest() -> None:
@@ -676,7 +938,7 @@ def _selftest() -> None:
     paired comparisons and the figure, with a known answer. No sim/GPU needed."""
     # Cook a case with a deliberate signal: seed wins 8 discordant pairs, loses 0.
     def rec(seed, ok, mode, attempts, seeded_route=None, secs=100.0, stage="pre_grasp",
-            n_occ=1, clutter=0):
+            n_occ=1, clutter=0, eps=0.17):
         r = {"seed": seed, "rollout_success": ok, "approach_mode": mode,
              "num_occluders": n_occ, "clutter_density": clutter,
              "rollout_seconds": secs, "rollout_failure_stage": None if ok else stage,
@@ -687,7 +949,7 @@ def _selftest() -> None:
             r["rollout_seed_stats"] = [{"arm": "left", "built": seeded_route, "reason":
                                         None if seeded_route else "no_gated_path",
                                         "seconds": 40.0, "route_voxels": 16,
-                                        "eps_gated": 0.17 if seeded_route else None}]
+                                        "eps_gated": eps if seeded_route else None}]
         return r
 
     with tempfile.TemporaryDirectory() as td:
@@ -795,15 +1057,46 @@ def _selftest() -> None:
             "curated":  (1, 0, {"direct": 4, "seed": 12}),
             "standard": (0, 8, {"direct": 7, "seed": 7}),
         }
+        # eps* per seed spans all four buckets (r=0.03 -> rho = eps/0.03):
+        #   seeds 0-4   0.10 m  rho 3.3  easy
+        #   seeds 5-9   0.075   rho 2.5  medium
+        #   seeds 10-14 0.045   rho 1.5  hard
+        #   seeds 15-19 0.015   rho 0.5  very hard
+        def eps_for(i):
+            return [0.10, 0.075, 0.045, 0.015][min(3, i // 5)]
+
         for scene, (n_occ, clutter, wins) in scene_plan.items():
             for mode, k in wins.items():
                 d = root / scene / mode / "20260727-120000"
                 d.mkdir(parents=True)
                 with (d / "records.jsonl").open("w") as fh:
                     for i in range(20):
-                        fh.write(json.dumps(rec(i, i < k, mode, 5, mode == "seed",
+                        # Only the seed cell records eps*; the direct cell must inherit it
+                        # through the by-seed join, which is what exercises that path.
+                        fh.write(json.dumps(rec(i, i < k, mode, 5,
+                                                True if mode == "seed" else None,
                                                 stage="place_actor" if i >= 14 else "pre_grasp",
-                                                n_occ=n_occ, clutter=clutter)) + "\n")
+                                                n_occ=n_occ, clutter=clutter,
+                                                eps=eps_for(i))) + "\n")
+        # ---- difficulty buckets: boundaries, the cross-mode join, and both figures ----
+        r = GRIPPER_R
+        assert clearance_bucket(3.0 * r) == "easy"           # boundaries are closed below
+        assert clearance_bucket(3.0 * r - 1e-9) == "medium"
+        assert clearance_bucket(2.0 * r) == "medium"
+        assert clearance_bucket(2.0 * r - 1e-9) == "hard"
+        assert clearance_bucket(1.0 * r) == "hard"
+        assert clearance_bucket(1.0 * r - 1e-9) == "very hard"
+        assert clearance_bucket(0.0) == "very hard"
+        assert clearance_bucket(float("inf")) == "easy"       # no obstacles at all
+        assert clearance_bucket(None) is None
+        assert clearance_bucket(float("nan")) is None
+        assert clearance_bucket("junk") is None
+        # normalization actually tracks the gripper: same eps*, bigger gripper -> harder
+        assert clearance_bucket(0.09, r=0.03) == "easy"        # rho 3.0
+        assert clearance_bucket(0.09, r=0.045) == "medium"     # rho 2.0
+        assert clearance_bucket(0.09, r=0.06) == "hard"        # rho 1.5
+        assert clearance_bucket(0.09, r=0.12) == "very hard"   # rho 0.75
+
         found = find_scenes(root)
         assert [lbl for lbl, _ in found] == ["curated", "standard"], found
         # equal weighting: same seed count per cell in both scenes
@@ -817,12 +1110,36 @@ def _selftest() -> None:
         assert not print_scene_shape({"seed": load_records(find_cell(root / "curated", "seed"))})
         empty = {"seed": {s: dict(v, num_occluders=0, clutter_density=0) for s, v in std.items()}}
         assert print_scene_shape(empty), "no-occluder AND no-clutter scene must be flagged"
+        # The by-seed join: the direct cell records NO eps*, so its difficulty can only come
+        # from the seed cell's measurement of the same scene. If this ever broke, every
+        # direct bar would silently vanish from the bucket plot.
+        cur = {m: load_records(find_cell(root / "curated", m)) for m in ("direct", "seed")}
+        assert not any(v["seed_stats"] for v in cur["direct"].values()), "fixture assumption"
+        joined = scene_eps_by_seed(cur)
+        assert len(joined) == 20, f"join lost seeds: {len(joined)}"
+        assert clearance_bucket(joined[0]) == "easy" and clearance_bucket(joined[19]) == "very hard"
+        mix = {b: sum(1 for s in joined if clearance_bucket(joined[s]) == b) for b in BUCKET_ORDER}
+        assert mix == {"easy": 5, "medium": 5, "hard": 5, "very hard": 5}, mix
+        # bucketing happens AFTER the placement drop: seeds 14-19 are dropped, so the two
+        # hardest buckets lose members (hard keeps 10-13, very hard keeps none).
+        bs = bucket_cell_stats(cur["seed"], joined, TERMINAL_PLACEMENT_STAGES)
+        assert bs["easy"]["n"] == 5 and bs["medium"]["n"] == 5, bs
+        assert bs["hard"]["n"] == 4, bs           # seed 14 died at place_actor
+        assert "very hard" not in bs, bs          # 15-19 all died at place_actor
+        # smallest eps* wins when several arms built a route for one episode
+        two_arm = {"seed": {7: {"seed_stats": [{"built": True, "eps_gated": 0.09},
+                                               {"built": True, "eps_gated": 0.02}]}}}
+        assert scene_eps_by_seed(two_arm)[7] == 0.02, "should take the tighter corridor"
+
         summarize(root, figure=True)
         for scene, _ in found:
             assert (root / scene / "approach_mode_ab.png").is_file(), scene
             assert (root / scene / "approach_mode_placement_adjusted.png").is_file(), scene
-        # figures go in the SCENE folder, never collide at the root
+        # per-scene figures stay in the scene folder; the difficulty ones are cross-scene
+        # and belong at the root, where the two scene types can be compared on one rho axis
         assert not (root / "approach_mode_ab.png").exists(), "scene figures collided at root"
+        assert (root / "success_by_difficulty.png").is_file(), "bucket-success figure missing"
+        assert (root / "scene_difficulty_distribution.png").is_file(), "distribution figure missing"
 
     print("\n[selftest] ALL PASS (loader/Wilson/McNemar/firing-rate/attempts/"
           "placement-adjusted/figures, flat + two-scene layouts, blind-scene warning)")
