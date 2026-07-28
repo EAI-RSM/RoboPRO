@@ -192,6 +192,15 @@ run_cell () {
     local rc=$?
     echo "!!! [$(date +%T)] FAILED $scene/$mode (exit $rc) -- see $logf (records.jsonl may still be complete)"
   fi
+  # Re-summarize after EVERY cell, not just at the end. records.jsonl is flushed per
+  # episode, so the data always survives an interrupted run -- but the figures are drawn
+  # by the summarizer, and running it only at the end meant a run killed part-way left
+  # nothing to look at. Cheap (seconds), and it keeps summary.txt + every PNG current so
+  # a long run can be inspected while it is still going. Never fatal: a summary that
+  # throws must not take the run down with it.
+  "$PYTHON" "$SCRIPT_DIR/summarize_approach_mode_ab.py" --root "$OUT_ROOT" \
+    > "$OUT_ROOT/summary.txt" 2>&1 \
+    || echo "    (interim summary failed -- see $OUT_ROOT/summary.txt)"
 }
 
 # Scene-major order: each scene's cells run back to back, so a run killed part-way still
