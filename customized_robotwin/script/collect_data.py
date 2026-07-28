@@ -62,6 +62,9 @@ def _apply_relation_collection_env_overrides(args):
     on_supports = relations.setdefault("on_supports", {})
     in_contains = relations.setdefault("in_contains", {})
     held_by = relations.setdefault("held_by", {})
+    visible_to = relations.setdefault("visible_to", {})
+    occludes = relations.setdefault("occludes", {})
+    blocks = relations.setdefault("blocks", {})
     bool_overrides = {
         "ROBOPRO_REACHABLE_BY_ENABLED": "enabled",
         "ROBOPRO_REACHABLE_BY_MOVABLE_ONLY": "movable_only",
@@ -86,13 +89,31 @@ def _apply_relation_collection_env_overrides(args):
         "ROBOPRO_HELD_BY_MAX_OBJECT_TCP_DISTANCE_M": (
             held_by, "max_object_tcp_distance_m", False
         ),
+        "ROBOPRO_OCCLUDES_MIN_DEPTH_MARGIN_M": (
+            occludes, "min_depth_margin_m", False
+        ),
+        "ROBOPRO_BLOCKS_CORRIDOR_CLEARANCE_M": (
+            blocks, "corridor_clearance_m", False
+        ),
+        "ROBOPRO_BLOCKS_ENDPOINT_MARGIN_M": (
+            blocks, "endpoint_margin_m", False
+        ),
     }
     ratio_overrides = {
         "ROBOPRO_ON_SUPPORTS_MIN_XY_OVERLAP_RATIO": (
             on_supports, "min_xy_overlap_ratio"
         ),
+        "ROBOPRO_OCCLUDES_MIN_OVERLAP_FRACTION": (
+            occludes, "min_overlap_fraction"
+        ),
     }
     int_overrides = {
+        "ROBOPRO_VISIBLE_TO_MIN_VISIBLE_PIXEL_COUNT": (
+            visible_to, "min_visible_pixel_count", 1
+        ),
+        "ROBOPRO_OCCLUDES_MIN_OVERLAP_PIXEL_COUNT": (
+            occludes, "min_overlap_pixel_count", 1
+        ),
         "ROBOPRO_REACHABLE_BY_FRAME_STRIDE": (reachability, "frame_stride", 1),
         "ROBOPRO_REACHABLE_BY_POSE_DECIMALS": (reachability, "pose_round_decimals", 0),
         "ROBOPRO_RELATION_OBSTACLE_DENSITY": (
@@ -105,6 +126,20 @@ def _apply_relation_collection_env_overrides(args):
         value = os.getenv(env_name)
         if value not in (None, ""):
             reachability[config_name] = _parse_env_bool(env_name, value)
+
+    value = os.getenv("ROBOPRO_OCCLUDES_MOVABLE_TARGETS_ONLY")
+    if value not in (None, ""):
+        occludes["movable_targets_only"] = _parse_env_bool(
+            "ROBOPRO_OCCLUDES_MOVABLE_TARGETS_ONLY", value
+        )
+
+    for env_name, config_name in (
+        ("ROBOPRO_BLOCKS_MOVABLE_SOURCES_ONLY", "movable_sources_only"),
+        ("ROBOPRO_BLOCKS_MOVABLE_TARGETS_ONLY", "movable_targets_only"),
+    ):
+        value = os.getenv(env_name)
+        if value not in (None, ""):
+            blocks[config_name] = _parse_env_bool(env_name, value)
 
     for env_name, (destination, config_name, strictly_positive) in float_overrides.items():
         value = os.getenv(env_name)

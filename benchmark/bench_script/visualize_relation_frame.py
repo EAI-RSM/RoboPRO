@@ -22,8 +22,8 @@ NODE_LABEL_FONT_SCALE = 0.60
 SMALL_NODE_LABEL_FONT_SCALE = 0.55
 ACTION_NODE_LABEL_FONT_SCALE = 0.62
 KNOWN_EDGE_NAMES = {
-    "near", "collides_with", "on", "supports", "part_of", "in", "contains",
-    "held_by", "reachable_by", "visible_to", "agent", "target", "destination",
+    "near", "blocks", "static_contact_with", "intentional_contact_with", "robot_collision_with", "unexpected_collision_with", "on", "supports", "part_of", "in", "contains",
+    "held_by", "reachable_by", "visible_to", "occludes", "agent", "target", "destination",
 }
 
 
@@ -63,13 +63,18 @@ def _load_relation_info(root: h5py.File):
         "on": state["on"][()] if "on" in state else None,
         "supports": state["supports"][()] if "supports" in state else None,
         "near": state["near"][()] if "near" in state else None,
-        "collides_with": state["collides_with"][()] if "collides_with" in state else None,
+        "blocks": state["blocks"][()] if "blocks" in state else None,
+        "static_contact_with": state["static_contact_with"][()] if "static_contact_with" in state else None,
+        "intentional_contact_with": state["intentional_contact_with"][()] if "intentional_contact_with" in state else None,
+        "robot_collision_with": state["robot_collision_with"][()] if "robot_collision_with" in state else None,
+        "unexpected_collision_with": state["unexpected_collision_with"][()] if "unexpected_collision_with" in state else None,
         "held_by": state["held_by"][()] if "held_by" in state else None,
         "part_of": state["part_of"][()] if "part_of" in state else None,
         "in": state["in"][()] if "in" in state else None,
         "contains": state["contains"][()] if "contains" in state else None,
         "reachable_by": state["reachable_by"][()] if "reachable_by" in state else None,
         "visible_to": state["visible_to"][()] if "visible_to" in state else None,
+        "occludes": state["occludes"][()] if "occludes" in state else None,
     }
     effector_names = _decode_string_array(state["held_by_effector_names"]) if "held_by_effector_names" in state else []
     reachable_names = _decode_string_array(state["reachable_by_effector_names"]) if "reachable_by_effector_names" in state else []
@@ -218,7 +223,7 @@ def _abstract_graph_layout(mask, object_ids, relations, frame_idx, effector_name
     node_index = {node: idx for idx, node in enumerate(nodes)}
     edges = set()
 
-    for relation_name in ("near", "collides_with", "on", "supports", "part_of", "in", "contains"):
+    for relation_name in ("near", "blocks", "static_contact_with", "intentional_contact_with", "robot_collision_with", "unexpected_collision_with", "on", "supports", "part_of", "in", "contains"):
         relation = relations.get(relation_name)
         if relation is None or relation_name in excluded_edges:
             continue
@@ -288,13 +293,25 @@ def _abstract_graph_layout(mask, object_ids, relations, frame_idx, effector_name
 
 def render_relation_frame(hdf5_path: Path, frame_idx: int, output_path: Path, width: int, height: int,
                           show_edge_labels: bool = True, excluded_edges: set[str] | None = None,
-                          abstract_layout: bool = False):
+                          abstract_layout: bool = False, occlusion_camera: str | None = None):
     excluded_edges = excluded_edges or set()
     with h5py.File(hdf5_path, "r") as root:
         object_ids, pose_world, is_present, id_to_meta = _load_object_info(root)
         relations, effector_names, reachable_names, camera_names = _load_relation_info(root)
         gripper_positions = _load_gripper_positions(root)
         action, action_edges = _load_active_action(root, frame_idx)
+        if occlusion_camera is None:
+            occlusion_camera_idx = 0 if camera_names else None
+        elif occlusion_camera not in camera_names:
+            raise SystemExit(
+                f"Unknown occlusion camera {occlusion_camera!r}; available={camera_names}"
+            )
+        else:
+            occlusion_camera_idx = camera_names.index(occlusion_camera)
+        selected_occlusion_camera = (
+            camera_names[occlusion_camera_idx]
+            if occlusion_camera_idx is not None else None
+        )
 
         num_frames = pose_world.shape[0]
         if frame_idx < 0 or frame_idx >= num_frames:
@@ -346,12 +363,17 @@ def render_relation_frame(hdf5_path: Path, frame_idx: int, output_path: Path, wi
 
         relation_order = (
             ("near", (120, 120, 120)),
-            ("collides_with", (20, 20, 220)),
+            ("blocks", (180, 80, 20)),
+            ("static_contact_with", (110, 110, 110)),
+            ("intentional_contact_with", (20, 160, 20)),
+            ("robot_collision_with", (220, 80, 20)),
+            ("unexpected_collision_with", (220, 20, 20)),
             ("on", (20, 140, 20)),
             ("supports", (150, 90, 20)),
             ("part_of", (150, 0, 150)),
             ("in", (20, 140, 20)),
             ("contains", (20, 160, 90)),
+            ("occludes", (40, 80, 230)),
         )
         for relation_name, color in relation_order:
             if relation_name in excluded_edges:
@@ -359,17 +381,25 @@ def render_relation_frame(hdf5_path: Path, frame_idx: int, output_path: Path, wi
             relation = relations.get(relation_name)
             if relation is None:
                 continue
-            matrix = relation[frame_idx]
+            if relation_name == "occludes":
+                if occlusion_camera_idx is None:
+                    continue
+                matrix = relation[frame_idx, :, :, occlusion_camera_idx]
+            else:
+                matrix = relation[frame_idx]
             for i in range(matrix.shape[0]):
                 if not mask[i]:
                     continue
                 for j in range(matrix.shape[1]):
                     if not matrix[i, j] or not mask[j]:
                         continue
-                    if relation_name in {"near", "collides_with"} and j <= i:
+                    if relation_name in {"near", "static_contact_with", "intentional_contact_with", "robot_collision_with", "unexpected_collision_with"} and j <= i:
                         continue
-                    _draw_edge(frame, object_canvas[i], object_canvas[j], color, relation_name if show_edge_labels else "",
-                               directed=relation_name not in {"near", "collides_with"},
+                    edge_label = relation_name
+                    if relation_name == "occludes" and selected_occlusion_camera:
+                        edge_label = f"occludes[{selected_occlusion_camera}]"
+                    _draw_edge(frame, object_canvas[i], object_canvas[j], color, edge_label if show_edge_labels else "",
+                               directed=relation_name not in {"near", "static_contact_with", "intentional_contact_with", "robot_collision_with", "unexpected_collision_with"},
                                dashed=relation_name in {"part_of"})
 
         held_by = relations.get("held_by")
@@ -433,7 +463,11 @@ def render_relation_frame(hdf5_path: Path, frame_idx: int, output_path: Path, wi
 
         legend = [
             ("near", (120, 120, 120)),
-            ("collides_with", (20, 20, 220)),
+            ("blocks", (180, 80, 20)),
+            ("static_contact_with", (110, 110, 110)),
+            ("intentional_contact_with", (20, 160, 20)),
+            ("robot_collision_with", (220, 80, 20)),
+            ("unexpected_collision_with", (220, 20, 20)),
             ("on", (20, 140, 20)),
             ("supports", (150, 90, 20)),
             ("part_of", (150, 0, 150)),
@@ -442,11 +476,13 @@ def render_relation_frame(hdf5_path: Path, frame_idx: int, output_path: Path, wi
             ("contains", (20, 160, 90)),
             ("reachable_by", (0, 150, 210)),
             ("visible_to", (220, 120, 20)),
+            ("occludes", (40, 80, 230)),
         ]
         legend_relation = {
-            "near": "near", "collides_with": "collides_with", "on": "on", "supports": "supports",
+            "near": "near", "blocks": "blocks", "static_contact_with": "static contact", "intentional_contact_with": "intentional contact", "robot_collision_with": "robot collision", "unexpected_collision_with": "unexpected collision", "on": "on", "supports": "supports",
             "part_of": "part_of", "held_by": "held_by", "reachable_by": "reachable_by",
-            "visible_to": "visible_to", "in": "in", "contains": "contains",
+            "visible_to": "visible_to", "occludes": "occludes",
+            "in": "in", "contains": "contains",
         }
         legend = [(label, color) for label, color in legend
                   if label not in legend_relation or legend_relation[label] not in excluded_edges]
@@ -500,6 +536,10 @@ def main():
                         help="Comma-separated or bracketed edge allowlist, e.g. '[in,held_by]'")
     parser.add_argument("--abstract-layout", type=int, choices=(0, 1), default=0,
                         help="Use deterministic relation-based node positions instead of physical poses")
+    parser.add_argument(
+        "--occlusion-camera", default="",
+        help="Camera condition for occludes edges; defaults to the first exported camera",
+    )
     args = parser.parse_args()
 
     hdf5_path = Path(args.file).expanduser().resolve()
@@ -517,7 +557,8 @@ def main():
     render_relation_frame(hdf5_path, args.frame, output_path, args.width, args.height,
                           show_edge_labels=bool(args.show_edge_labels),
                           excluded_edges=excluded_edges,
-                          abstract_layout=bool(args.abstract_layout))
+                          abstract_layout=bool(args.abstract_layout),
+                          occlusion_camera=args.occlusion_camera or None)
 
 
 if __name__ == "__main__":

@@ -62,6 +62,7 @@ REL_SHOW_EDGE_LABELS ?= 1
 REL_EXCLUDED_EDGES ?=
 REL_INCLUDED_EDGES ?=
 REL_ABSTRACT_LAYOUT ?= 0
+REL_OCCLUSION_CAMERA ?=
 
 # Graph-rich relation validation flags. REACHABLE_BY_INTERVAL is measured in
 # exported frames; 1 evaluates every changed frame, 10 evaluates every tenth.
@@ -78,6 +79,15 @@ ON_SUPPORTS_MAX_VERTICAL_SEPARATION_M ?= 0.06
 ON_SUPPORTS_MIN_XY_OVERLAP_RATIO ?= 0.20
 ON_SUPPORTS_MIN_XY_AREA_M2 ?= 0.00000001
 HELD_BY_MAX_OBJECT_TCP_DISTANCE_M ?= 0.16
+VISIBLE_TO_MIN_VISIBLE_PIXEL_COUNT ?= 1
+OCCLUDES_MIN_OVERLAP_PIXEL_COUNT ?= 1
+OCCLUDES_MIN_DEPTH_MARGIN_M ?= 0.001
+OCCLUDES_MIN_OVERLAP_FRACTION ?= 0.01
+OCCLUDES_MOVABLE_TARGETS_ONLY ?= 1
+BLOCKS_CORRIDOR_CLEARANCE_M ?= 0.04
+BLOCKS_ENDPOINT_MARGIN_M ?= 0.02
+BLOCKS_MOVABLE_SOURCES_ONLY ?= 1
+BLOCKS_MOVABLE_TARGETS_ONLY ?= 1
 IN_CONTAINS_CENTER_TOLERANCE_M ?= 0.0001
 RELATION_OBSTACLE_DENSITY ?= 14
 RELATION_EPISODE_NUM ?= 1
@@ -173,9 +183,9 @@ help:
 	'  make visualize-benchmark-rollout  Render a top-down verification MP4 from a benchmark HDF5 export.' \
 	'    Vars: VIZ_HDF5_FILE=path/to/file.hdf5 VIZ_OUTPUT_VIDEO=/tmp/rollout.mp4 VIZ_WIDTH=1280 VIZ_HEIGHT=720 VIZ_FPS=20 VIZ_TRAIL=25' \
 	'  make visualize-relation-frame Render one frame of canonical relation edges from a benchmark HDF5 export.' \
-	'    Vars: REL_HDF5_FILE=path/to/file.hdf5 REL_FRAME=0 REL_OUTPUT_IMAGE= (default: <episode>/visualizations/scene_graph/) REL_WIDTH=1600 REL_HEIGHT=1000 REL_SHOW_EDGE_LABELS=1|0 REL_EXCLUDED_EDGES=[visible_to,near] REL_INCLUDED_EDGES=[in,held_by] REL_ABSTRACT_LAYOUT=1|0' \
+	'    Vars: REL_HDF5_FILE=path/to/file.hdf5 REL_FRAME=0 REL_OUTPUT_IMAGE= (default: <episode>/visualizations/scene_graph/) REL_WIDTH=1600 REL_HEIGHT=1000 REL_SHOW_EDGE_LABELS=1|0 REL_EXCLUDED_EDGES=[visible_to,near] REL_INCLUDED_EDGES=[in,held_by] REL_ABSTRACT_LAYOUT=1|0 REL_OCCLUSION_CAMERA=countertop_camera' \
 	'  make visualize-relation-samples Render several graph-rich scene/action snapshots with node and edge legends.' \
-	'    Vars: REL_HDF5_FILE=path/to/file.hdf5 REL_SAMPLE_FRAMES=0,74,124,182,191 REL_OUTPUT_DIR= (default: <episode>/visualizations/scene_graph/) REL_SHOW_EDGE_LABELS=1|0 REL_EXCLUDED_EDGES=[visible_to,near] REL_INCLUDED_EDGES=[in,held_by] REL_ABSTRACT_LAYOUT=1|0' \
+	'    Vars: REL_HDF5_FILE=path/to/file.hdf5 REL_SAMPLE_FRAMES=0,74,124,182,191 REL_OUTPUT_DIR= (default: <episode>/visualizations/scene_graph/) REL_SHOW_EDGE_LABELS=1|0 REL_EXCLUDED_EDGES=[visible_to,near] REL_INCLUDED_EDGES=[in,held_by] REL_ABSTRACT_LAYOUT=1|0 REL_OCCLUSION_CAMERA=countertop_camera' \
 	'' \
 	'Occluder / reachability analysis (issue #35):' \
 	'  make occluder-visibility      Occluder visibility sweep (+rollout with ROLLOUT=1).' \
@@ -196,15 +206,15 @@ help:
 	'      REACHABLE_BY_CACHE_UNCHANGED=1 REACHABLE_BY_POSE_DECIMALS=3 NEAR_HORIZONTAL_THRESHOLD_M=0.10 NEAR_VERTICAL_MARGIN_M=0.08 NEAR_MIN_GEOMETRY_EXTENT_M=0.000001' \
 	'      ON_SUPPORTS_MAX_VERTICAL_PENETRATION_M=0.03 ON_SUPPORTS_MAX_VERTICAL_SEPARATION_M=0.06 ON_SUPPORTS_MIN_XY_OVERLAP_RATIO=0.20 ON_SUPPORTS_MIN_XY_AREA_M2=0.00000001' \
 	'      IN_CONTAINS_CENTER_TOLERANCE_M=0.0001' \
-	'      HELD_BY_MAX_OBJECT_TCP_DISTANCE_M=0.16' \
-	'  make action-validation-suite  Collect and check the schema-1.6 cross-task matrix.' \
+	'      HELD_BY_MAX_OBJECT_TCP_DISTANCE_M=0.16 VISIBLE_TO_MIN_VISIBLE_PIXEL_COUNT=1 OCCLUDES_MIN_OVERLAP_PIXEL_COUNT=1 OCCLUDES_MIN_DEPTH_MARGIN_M=0.001 OCCLUDES_MIN_OVERLAP_FRACTION=0.01 OCCLUDES_MOVABLE_TARGETS_ONLY=1' \
+	'  make action-validation-suite  Collect and check the schema-1.8 cross-task matrix.' \
 	'    Vars: GPU_ID=0 ACTION_VALIDATION_MODE=collect|check|all ACTION_VALIDATION_TASKS=id1,id2' \
 	'      ACTION_VALIDATION_OUTPUT_ROOT=customized_robotwin/data/action_validation_suite_v1' \
 	'      ACTION_VALIDATION_START_SEED=0 ACTION_VALIDATION_DRY_RUN=0|1 REACHABLE_BY_INTERVAL=10 ACTION_VALIDATION_OBSTACLE_DENSITY=10' \
 	'      NEAR_HORIZONTAL_THRESHOLD_M=0.10 NEAR_VERTICAL_MARGIN_M=0.08 NEAR_MIN_GEOMETRY_EXTENT_M=0.000001' \
 	'      ON_SUPPORTS_MAX_VERTICAL_PENETRATION_M=0.03 ON_SUPPORTS_MAX_VERTICAL_SEPARATION_M=0.06 ON_SUPPORTS_MIN_XY_OVERLAP_RATIO=0.20 ON_SUPPORTS_MIN_XY_AREA_M2=0.00000001' \
 	'      IN_CONTAINS_CENTER_TOLERANCE_M=0.0001' \
-	'      HELD_BY_MAX_OBJECT_TCP_DISTANCE_M=0.16' \
+	'      HELD_BY_MAX_OBJECT_TCP_DISTANCE_M=0.16 VISIBLE_TO_MIN_VISIBLE_PIXEL_COUNT=1 OCCLUDES_MIN_OVERLAP_PIXEL_COUNT=1 OCCLUDES_MIN_DEPTH_MARGIN_M=0.001 OCCLUDES_MIN_OVERLAP_FRACTION=0.01 OCCLUDES_MOVABLE_TARGETS_ONLY=1' \
 	'      POLICY_ACTION_PROVIDER=rule_based POLICY_ACTION_PROVIDER_CONFIG=' \
 	'  make check-action-validation-suite  Check existing suite outputs without collecting.' \
 	'  make collect-rollout-pi05     Dual-env pi05 rollout collection.' \
@@ -341,6 +351,15 @@ relation-validation:
 		export ROBOPRO_ON_SUPPORTS_MIN_XY_AREA_M2="$(ON_SUPPORTS_MIN_XY_AREA_M2)"; \
 		export ROBOPRO_IN_CONTAINS_CENTER_TOLERANCE_M="$(IN_CONTAINS_CENTER_TOLERANCE_M)"; \
 		export ROBOPRO_HELD_BY_MAX_OBJECT_TCP_DISTANCE_M="$(HELD_BY_MAX_OBJECT_TCP_DISTANCE_M)"; \
+		export ROBOPRO_VISIBLE_TO_MIN_VISIBLE_PIXEL_COUNT="$(VISIBLE_TO_MIN_VISIBLE_PIXEL_COUNT)"; \
+		export ROBOPRO_OCCLUDES_MIN_OVERLAP_PIXEL_COUNT="$(OCCLUDES_MIN_OVERLAP_PIXEL_COUNT)"; \
+		export ROBOPRO_OCCLUDES_MIN_DEPTH_MARGIN_M="$(OCCLUDES_MIN_DEPTH_MARGIN_M)"; \
+		export ROBOPRO_OCCLUDES_MIN_OVERLAP_FRACTION="$(OCCLUDES_MIN_OVERLAP_FRACTION)"; \
+		export ROBOPRO_OCCLUDES_MOVABLE_TARGETS_ONLY="$(OCCLUDES_MOVABLE_TARGETS_ONLY)"; \
+		export ROBOPRO_BLOCKS_CORRIDOR_CLEARANCE_M="$(BLOCKS_CORRIDOR_CLEARANCE_M)"; \
+		export ROBOPRO_BLOCKS_ENDPOINT_MARGIN_M="$(BLOCKS_ENDPOINT_MARGIN_M)"; \
+		export ROBOPRO_BLOCKS_MOVABLE_SOURCES_ONLY="$(BLOCKS_MOVABLE_SOURCES_ONLY)"; \
+		export ROBOPRO_BLOCKS_MOVABLE_TARGETS_ONLY="$(BLOCKS_MOVABLE_TARGETS_ONLY)"; \
 		export ROBOPRO_RELATION_OBSTACLE_DENSITY="$(RELATION_OBSTACLE_DENSITY)"; \
 		export ROBOPRO_RELATION_EPISODE_NUM="$(RELATION_EPISODE_NUM)"; \
 		export ROBOPRO_RELATION_SAVE_PATH="$(RELATION_SAVE_PATH)"; \
@@ -350,7 +369,7 @@ action-validation-suite:
 	$(call RUN_IN_CUSTOMIZED,\
 		export ROBOPRO_ACTION_PROVIDER="$(POLICY_ACTION_PROVIDER)"; \
 		export ROBOPRO_ACTION_PROVIDER_CONFIG="$(POLICY_ACTION_PROVIDER_CONFIG)"; \
-		cmd='$(PYTHON) ../benchmark/bench_script/run_action_validation_suite.py "$(ACTION_VALIDATION_MODE)" --matrix "$(ACTION_VALIDATION_MATRIX)" --output-root "$(abspath $(ACTION_VALIDATION_OUTPUT_ROOT))" --gpu "$(GPU_ID)" --start-seed "$(ACTION_VALIDATION_START_SEED)" --task-timeout "$(ACTION_VALIDATION_TASK_TIMEOUT)" --reachability-interval "$(REACHABLE_BY_INTERVAL)" --near-horizontal-threshold "$(NEAR_HORIZONTAL_THRESHOLD_M)" --near-vertical-margin "$(NEAR_VERTICAL_MARGIN_M)" --near-min-geometry-extent "$(NEAR_MIN_GEOMETRY_EXTENT_M)" --on-supports-max-vertical-penetration "$(ON_SUPPORTS_MAX_VERTICAL_PENETRATION_M)" --on-supports-max-vertical-separation "$(ON_SUPPORTS_MAX_VERTICAL_SEPARATION_M)" --on-supports-min-xy-overlap-ratio "$(ON_SUPPORTS_MIN_XY_OVERLAP_RATIO)" --on-supports-min-xy-area "$(ON_SUPPORTS_MIN_XY_AREA_M2)" --in-contains-center-tolerance "$(IN_CONTAINS_CENTER_TOLERANCE_M)" --held-by-max-object-tcp-distance "$(HELD_BY_MAX_OBJECT_TCP_DISTANCE_M)" --obstacle-density "$(ACTION_VALIDATION_OBSTACLE_DENSITY)"'; \
+		cmd='$(PYTHON) ../benchmark/bench_script/run_action_validation_suite.py "$(ACTION_VALIDATION_MODE)" --matrix "$(ACTION_VALIDATION_MATRIX)" --output-root "$(abspath $(ACTION_VALIDATION_OUTPUT_ROOT))" --gpu "$(GPU_ID)" --start-seed "$(ACTION_VALIDATION_START_SEED)" --task-timeout "$(ACTION_VALIDATION_TASK_TIMEOUT)" --reachability-interval "$(REACHABLE_BY_INTERVAL)" --near-horizontal-threshold "$(NEAR_HORIZONTAL_THRESHOLD_M)" --near-vertical-margin "$(NEAR_VERTICAL_MARGIN_M)" --near-min-geometry-extent "$(NEAR_MIN_GEOMETRY_EXTENT_M)" --on-supports-max-vertical-penetration "$(ON_SUPPORTS_MAX_VERTICAL_PENETRATION_M)" --on-supports-max-vertical-separation "$(ON_SUPPORTS_MAX_VERTICAL_SEPARATION_M)" --on-supports-min-xy-overlap-ratio "$(ON_SUPPORTS_MIN_XY_OVERLAP_RATIO)" --on-supports-min-xy-area "$(ON_SUPPORTS_MIN_XY_AREA_M2)" --in-contains-center-tolerance "$(IN_CONTAINS_CENTER_TOLERANCE_M)" --held-by-max-object-tcp-distance "$(HELD_BY_MAX_OBJECT_TCP_DISTANCE_M)" --visible-to-min-visible-pixel-count "$(VISIBLE_TO_MIN_VISIBLE_PIXEL_COUNT)" --occludes-min-overlap-pixel-count "$(OCCLUDES_MIN_OVERLAP_PIXEL_COUNT)" --occludes-min-depth-margin "$(OCCLUDES_MIN_DEPTH_MARGIN_M)" --occludes-min-overlap-fraction "$(OCCLUDES_MIN_OVERLAP_FRACTION)" --occludes-movable-targets-only "$(OCCLUDES_MOVABLE_TARGETS_ONLY)" --blocks-corridor-clearance "$(BLOCKS_CORRIDOR_CLEARANCE_M)" --blocks-endpoint-margin "$(BLOCKS_ENDPOINT_MARGIN_M)" --blocks-movable-sources-only "$(BLOCKS_MOVABLE_SOURCES_ONLY)" --blocks-movable-targets-only "$(BLOCKS_MOVABLE_TARGETS_ONLY)" --obstacle-density "$(ACTION_VALIDATION_OBSTACLE_DENSITY)"'; \
 		if [[ -n "$(ACTION_VALIDATION_TASKS)" ]]; then cmd+=" --tasks $(ACTION_VALIDATION_TASKS)"; fi; \
 		if [[ "$(ACTION_VALIDATION_DRY_RUN)" == "1" ]]; then cmd+=" --dry-run"; fi; \
 		eval "$$cmd")
@@ -482,6 +501,7 @@ visualize-relation-frame:
 	if [[ "$$output_image" != /* ]]; then output_image="$(ROOT_DIR)/$$output_image"; fi; \
 	cmd='$(PYTHON) ../benchmark/bench_script/visualize_relation_frame.py --file "'"$$hdf5_file"'" --frame "$(REL_FRAME)" --output "'"$$output_image"'"'; \
 	cmd+=" --width $(REL_WIDTH) --height $(REL_HEIGHT) --show-edge-labels $(REL_SHOW_EDGE_LABELS) --excluded-edges '$(REL_EXCLUDED_EDGES)' --included-edges '$(REL_INCLUDED_EDGES)' --abstract-layout $(REL_ABSTRACT_LAYOUT)"; \
+	if [[ -n "$(REL_OCCLUSION_CAMERA)" ]]; then cmd+=" --occlusion-camera $(REL_OCCLUSION_CAMERA)"; fi; \
 	$(call RUN_IN_CUSTOMIZED,eval "$$cmd")
 
 visualize-relation-samples:
@@ -500,6 +520,7 @@ visualize-relation-samples:
 		output_image="$$output_dir/$$(basename "$$hdf5_file" .hdf5)_frame_$$(printf '%04d' "$$frame").png"; \
 		cmd='$(PYTHON) ../benchmark/bench_script/visualize_relation_frame.py --file "'"$$hdf5_file"'" --frame '"$$frame"' --output "'"$$output_image"'"'; \
 		cmd+=" --width $(REL_WIDTH) --height $(REL_HEIGHT) --show-edge-labels $(REL_SHOW_EDGE_LABELS) --excluded-edges '$(REL_EXCLUDED_EDGES)' --included-edges '$(REL_INCLUDED_EDGES)' --abstract-layout $(REL_ABSTRACT_LAYOUT)"; \
+	if [[ -n "$(REL_OCCLUSION_CAMERA)" ]]; then cmd+=" --occlusion-camera $(REL_OCCLUSION_CAMERA)"; fi; \
 		$(call RUN_IN_CUSTOMIZED,eval "$$cmd") || exit $$?; \
 	done
 

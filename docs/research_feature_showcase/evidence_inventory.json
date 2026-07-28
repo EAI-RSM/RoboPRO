@@ -449,7 +449,6 @@
           "held_by",
           "near",
           "reachable_by",
-          "collides_with",
           "visible_to",
           "part_of"
         ],
@@ -4497,7 +4496,6 @@
           "held_by",
           "near",
           "reachable_by",
-          "collides_with",
           "visible_to",
           "part_of"
         ],
@@ -5488,7 +5486,6 @@
           "held_by",
           "near",
           "reachable_by",
-          "collides_with",
           "visible_to",
           "part_of"
         ],
@@ -7012,7 +7009,6 @@
           "held_by",
           "near",
           "reachable_by",
-          "collides_with",
           "visible_to",
           "part_of"
         ],

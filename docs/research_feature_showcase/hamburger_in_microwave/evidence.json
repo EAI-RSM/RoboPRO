@@ -82,7 +82,7 @@
     {
       "frame": 123,
       "title": "Container Contact Established",
-      "caption": "collides_with appears between the hamburger and microwave.",
+      "caption": "legacy non-support contact appears between the hamburger and microwave.",
       "active_action": {
         "id": 47,
         "type": "transport",
@@ -137,16 +137,6 @@
           "relation": "contains",
           "source": "microwave",
           "destination": "006_hamburg"
-        },
-        {
-          "relation": "collides_with",
-          "source": "microwave",
-          "destination": "006_hamburg"
-        },
-        {
-          "relation": "collides_with",
-          "source": "006_hamburg",
-          "destination": "microwave"
         },
         {
           "relation": "held_by",
@@ -222,16 +212,6 @@
           "relation": "contains",
           "source": "microwave",
           "destination": "006_hamburg"
-        },
-        {
-          "relation": "collides_with",
-          "source": "microwave",
-          "destination": "006_hamburg"
-        },
-        {
-          "relation": "collides_with",
-          "source": "006_hamburg",
-          "destination": "microwave"
         },
         {
           "relation": "held_by",
@@ -310,16 +290,6 @@
           "relation": "contains",
           "source": "microwave",
           "destination": "006_hamburg"
-        },
-        {
-          "relation": "collides_with",
-          "source": "microwave",
-          "destination": "006_hamburg"
-        },
-        {
-          "relation": "collides_with",
-          "source": "006_hamburg",
-          "destination": "microwave"
         }
       ],
       "graph_outputs": {
@@ -381,7 +351,6 @@
         "agent",
         "in",
         "contains",
-        "collides_with",
         "held_by",
         "reachable_by",
         "visible_to"

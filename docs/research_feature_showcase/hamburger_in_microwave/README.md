@@ -5,7 +5,7 @@ This pilot pairs each exact exported camera frame with two graph views at the sa
 | Frame | Evidence stage | Interpretation |
 |---:|---|---|
 | 122 | Contained Before Contact | The hamburger is inside the microwave while transport remains active. |
-| 123 | Container Contact Established | collides_with appears between the hamburger and microwave. |
+| 123 | Container Contact Established | Legacy non-support contact evidence appears between the hamburger and microwave. |
 | 128 | Contact Re-established | The transient object-container contact appears again during transport. |
 | 142 | Release Phase | The hamburger remains contained as the left gripper begins release. |
 

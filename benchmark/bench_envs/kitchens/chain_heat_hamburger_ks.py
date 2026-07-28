@@ -102,17 +102,30 @@ class chain_heat_hamburger_ks(KitchenS_base_task):
         tgt_y = mw_y + float(np.random.uniform(-0.10, -0.04))
         tgt_z = mw_z + 0.02
 
+        placement_meta = {
+            "benchmark_target_entity": self.target_obj,
+            "benchmark_destination_entity": self.microwave,
+        }
         hover_pose = [tgt_x, tgt_y - 0.15, tgt_z] + grasp_q
-        self.move(self.move_to_pose(arm_tag, hover_pose))
+        self.move(self.move_to_pose(
+            arm_tag, hover_pose, benchmark_action="transport",
+            benchmark_phase="transition", **placement_meta,
+        ))
         if not self.plan_success:
             self.plan_success = True
 
         insert_pose = [tgt_x, tgt_y, tgt_z - 0.02] + grasp_q
-        self.move(self.move_to_pose(arm_tag, insert_pose))
+        self.move(self.move_to_pose(
+            arm_tag, insert_pose, benchmark_action="place",
+            benchmark_phase="final_descent", **placement_meta,
+        ))
         if not self.plan_success:
             self.plan_success = True
 
-        self.move(self.open_gripper(arm_tag, pos=1.0))
+        self.move(self.open_gripper(
+            arm_tag, pos=1.0, benchmark_action="release",
+            benchmark_phase="final_descent", **placement_meta,
+        ))
         self.move(self.move_by_displacement(
             arm_tag=arm_tag, y=-0.20, benchmark_action="retreat",
         ))

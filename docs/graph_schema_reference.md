@@ -1,7 +1,7 @@
 # RoboPRO Graph Schema Reference
 
 This is the authoritative implementation-facing reference for the graph-rich
-RoboPRO benchmark export. It describes schema version `1.6.0` as written by the
+RoboPRO benchmark export. It describes schema version `1.8.1` as written by the
 current exporter. Research ideas that are not yet exported are listed separately
 under [Reserved and planned relations](#reserved-and-planned-relations).
 
@@ -46,7 +46,7 @@ The export identifies itself with:
 
 ```text
 schema_name    = robopro_benchmark_support
-schema_version = 1.6.0
+schema_version = 1.8.1
 ```
 
 ## Node types
@@ -142,7 +142,7 @@ Canonical action types include the object-manipulation sequence `approach`,
 articulation entity. `parameters_json` identifies the interaction part and joint
 index; handle parts are not yet independent catalog nodes.
 
-Schema `1.6.0` also maps each action node to an `ACT` tool-call envelope. The
+Schema `1.7.0` retains the schema-1.6 policy contract and maps each action node to an `ACT` tool-call envelope. The
 resolved provider, provider registry, and JSON tool schema are stored in
 `policy_action_contract`; see [Policy-facing action contract](policy_action_contract.md).
 
@@ -166,8 +166,12 @@ and `C` is cameras.
 | `held_by` | directed, `[T,N,E]` | Source is currently grasped by destination end effector. | `bottle --held_by--> right_ee` |
 | `near` | symmetric, `[T,N,N]` | Entities are spatially close under the configured geometric threshold; contact is not required. | `bottle --near-- milk_box` |
 | `reachable_by` | directed, `[T,N,E]` | Source position has a collision-aware, position-only IK solution for destination end effector. | `bottle --reachable_by--> right_ee` |
-| `collides_with` | symmetric, `[T,N,N]` | Simulator contact passed benchmark collision filtering. | `gripper --collides_with-- milk_box` |
+| `static_contact_with` | symmetric, `[T,N,N]` | Non-support contact between furniture/static scene entities. | `wall --static_contact_with-- microwave` |
+| `intentional_contact_with` | symmetric, `[T,N,N]` | Contact grounded in the currently executing expert action. | `gripper --intentional_contact_with-- bottle` |
+| `robot_collision_with` | symmetric, `[T,N,N]` | Non-intentional robot–environment contact. | `robot --robot_collision_with-- cabinet` |
+| `unexpected_collision_with` | symmetric, `[T,N,N]` | Remaining non-support contact. | `bottle --unexpected_collision_with-- distractor` |
 | `visible_to` | directed, `[T,N,C]` | Source contributes at least one actor-segmentation pixel to destination camera. | `bottle --visible_to--> countertop_camera` |
+| `occludes` | directed and camera-conditioned, `[T,N,N,C]` | Source has closer segmentation pixels inside destination's projected 3-D AABB for the selected camera. | `milk_box --occludes[countertop_camera]--> bottle` |
 | `part_of` | directed, `[T,N,N]` | Source is a structural part of destination. | `drawer_handle --part_of--> drawer` |
 
 ### Important semantic distinctions
@@ -184,11 +188,27 @@ Effective parameters are stored under
 `ON_SUPPORTS_MAX_VERTICAL_SEPARATION_M`,
 `ON_SUPPORTS_MIN_XY_OVERLAP_RATIO`, and `ON_SUPPORTS_MIN_XY_AREA_M2`.
 
+
+#### Semantic contact edges and raw contact
+
+Schema `1.7.0` exports four mutually exclusive non-support contact relations,
+using precedence `intentional → static → robot → unexpected`. Their union is
+exactly `raw_contact AND NOT(on OR supports)`. Intentional edges are grounded in
+the currently executing action node. Static contact includes non-support
+non-robot contact present in exported frame 0 plus furniture–furniture contact. Baseline evidence never suppresses a robot collision. Gripper
+links map to end-effector nodes; other robot links map to the robot node.
+Effective classification provenance is
+stored under `benchmark_support/relation_parameters/contact_semantics/`.
+
+`raw_contact(A,B)` remains the symmetric simulator-contact evidence after the
+contact-point filter. Ordinary support contact remains available through
+`raw_contact`, `on`, and `supports`, but is excluded from the four semantic
+non-support contact relations.
+
 #### `near` versus contact
 
 `near(A,B)` means geometrically close. It does not assert touching, collision,
-reachability, or unobstructed access. `raw_contact` reports simulator contact;
-`collides_with` reports contact that survives benchmark collision filtering.
+reachability, or unobstructed access. `raw_contact` reports simulator contact; the four semantic contact edges classify non-support contact.
 
 `near` uses world-frame axis-aligned bounding boxes. Its effective parameters
 are exported once per episode under
@@ -219,12 +239,37 @@ when the configured rounded scene signature is unchanged.
 
 #### `visible_to` and occlusion
 
-`visible_to(object,camera)` is true when at least one object pixel is present in
+`visible_to(object,camera)` is true when the object's actor-segmentation pixel
+count meets the configured `min_visible_pixel_count` threshold. The default is
+one pixel, preserving the original presence semantics. The effective value is
+stored under `benchmark_support/relation_parameters/visible_to/` and can be
+overridden with `VISIBLE_TO_MIN_VISIBLE_PIXEL_COUNT`.
+
+With the default, at least one object pixel must be present in
 the saved actor segmentation. `visible_pixel_count[T,N,C]` retains the evidence,
 and `visible_to_valid[T,N,C]` distinguishes evaluated zero visibility from
 missing segmentation. An object can be partially occluded and still be
-`visible_to` the camera. The current exporter does not identify which object is
-the occluder; therefore it does not yet export `occludes` edges.
+`visible_to` the camera.
+
+Schema `1.8.1` refines `occludes[source,target,camera]`. The MVP
+projects the target's privileged world-space 3-D AABB into the camera and uses
+its convex projected silhouette as an amodal proxy. It counts source
+actor-segmentation pixels inside that silhouette and requires their median
+observed depth to be closer than the target AABB's nearest camera depth.
+`occlusion_overlap_pixel_count`, `occlusion_overlap_fraction`, source median
+depth, target-front depth, and projected target area preserve the evidence.
+`occludes_valid[T,N,N,C]` separates evaluated negatives from unavailable
+geometry, segmentation, calibration, or depth. Movable targets are evaluated
+by default; skipped targets remain invalid rather than negative.
+
+For sim-to-real transfer, segmentation, calibration, and depth are explicitly
+replaceable perception inputs and may be noisy. The target AABB projection is
+privileged benchmark supervision; a deployed system may replace it with a
+detector, pose estimator, reconstructed object model, or uncertainty-aware
+amodal mask. Consumers should use provenance, validity, evidence magnitudes,
+and future confidence fields rather than treating every edge as noise-free
+ground truth. The convex projected AABB can still overestimate thin, rotated,
+or articulated silhouettes.
 
 #### Containment
 
@@ -252,6 +297,18 @@ distance no greater than the configured threshold. The default threshold is
 object or effector geometry. `grasped_by_code[T,N]` is derived exactly from the
 two arm columns (`-1`: neither, `0`: left, `1`: right, `2`: both). Effective
 parameters are exported under `benchmark_support/relation_parameters/held_by/`.
+
+
+#### `part_of`
+
+`part_of(source,destination)` records direct privileged structural membership,
+not contact, containment, or geometric proximity. The current catalog declares
+`left_ee --part_of--> robot` and `right_ee --part_of--> robot`. It does not
+export a transitive closure. `part_of_valid[T,N,N]` is closed-world over the
+catalog: every entity pair is evaluated, and absent edges are known negatives.
+Construction semantics are stored under
+`benchmark_support/relation_parameters/part_of/`. There is no Makefile
+threshold because this relation has no numerical estimator parameter.
 
 ## Action vocabulary
 
@@ -357,7 +414,6 @@ populate relation tensors for them:
 | Relation | Intended meaning | Example | Current status |
 |---|---|---|---|
 | `blocks` | Source obstructs access or motion to destination. | `milk_box --blocks--> bottle` | Planned; no exported tensor. |
-| `occludes` | Source visually occludes destination from a specified viewpoint. | `milk_box --occludes--> bottle` | Planned; no occluder-attribution tensor. |
 | `contact_risk_with` | Candidate action or entity has predicted unsafe contact risk with another entity. | `transport_4 --contact_risk_with--> glass` | Planned; no exported tensor. |
 
 Do not train these as negative labels merely because their datasets are absent.
@@ -427,3 +483,13 @@ The schema constants and exporter implementation live in
 `benchmark/bench_script/inspect_benchmark_hdf5.py`. If code and this document
 diverge, treat that as a schema/documentation bug and update both in the same
 change.
+
+## `blocks` versus `occludes`
+
+`blocks(source, target)` is a directional, camera-independent physical-access edge. In schema 1.9 it is true when the source object's world AABB, expanded by `corridor_clearance_m`, intersects at least one nominal straight segment from an end effector to the target center. The segment stops `endpoint_margin_m` before the target. `blocks_by_effector[source,target,effector]` preserves the evidence used for the canonical union, and both forms have explicit validity masks.
+
+This is intentionally an approach-corridor predicate, not a proof that the target has no collision-free path. A motion planner may route around a blocking object, and `reachable_by` remains a separate collision-aware endpoint-IK relation. Future work should add planned-path-conditioned blocking and counterfactual obstacle removal when the planner exposes stable object-level collision attribution.
+
+`occludes(source,target,camera)` is camera-conditioned visual obstruction. It projects the target's privileged 3-D AABB, measures source segmentation overlap inside that amodal silhouette, and requires the source depth to be in front of the target by a configurable margin. It does not imply physical obstruction.
+
+For sim-to-real transfer, both relations export provenance and validity. `blocks` can consume perceived 3-D boxes and robot pose; `occludes` can consume calibrated segmentation, depth, and estimated target geometry. Missing or unreliable inputs must be marked invalid. Confidence-valued boxes, calibration uncertainty, temporal filtering, and probabilistic edge confidence remain future extensions.

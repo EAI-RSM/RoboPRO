@@ -24,9 +24,16 @@ from .utils.benchmark_relations import (
     CONTAINER_LABEL_TOKENS,
     IMPLEMENTED_BIPARTITE_RELATION_NAMES,
     IMPLEMENTED_BINARY_RELATION_NAMES,
+    IMPLEMENTED_CAMERA_CONDITIONED_RELATION_NAMES,
     IMPLEMENTED_RELATION_NAMES,
     IN_CONTAINS_CENTER_TOLERANCE_M,
     HELD_BY_MAX_OBJECT_TCP_DISTANCE_M,
+    VISIBLE_TO_MIN_VISIBLE_PIXEL_COUNT,
+    OCCLUDES_MIN_OVERLAP_PIXEL_COUNT,
+    OCCLUDES_MIN_DEPTH_MARGIN_M,
+    OCCLUDES_MIN_OVERLAP_FRACTION,
+    BLOCKS_CORRIDOR_CLEARANCE_M,
+    BLOCKS_ENDPOINT_MARGIN_M,
     MIN_GEOMETRY_EXTENT_M,
     NEAR_HORIZONTAL_THRESHOLD_M,
     NEAR_VERTICAL_MARGIN_M,
@@ -35,10 +42,15 @@ from .utils.benchmark_relations import (
     ON_SUPPORTS_MIN_XY_AREA_M2,
     ON_SUPPORTS_MIN_XY_OVERLAP_RATIO,
     RelationName,
+    classify_collision_semantics,
     compute_held_by_relations,
+    compute_visible_to_relations,
+    compute_occludes_relations,
+    compute_blocks_relations,
     compute_in_contains_relations,
     compute_near_relations,
     compute_on_supports_relations,
+    compute_part_of_relations,
     compute_xy_aabb_gap,
     is_container_entry,
     serialize_and_validate_relations,
@@ -231,7 +243,7 @@ DEFAULT_VISIBILITY_BUCKETS = [
 
 class Base_Task(gym.Env):
     BENCHMARK_SCHEMA_NAME = "robopro_benchmark_support"
-    BENCHMARK_SCHEMA_VERSION = "1.6.0"
+    BENCHMARK_SCHEMA_VERSION = "1.9.0"
     BENCHMARK_EXPORTER_NAME = "robopro_benchmark_export"
     BENCHMARK_ROBOT_OBJECT_ID = -1
     BENCHMARK_LEFT_EE_OBJECT_ID = -2
@@ -243,6 +255,7 @@ class Base_Task(gym.Env):
     BENCHMARK_IMPLEMENTED_RELATION_NAMES = IMPLEMENTED_RELATION_NAMES
     BENCHMARK_IMPLEMENTED_BINARY_RELATION_NAMES = IMPLEMENTED_BINARY_RELATION_NAMES
     BENCHMARK_IMPLEMENTED_BIPARTITE_RELATION_NAMES = IMPLEMENTED_BIPARTITE_RELATION_NAMES
+    BENCHMARK_IMPLEMENTED_CAMERA_CONDITIONED_RELATION_NAMES = IMPLEMENTED_CAMERA_CONDITIONED_RELATION_NAMES
     BENCHMARK_NEAR_HORIZONTAL_THRESHOLD_M = NEAR_HORIZONTAL_THRESHOLD_M
     BENCHMARK_NEAR_VERTICAL_MARGIN_M = NEAR_VERTICAL_MARGIN_M
     BENCHMARK_NEAR_MIN_GEOMETRY_EXTENT_M = MIN_GEOMETRY_EXTENT_M
@@ -252,9 +265,17 @@ class Base_Task(gym.Env):
     BENCHMARK_ON_SUPPORTS_MIN_XY_AREA_M2 = ON_SUPPORTS_MIN_XY_AREA_M2
     BENCHMARK_IN_CONTAINS_CENTER_TOLERANCE_M = IN_CONTAINS_CENTER_TOLERANCE_M
     BENCHMARK_HELD_BY_MAX_OBJECT_TCP_DISTANCE_M = HELD_BY_MAX_OBJECT_TCP_DISTANCE_M
+    BENCHMARK_VISIBLE_TO_MIN_VISIBLE_PIXEL_COUNT = VISIBLE_TO_MIN_VISIBLE_PIXEL_COUNT
+    BENCHMARK_OCCLUDES_MIN_OVERLAP_PIXEL_COUNT = OCCLUDES_MIN_OVERLAP_PIXEL_COUNT
+    BENCHMARK_OCCLUDES_MIN_DEPTH_MARGIN_M = OCCLUDES_MIN_DEPTH_MARGIN_M
+    BENCHMARK_OCCLUDES_MIN_OVERLAP_FRACTION = OCCLUDES_MIN_OVERLAP_FRACTION
+    BENCHMARK_BLOCKS_CORRIDOR_CLEARANCE_M = BLOCKS_CORRIDOR_CLEARANCE_M
+    BENCHMARK_BLOCKS_ENDPOINT_MARGIN_M = BLOCKS_ENDPOINT_MARGIN_M
     BENCHMARK_AUXILIARY_RELATION_STATE_NAMES = (
         "raw_contact",
         "grasped_by_code",
+        "blocks_by_effector",
+        "blocks_by_effector_valid",
     )
     BENCHMARK_CANONICAL_ACTION_NAMES = (
         "approach", "grasp", "lift", "transport", "place", "release",
@@ -296,6 +317,10 @@ class Base_Task(gym.Env):
             }
         if not hasattr(self, "_benchmark_reachability_cache"):
             self._benchmark_reachability_cache = None
+        if not hasattr(self, "_benchmark_baseline_non_support_contact"):
+            self._benchmark_baseline_non_support_contact = None
+        if not hasattr(self, "_benchmark_successful_placement_pairs"):
+            self._benchmark_successful_placement_pairs = set()
 
     # =========================================================== Init Task Env ===========================================================
     def _init_task_env_(self, table_xy_bias=[0, 0], table_height_bias=0, **kwags):
@@ -424,6 +449,7 @@ class Base_Task(gym.Env):
         self._benchmark_action_nodes = []
         self._benchmark_held_object_ids = {"left": None, "right": None}
         self._benchmark_held_object_state_known = {"left": False, "right": False}
+        self._benchmark_successful_placement_pairs = set()
         relation_config = kwags.get("benchmark_relations", {}) or {}
         near_config = relation_config.get("near", {}) or {}
         self._benchmark_near_config = self._resolve_benchmark_near_config(near_config)
@@ -439,6 +465,16 @@ class Base_Task(gym.Env):
         self._benchmark_held_by_config = self._resolve_benchmark_held_by_config(
             held_by_config
         )
+        visible_to_config = relation_config.get("visible_to", {}) or {}
+        self._benchmark_visible_to_config = self._resolve_benchmark_visible_to_config(
+            visible_to_config
+        )
+        occludes_config = relation_config.get("occludes", {}) or {}
+        self._benchmark_occludes_config = self._resolve_benchmark_occludes_config(
+            occludes_config
+        )
+        blocks_config = relation_config.get("blocks", {}) or {}
+        self._benchmark_blocks_config = self._resolve_benchmark_blocks_config(blocks_config)
         reachability_config = relation_config.get("reachable_by", {}) or {}
         self._benchmark_reachability_config = {
             "enabled": bool(reachability_config.get("enabled", True)),
@@ -448,6 +484,7 @@ class Base_Task(gym.Env):
             "pose_round_decimals": max(0, int(reachability_config.get("pose_round_decimals", 3))),
         }
         self._benchmark_reachability_cache = None
+        self._benchmark_baseline_non_support_contact = None
 
     @classmethod
     def _resolve_benchmark_near_config(cls, config):
@@ -537,6 +574,90 @@ class Base_Task(gym.Env):
             )
         return {"max_object_tcp_distance_m": distance}
 
+    @classmethod
+    def _resolve_benchmark_visible_to_config(cls, config):
+        value = config.get(
+            "min_visible_pixel_count",
+            cls.BENCHMARK_VISIBLE_TO_MIN_VISIBLE_PIXEL_COUNT,
+        )
+        if isinstance(value, bool) or not isinstance(value, (int, np.integer)):
+            raise ValueError(
+                "benchmark_relations.visible_to.min_visible_pixel_count "
+                "must be an integer >= 1"
+            )
+        value = int(value)
+        if value < 1:
+            raise ValueError(
+                "benchmark_relations.visible_to.min_visible_pixel_count "
+                "must be an integer >= 1"
+            )
+        return {"min_visible_pixel_count": value}
+
+    @classmethod
+    def _resolve_benchmark_blocks_config(cls, config):
+        clearance = float(config.get(
+            "corridor_clearance_m",
+            cls.BENCHMARK_BLOCKS_CORRIDOR_CLEARANCE_M,
+        ))
+        endpoint_margin = float(config.get(
+            "endpoint_margin_m",
+            cls.BENCHMARK_BLOCKS_ENDPOINT_MARGIN_M,
+        ))
+        for name, value in (
+            ("corridor_clearance_m", clearance),
+            ("endpoint_margin_m", endpoint_margin),
+        ):
+            if not np.isfinite(value) or value < 0:
+                raise ValueError(
+                    f"benchmark_relations.blocks.{name} must be finite and non-negative"
+                )
+        return {
+            "corridor_clearance_m": clearance,
+            "endpoint_margin_m": endpoint_margin,
+            "movable_sources_only": bool(config.get("movable_sources_only", True)),
+            "movable_targets_only": bool(config.get("movable_targets_only", True)),
+        }
+
+    @classmethod
+    def _resolve_benchmark_occludes_config(cls, config):
+        overlap = config.get(
+            "min_overlap_pixel_count",
+            cls.BENCHMARK_OCCLUDES_MIN_OVERLAP_PIXEL_COUNT,
+        )
+        if (
+            isinstance(overlap, (bool, np.bool_))
+            or not isinstance(overlap, (int, np.integer))
+            or overlap < 1
+        ):
+            raise ValueError(
+                "benchmark_relations.occludes.min_overlap_pixel_count "
+                "must be an integer >= 1"
+            )
+        fraction = float(config.get(
+            "min_overlap_fraction",
+            cls.BENCHMARK_OCCLUDES_MIN_OVERLAP_FRACTION,
+        ))
+        if not np.isfinite(fraction) or not 0 <= fraction <= 1:
+            raise ValueError(
+                "benchmark_relations.occludes.min_overlap_fraction "
+                "must be finite and in [0,1]"
+            )
+        margin = float(config.get(
+            "min_depth_margin_m",
+            cls.BENCHMARK_OCCLUDES_MIN_DEPTH_MARGIN_M,
+        ))
+        if not np.isfinite(margin) or margin < 0:
+            raise ValueError(
+                "benchmark_relations.occludes.min_depth_margin_m "
+                "must be finite and non-negative"
+            )
+        return {
+            "min_overlap_pixel_count": int(overlap),
+            "min_overlap_fraction": fraction,
+            "min_depth_margin_m": margin,
+            "movable_targets_only": bool(config.get("movable_targets_only", True)),
+        }
+
     def set_benchmark_export_context(self, task_config=None, config_snapshot=None, bench_subdir=None):
         self._ensure_benchmark_export_state()
         # Several benchmark scene-family bases implement their own environment
@@ -567,6 +688,16 @@ class Base_Task(gym.Env):
         self._benchmark_held_by_config = self._resolve_benchmark_held_by_config(
             held_by_config
         )
+        visible_to_config = relation_config.get("visible_to", {}) or {}
+        self._benchmark_visible_to_config = self._resolve_benchmark_visible_to_config(
+            visible_to_config
+        )
+        occludes_config = relation_config.get("occludes", {}) or {}
+        self._benchmark_occludes_config = self._resolve_benchmark_occludes_config(
+            occludes_config
+        )
+        blocks_config = relation_config.get("blocks", {}) or {}
+        self._benchmark_blocks_config = self._resolve_benchmark_blocks_config(blocks_config)
         reachability_config = relation_config.get("reachable_by", {}) or {}
         self._benchmark_reachability_config = {
             "enabled": bool(reachability_config.get("enabled", True)),
@@ -576,6 +707,7 @@ class Base_Task(gym.Env):
             "pose_round_decimals": max(0, int(reachability_config.get("pose_round_decimals", 3))),
         }
         self._benchmark_reachability_cache = None
+        self._benchmark_baseline_non_support_contact = None
         self._benchmark_export_context = {
             "task_config": task_config,
             "config_snapshot": deepcopy(config_snapshot),
@@ -1102,39 +1234,91 @@ class Base_Task(gym.Env):
         return best_ids[0]
 
 
-    def _build_benchmark_visibility_relations(self, object_catalog, actor_by_id):
+    def _build_benchmark_visibility_relations(self, object_catalog, actor_by_id, aabb_by_id):
         """Build object-to-camera visibility from already captured segmentation."""
-        object_count = len(object_catalog)
         try:
             segmentation = self.cameras.get_segmentation_raw(level="actor")
         except Exception as exc:
             raise RuntimeError("Actor segmentation capture failed while computing visible_to") from exc
 
-        camera_names = sorted(segmentation)
-        visible_to = np.zeros((object_count, len(camera_names)), dtype=np.bool_)
-        visible_to_valid = np.zeros_like(visible_to)
-        visible_pixel_count = np.zeros((object_count, len(camera_names)), dtype=np.int32)
-
-        for camera_idx, camera_name in enumerate(camera_names):
-            seg_img = segmentation.get(camera_name, {}).get("actor_segmentation_raw")
-            if seg_img is None:
+        segmentation_by_camera = {
+            name: payload.get("actor_segmentation_raw")
+            for name, payload in segmentation.items()
+        }
+        segmentation_ids_by_object_id = {}
+        for entry in object_catalog:
+            object_id = int(entry["object_id"])
+            entity = actor_by_id.get(object_id)
+            if entity is None:
                 continue
-            for object_idx, entry in enumerate(object_catalog):
-                entity = actor_by_id.get(int(entry["object_id"]))
-                if entity is None:
-                    continue
-                try:
-                    target_ids = self._resolve_target_seg_ids(entity)
-                except (TypeError, AttributeError, ValueError) as exc:
-                    raise RuntimeError(
-                        f"Cannot resolve segmentation ids for catalog object {entry['object_id']}"
-                    ) from exc
-                count = int(np.isin(seg_img, list(target_ids)).sum())
-                visible_pixel_count[object_idx, camera_idx] = count
-                visible_to[object_idx, camera_idx] = count > 0
-                visible_to_valid[object_idx, camera_idx] = True
-
-        return visible_to, visible_to_valid, visible_pixel_count, camera_names
+            try:
+                segmentation_ids_by_object_id[object_id] = self._resolve_target_seg_ids(entity)
+            except (TypeError, AttributeError, ValueError) as exc:
+                raise RuntimeError(
+                    f"Cannot resolve segmentation ids for catalog object {object_id}"
+                ) from exc
+        config = getattr(
+            self, "_benchmark_visible_to_config",
+            self._resolve_benchmark_visible_to_config({}),
+        )
+        object_ids = np.asarray(
+            [int(entry["object_id"]) for entry in object_catalog]
+        )
+        visible = compute_visible_to_relations(
+            object_ids,
+            segmentation_ids_by_object_id,
+            segmentation_by_camera,
+            **config,
+        )
+        occludes_config = dict(getattr(
+            self, "_benchmark_occludes_config",
+            self._resolve_benchmark_occludes_config({}),
+        ))
+        depth_m_by_camera = getattr(
+            self, "_benchmark_current_depth_m_by_camera", None
+        )
+        if depth_m_by_camera is None:
+            try:
+                depth_payload = self.cameras.get_depth()
+            except Exception as exc:
+                raise RuntimeError(
+                    "Depth capture failed while computing occludes"
+                ) from exc
+            depth_m_by_camera = {
+                name: (
+                    None if payload.get("depth") is None
+                    else np.asarray(payload["depth"], dtype=np.float64) * 1e-3
+                )
+                for name, payload in depth_payload.items()
+            }
+        movable_targets_only = bool(
+            occludes_config.pop("movable_targets_only")
+        )
+        target_eligible = np.asarray([
+            (
+                bool(entry.get("is_movable"))
+                if movable_targets_only
+                else not bool(entry.get("is_robot"))
+            )
+            for entry in object_catalog
+        ], dtype=np.bool_)
+        source_eligible = np.asarray([
+            not bool(entry.get("is_robot")) for entry in object_catalog
+        ], dtype=np.bool_)
+        occludes = compute_occludes_relations(
+            object_ids,
+            aabb_by_id,
+            segmentation_ids_by_object_id,
+            segmentation_by_camera,
+            depth_m_by_camera,
+            self.cameras.get_config(),
+            target_eligible=target_eligible,
+            source_eligible=source_eligible,
+            **occludes_config,
+        )
+        if visible[3] != occludes[7]:
+            raise RuntimeError("visible_to and occludes camera ordering diverged")
+        return (*visible[:3], *occludes[:7], visible[3])
 
     def _build_benchmark_reachability_relations(self, object_catalog, actor_by_id):
         """Build sampled collision-aware object-to-effector point reachability.
@@ -1296,9 +1480,9 @@ class Base_Task(gym.Env):
         object_ids = np.array([int(entry["object_id"]) for entry in object_catalog], dtype=np.int64)
         object_count = len(object_catalog)
         raw_contact = np.zeros((object_count, object_count), dtype=np.bool_)
-        part_of = np.zeros((object_count, object_count), dtype=np.bool_)
         left_gripper_names = set(getattr(self.robot, "left_fix_gripper_name", []))
         right_gripper_names = set(getattr(self.robot, "right_fix_gripper_name", []))
+        robot_link_names = self._get_benchmark_robot_link_names()
         for joint, _, _ in getattr(self.robot, "left_gripper", []):
             if joint is not None and joint.child_link is not None:
                 left_gripper_names.add(joint.child_link.get_name())
@@ -1334,9 +1518,21 @@ class Base_Task(gym.Env):
 
             object_id0 = articulation_root_by_link_id.get(object_id0, object_id0)
             object_id1 = articulation_root_by_link_id.get(object_id1, object_id1)
-            if object_id0 in index_by_id and object_id1 in index_by_id and object_id0 != object_id1:
-                idx0 = index_by_id[object_id0]
-                idx1 = index_by_id[object_id1]
+            graph_id0 = (
+                self.BENCHMARK_LEFT_EE_OBJECT_ID if name0 in left_gripper_names
+                else self.BENCHMARK_RIGHT_EE_OBJECT_ID if name0 in right_gripper_names
+                else self.BENCHMARK_ROBOT_OBJECT_ID if name0 in robot_link_names
+                else object_id0
+            )
+            graph_id1 = (
+                self.BENCHMARK_LEFT_EE_OBJECT_ID if name1 in left_gripper_names
+                else self.BENCHMARK_RIGHT_EE_OBJECT_ID if name1 in right_gripper_names
+                else self.BENCHMARK_ROBOT_OBJECT_ID if name1 in robot_link_names
+                else object_id1
+            )
+            if graph_id0 in index_by_id and graph_id1 in index_by_id and graph_id0 != graph_id1:
+                idx0 = index_by_id[graph_id0]
+                idx1 = index_by_id[graph_id1]
                 raw_contact[idx0, idx1] = True
                 raw_contact[idx1, idx0] = True
 
@@ -1361,6 +1557,34 @@ class Base_Task(gym.Env):
 
         left_tcp, left_closed = self._get_benchmark_effector_state("left")
         right_tcp, right_closed = self._get_benchmark_effector_state("right")
+        blocks_config = getattr(
+            self, "_benchmark_blocks_config",
+            self._resolve_benchmark_blocks_config({}),
+        )
+        movable = np.asarray([
+            bool(entry.get("is_movable") or entry.get("is_target"))
+            for entry in object_catalog
+        ], dtype=np.bool_)
+        non_robot = np.asarray([
+            not bool(entry.get("is_robot")) for entry in object_catalog
+        ], dtype=np.bool_)
+        blocks, blocks_valid, blocks_by_effector, blocks_by_effector_valid = (
+            compute_blocks_relations(
+                object_ids,
+                aabb_by_id,
+                np.asarray([left_tcp, right_tcp], dtype=np.float64),
+                source_eligible=(
+                    np.logical_and(non_robot, movable)
+                    if blocks_config["movable_sources_only"] else non_robot
+                ),
+                target_eligible=(
+                    np.logical_and(non_robot, movable)
+                    if blocks_config["movable_targets_only"] else non_robot
+                ),
+                corridor_clearance_m=blocks_config["corridor_clearance_m"],
+                endpoint_margin_m=blocks_config["endpoint_margin_m"],
+            )
+        )
         center_by_id = {}
         for i, object_id in enumerate(object_ids.tolist()):
             entity = actor_by_id.get(int(object_id))
@@ -1405,24 +1629,61 @@ class Base_Task(gym.Env):
             )
         )
 
-        visible_to, visible_to_valid, visible_pixel_count, camera_names = (
-            self._build_benchmark_visibility_relations(object_catalog, actor_by_id)
-        )
+        (
+            visible_to,
+            visible_to_valid,
+            visible_pixel_count,
+            occludes,
+            occludes_valid,
+            occlusion_overlap_pixel_count,
+            occlusion_overlap_fraction,
+            occlusion_source_depth_m,
+            occlusion_target_front_depth_m,
+            occlusion_target_projected_pixel_count,
+            camera_names,
+        ) = self._build_benchmark_visibility_relations(object_catalog, actor_by_id, aabb_by_id)
         reachable_by, reachable_by_valid, reachable_by_evaluated = self._build_benchmark_reachability_relations(
             object_catalog, actor_by_id
         )
-        collides_with = np.logical_and(
+        non_support_contact = np.logical_and(
             raw_contact,
             np.logical_not(np.logical_or(on, supports)),
         )
+        if self._benchmark_baseline_non_support_contact is None:
+            self._benchmark_baseline_non_support_contact = non_support_contact.copy()
+        intentional_contact = np.zeros_like(non_support_contact)
+        for source_id, destination_id in self._benchmark_intentional_contact_pairs(
+            in_relations=in_relation,
+            index_by_id=index_by_id,
+        ):
+            source_idx = index_by_id.get(int(source_id))
+            destination_idx = index_by_id.get(int(destination_id))
+            if source_idx is None or destination_idx is None:
+                continue
+            if non_support_contact[source_idx, destination_idx]:
+                intentional_contact[source_idx, destination_idx] = True
+                intentional_contact[destination_idx, source_idx] = True
+        (
+            static_contact_with,
+            intentional_contact_with,
+            robot_collision_with,
+            unexpected_collision_with,
+            contact_semantics_valid,
+        ) = classify_collision_semantics(
+            non_support_contact,
+            np.asarray([bool(entry.get("is_robot")) for entry in object_catalog]),
+            np.asarray([bool(entry.get("is_furniture")) for entry in object_catalog]),
+            intentional_contact,
+            baseline_static_contact=self._benchmark_baseline_non_support_contact,
+        )
 
-        robot_idx = index_by_id.get(self.BENCHMARK_ROBOT_OBJECT_ID)
-        left_ee_idx = index_by_id.get(self.BENCHMARK_LEFT_EE_OBJECT_ID)
-        right_ee_idx = index_by_id.get(self.BENCHMARK_RIGHT_EE_OBJECT_ID)
-        if robot_idx is not None and left_ee_idx is not None:
-            part_of[left_ee_idx, robot_idx] = True
-        if robot_idx is not None and right_ee_idx is not None:
-            part_of[right_ee_idx, robot_idx] = True
+        part_of, part_of_valid = compute_part_of_relations(
+            object_ids,
+            {
+                self.BENCHMARK_LEFT_EE_OBJECT_ID: self.BENCHMARK_ROBOT_OBJECT_ID,
+                self.BENCHMARK_RIGHT_EE_OBJECT_ID: self.BENCHMARK_ROBOT_OBJECT_ID,
+            },
+        )
 
         relations = serialize_and_validate_relations({
             RelationName.ON: on,
@@ -1431,9 +1692,14 @@ class Base_Task(gym.Env):
             RelationName.CONTAINS: contains,
             RelationName.HELD_BY: held_by,
             RelationName.NEAR: near,
+            RelationName.BLOCKS: blocks,
             RelationName.REACHABLE_BY: reachable_by,
-            RelationName.COLLIDES_WITH: collides_with,
+            RelationName.STATIC_CONTACT_WITH: static_contact_with,
+            RelationName.INTENTIONAL_CONTACT_WITH: intentional_contact_with,
+            RelationName.ROBOT_COLLISION_WITH: robot_collision_with,
+            RelationName.UNEXPECTED_COLLISION_WITH: unexpected_collision_with,
             RelationName.VISIBLE_TO: visible_to,
+            RelationName.OCCLUDES: occludes,
             RelationName.PART_OF: part_of,
         }, object_count=object_count)
         return {
@@ -1441,6 +1707,14 @@ class Base_Task(gym.Env):
             "raw_contact": raw_contact,
             "grasped_by_code": grasped_by_code,
             "held_by_valid": held_by_valid,
+            "blocks_valid": blocks_valid,
+            "blocks_by_effector": blocks_by_effector,
+            "blocks_by_effector_valid": blocks_by_effector_valid,
+            "blocks_effector_names": np.array(
+                [self.BENCHMARK_LEFT_EE_NAME, self.BENCHMARK_RIGHT_EE_NAME], dtype="S32"
+            ),
+            "contact_semantics_valid": contact_semantics_valid,
+            "part_of_valid": part_of_valid,
             "containment_valid": containment_valid,
             "contains_valid": contains_valid,
             "reachable_by_valid": reachable_by_valid,
@@ -1449,6 +1723,12 @@ class Base_Task(gym.Env):
                 [self.BENCHMARK_LEFT_EE_NAME, self.BENCHMARK_RIGHT_EE_NAME], dtype="S32"
             ),
             "visible_to_valid": visible_to_valid,
+            "occludes_valid": occludes_valid,
+            "occlusion_overlap_pixel_count": occlusion_overlap_pixel_count,
+            "occlusion_overlap_fraction": occlusion_overlap_fraction,
+            "occlusion_source_depth_m": occlusion_source_depth_m,
+            "occlusion_target_front_depth_m": occlusion_target_front_depth_m,
+            "occlusion_target_projected_pixel_count": occlusion_target_projected_pixel_count,
             "visible_pixel_count": visible_pixel_count,
             "visible_to_camera_names": np.array(camera_names, dtype="S64"),
             **relations,
@@ -1457,8 +1737,59 @@ class Base_Task(gym.Env):
             "implemented_relation_names": np.array(self.BENCHMARK_IMPLEMENTED_RELATION_NAMES, dtype="S32"),
             "implemented_binary_relation_names": np.array(self.BENCHMARK_IMPLEMENTED_BINARY_RELATION_NAMES, dtype="S32"),
             "implemented_bipartite_relation_names": np.array(self.BENCHMARK_IMPLEMENTED_BIPARTITE_RELATION_NAMES, dtype="S32"),
+            "implemented_camera_conditioned_relation_names": np.array(
+                self.BENCHMARK_IMPLEMENTED_CAMERA_CONDITIONED_RELATION_NAMES, dtype="S32"
+            ),
             "auxiliary_relation_state_names": np.array(self.BENCHMARK_AUXILIARY_RELATION_STATE_NAMES, dtype="S32"),
         }
+
+    def _benchmark_intentional_contact_pairs(
+        self, in_relations=None, index_by_id=None,
+    ):
+        """Return active-action and achieved-placement intentional contact pairs."""
+        pairs = set()
+        active_nodes = [
+            node for node in (getattr(self, "_benchmark_action_nodes", []) or [])
+            if node.get("status") == "executing"
+        ]
+        if active_nodes:
+            node = active_nodes[-1]
+            action_type = node.get("action_type")
+            target = node.get("target_object_id")
+            destination = node.get("destination_object_id")
+            effector = node.get("effector_object_id")
+            if (
+                action_type in {
+                    "grasp", "grasp_handle", "lift", "transport", "place",
+                    "release", "open_articulation", "close_articulation",
+                }
+                and target is not None and effector is not None
+            ):
+                pairs.add(tuple(sorted((int(target), int(effector)))))
+            if (
+                action_type in {"transport", "place", "release"}
+                and target is not None and destination is not None
+            ):
+                pairs.add(tuple(sorted((int(target), int(destination)))))
+
+        retained = set(getattr(self, "_benchmark_successful_placement_pairs", set()))
+        if in_relations is not None and index_by_id is not None:
+            still_placed = set()
+            for source_id, destination_id in retained:
+                source_idx = index_by_id.get(int(source_id))
+                destination_idx = index_by_id.get(int(destination_id))
+                if (
+                    source_idx is not None
+                    and destination_idx is not None
+                    and bool(in_relations[source_idx, destination_idx])
+                ):
+                    pair = (int(source_id), int(destination_id))
+                    still_placed.add(pair)
+                    pairs.add(tuple(sorted(pair)))
+            self._benchmark_successful_placement_pairs = still_placed
+        else:
+            pairs.update(tuple(sorted(pair)) for pair in retained)
+        return pairs
 
     def _record_benchmark_contact_event(
         self,
@@ -1690,8 +2021,25 @@ class Base_Task(gym.Env):
         if arm not in {"left", "right"}:
             return
         if node.get("action_type") == "grasp" and node.get("target_object_id") is not None:
-            self._benchmark_held_object_ids[arm] = int(node["target_object_id"])
+            target_id = int(node["target_object_id"])
+            self._benchmark_held_object_ids[arm] = target_id
             self._benchmark_held_object_state_known[arm] = True
+            self._benchmark_successful_placement_pairs = {
+                pair for pair in self._benchmark_successful_placement_pairs
+                if int(pair[0]) != target_id
+            }
+        elif (
+            node.get("action_type") == "place"
+            and node.get("target_object_id") is not None
+            and node.get("destination_object_id") is not None
+        ):
+            target_id = int(node["target_object_id"])
+            destination_id = int(node["destination_object_id"])
+            self._benchmark_successful_placement_pairs = {
+                pair for pair in self._benchmark_successful_placement_pairs
+                if int(pair[0]) != target_id
+            }
+            self._benchmark_successful_placement_pairs.add((target_id, destination_id))
         elif node.get("action_type") == "release":
             self._benchmark_held_object_ids[arm] = None
             self._benchmark_held_object_state_known[arm] = True
@@ -1871,6 +2219,33 @@ class Base_Task(gym.Env):
                 "bounded vertical gap, and sufficient upper-relative XY overlap; "
                 "supports is the exact transpose"
             )
+            collision_parameters = relation_parameters.create_group("contact_semantics")
+            collision_parameters.attrs["evidence"] = "raw_simulator_contact"
+            collision_parameters.attrs["support_contact_policy"] = "excluded"
+            collision_parameters.attrs["validity"] = (
+                "closed_world_over_catalogued_entity_pairs"
+            )
+            collision_parameters.attrs["definition"] = (
+                "the four semantic edges partition raw_contact AND NOT(on OR supports)"
+            )
+            collision_parameters.attrs["semantic_subtypes"] = (
+                "intentional_contact_with,static_contact_with,"
+                "robot_collision_with,unexpected_collision_with"
+            )
+            collision_parameters.attrs["classification_precedence"] = (
+                "intentional,static,robot_collision,unexpected"
+            )
+            collision_parameters.attrs["intentional_contact_rule"] = (
+                "active grounded manipulation contact or successful placement "
+                "target-destination contact while target remains in destination"
+            )
+            collision_parameters.attrs["static_contact_rule"] = (
+                "frame0_non_robot_non_support_contact_or_furniture_pair"
+            )
+            collision_parameters.attrs["baseline_frame_index"] = 0
+            collision_parameters.attrs["robot_contact_mapping"] = (
+                "gripper_links_to_effector_nodes;other_robot_links_to_robot"
+            )
             in_contains_parameters = relation_parameters.create_group("in_contains")
             in_contains_config = getattr(
                 self, "_benchmark_in_contains_config",
@@ -1910,6 +2285,101 @@ class Base_Task(gym.Env):
                 "held_by(object,effector) requires a closed gripper, simulator "
                 "contact evidence, and object-center-to-TCP distance within the threshold"
             )
+            blocks_parameters = relation_parameters.create_group("blocks")
+            blocks_config = getattr(
+                self, "_benchmark_blocks_config",
+                self._resolve_benchmark_blocks_config({}),
+            )
+            blocks_parameters.create_dataset(
+                "corridor_clearance_m",
+                data=np.float64(blocks_config["corridor_clearance_m"]),
+            )
+            blocks_parameters.create_dataset(
+                "endpoint_margin_m",
+                data=np.float64(blocks_config["endpoint_margin_m"]),
+            )
+            blocks_parameters.attrs["movable_sources_only"] = bool(
+                blocks_config["movable_sources_only"]
+            )
+            blocks_parameters.attrs["movable_targets_only"] = bool(
+                blocks_config["movable_targets_only"]
+            )
+            blocks_parameters.attrs["provenance"] = "world_aabb_and_effector_pose"
+            blocks_parameters.attrs["directional"] = True
+            blocks_parameters.attrs["effector_conditioned_evidence"] = True
+            blocks_parameters.attrs["sim_to_real_contract"] = (
+                "object AABBs and effector poses are replaceable perception inputs; "
+                "validity must be false when required estimates are unavailable"
+            )
+            blocks_parameters.attrs["definition"] = (
+                "blocks(source,target) is true when source intersects at least one "
+                "inflated nominal straight effector-to-target approach corridor; it "
+                "does not prove that no alternate collision-free trajectory exists"
+            )
+            visible_to_parameters = relation_parameters.create_group("visible_to")
+            visible_to_config = getattr(
+                self, "_benchmark_visible_to_config",
+                self._resolve_benchmark_visible_to_config({}),
+            )
+            visible_to_parameters.create_dataset(
+                "min_visible_pixel_count",
+                data=np.int64(visible_to_config["min_visible_pixel_count"]),
+            )
+            visible_to_parameters.attrs["evidence"] = "actor_segmentation_pixels"
+            visible_to_parameters.attrs["definition"] = (
+                "visible_to(object,camera) is true when actor-segmentation pixel "
+                "count is at least min_visible_pixel_count"
+            )
+            occludes_parameters = relation_parameters.create_group("occludes")
+            occludes_config = getattr(
+                self, "_benchmark_occludes_config",
+                self._resolve_benchmark_occludes_config({}),
+            )
+            occludes_parameters.create_dataset(
+                "min_overlap_pixel_count",
+                data=np.int64(occludes_config["min_overlap_pixel_count"]),
+            )
+            occludes_parameters.create_dataset(
+                "min_overlap_fraction",
+                data=np.float64(occludes_config["min_overlap_fraction"]),
+            )
+            occludes_parameters.create_dataset(
+                "min_depth_margin_m",
+                data=np.float64(occludes_config["min_depth_margin_m"]),
+            )
+            occludes_parameters.attrs["provenance"] = (
+                "privileged_projected_aabb_and_actor_segmentation"
+            )
+            occludes_parameters.attrs["camera_conditioned"] = True
+            occludes_parameters.attrs["movable_targets_only"] = bool(
+                occludes_config["movable_targets_only"]
+            )
+            occludes_parameters.attrs["depth_evidence"] = (
+                "median_source_segmentation_pixel_depth_m"
+            )
+            occludes_parameters.attrs["sim_to_real_contract"] = (
+                "segmentation_depth_calibration_are_replaceable_perception inputs; "
+                "projected target geometry is privileged benchmark supervision"
+            )
+            occludes_parameters.attrs["definition"] = (
+                "occludes(source,target,camera) requires source segmentation pixels "
+                "inside the convex projected target AABB and median source-pixel depth "
+                "closer than target-front depth by min_depth_margin_m"
+            )
+            occludes_parameters.attrs["approximation"] = (
+                "convex projected 3D AABB is an amodal proxy; not mesh-exact isolated rendering"
+            )
+
+            part_of_parameters = relation_parameters.create_group("part_of")
+            part_of_parameters.attrs["provenance"] = "privileged_catalog_structure"
+            part_of_parameters.attrs["closure"] = "direct_membership_only"
+            part_of_parameters.attrs["validity"] = (
+                "closed_world_over_catalogued_entity_pairs"
+            )
+            part_of_parameters.attrs["definition"] = (
+                "part_of(source,destination) records direct declared structural "
+                "membership; it is not inferred from contact or geometry"
+            )
 
             object_state_group = export_group.get("object_state")
             if object_state_group is not None:
@@ -1943,11 +2413,13 @@ class Base_Task(gym.Env):
                     "object_ids",
                     "held_by_effector_names",
                     "reachable_by_effector_names",
+                    "blocks_effector_names",
                     "visible_to_camera_names",
                     "canonical_relation_names",
                     "implemented_relation_names",
                     "implemented_binary_relation_names",
                     "implemented_bipartite_relation_names",
+                    "implemented_camera_conditioned_relation_names",
                     "auxiliary_relation_state_names",
                 ):
                     if dataset_name not in relation_state_group:
@@ -2564,6 +3036,7 @@ class Base_Task(gym.Env):
             "joint_action": {},
             "endpose": {},
         }
+        self._benchmark_current_depth_m_by_camera = None
 
         pkl_dic["observation"] = self.cameras.get_config()
         # rgb
@@ -2609,6 +3082,13 @@ class Base_Task(gym.Env):
         # depth
         if self.data_type.get("depth", False):
             depth = self.cameras.get_depth()
+            self._benchmark_current_depth_m_by_camera = {
+                name: (
+                    None if payload.get("depth") is None
+                    else np.asarray(payload["depth"], dtype=np.float64) * 1e-3
+                )
+                for name, payload in depth.items()
+            }
             for camera_name in depth.keys():
                 pkl_dic["observation"][camera_name].update(depth[camera_name])
         # endpose
@@ -4237,6 +4717,8 @@ class Base_Task(gym.Env):
         target_pose: list | np.ndarray | sapien.Pose,
         benchmark_action: str = "transport",
         benchmark_target_entity=None,
+        benchmark_destination_entity=None,
+        benchmark_phase: str = None,
         interaction_part: str = None,
         articulation_joint_index: int = None,
     ):
@@ -4245,9 +4727,16 @@ class Base_Task(gym.Env):
         )
         if "benchmark_target_object_id" not in target_meta:
             target_meta["benchmark_target_object_id"] = self._benchmark_held_object_id(arm_tag)
+        if benchmark_destination_entity is not None:
+            destination_id = self._benchmark_entity_object_id(benchmark_destination_entity)
+            if destination_id is None:
+                raise ValueError("Explicit benchmark_destination_entity has no object id")
+            target_meta["benchmark_destination_object_id"] = destination_id
+        if benchmark_phase is None:
+            benchmark_phase = "final_descent" if benchmark_action == "place" else "transition"
         return arm_tag, [Action(
             arm_tag, "move", target_pose=target_pose,
-            benchmark_action=benchmark_action, benchmark_phase="transition",
+            benchmark_action=benchmark_action, benchmark_phase=benchmark_phase,
             **target_meta,
         )]
 
@@ -4269,14 +4758,22 @@ class Base_Task(gym.Env):
         self,
         arm_tag: ArmTag,
         pos: float = 1.0,
+        benchmark_action: str = "release",
         benchmark_target_entity=None,
+        benchmark_destination_entity=None,
+        benchmark_phase: str = "final_descent",
     ):
         target_meta = self._benchmark_action_target_metadata(benchmark_target_entity)
         if "benchmark_target_object_id" not in target_meta:
             target_meta["benchmark_target_object_id"] = self._benchmark_held_object_id(arm_tag)
+        if benchmark_destination_entity is not None:
+            destination_id = self._benchmark_entity_object_id(benchmark_destination_entity)
+            if destination_id is None:
+                raise ValueError("Explicit benchmark_destination_entity has no object id")
+            target_meta["benchmark_destination_object_id"] = destination_id
         return arm_tag, [Action(
             arm_tag, "open", target_gripper_pos=pos,
-            benchmark_action="release", benchmark_phase="final_descent",
+            benchmark_action=benchmark_action, benchmark_phase=benchmark_phase,
             **target_meta,
         )]
 

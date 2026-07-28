@@ -85,15 +85,33 @@ def _summarize_benchmark_support(root: h5py.File) -> None:
     except ValueError:
         schema_tuple = (0, 0, 0)
     requires_policy_contract = schema_tuple >= (1, 6, 0)
+    requires_collision_semantics = schema_tuple >= (1, 7, 0)
+    requires_occludes = schema_tuple >= (1, 8, 0)
+    requires_refined_occludes = schema_tuple >= (1, 8, 1)
+    requires_blocks = schema_tuple >= (1, 9, 0)
     failures: list[str] = []
     print("\nbenchmark_support:")
     raw_contact = None
     grasped_by_code = None
     on_matrix = None
-    collides_with = None
+    static_contact_with = None
+    intentional_contact_with = None
+    robot_collision_with = None
+    unexpected_collision_with = None
+    contact_semantics_valid = None
     held_by = None
     held_by_valid = None
     part_of = None
+    part_of_valid = None
+    occludes = None
+    occludes_valid = None
+    occlusion_overlap_pixel_count = None
+    occlusion_overlap_fraction = None
+    occlusion_source_depth_m = None
+    occlusion_target_front_depth_m = None
+    occlusion_target_projected_pixel_count = None
+    occludes_threshold = 0
+    occludes_fraction_threshold = 0.0
 
     if "scenario_metadata" in support:
         print("  scenario_metadata:")
@@ -215,6 +233,7 @@ def _summarize_benchmark_support(root: h5py.File) -> None:
                 parent = int(parent_index[idx]) if parent_index is not None else -1
                 print(f"      [{idx}] side={side} chain_index={chain_pos} parent_index={parent} name={link_names[idx]}")
 
+    visible_threshold = 1
     if "relation_parameters" in support:
         parameters = support["relation_parameters"]
         print("  relation_parameters:")
@@ -319,6 +338,145 @@ def _summarize_benchmark_support(root: h5py.File) -> None:
             }
             _record_checks(checks, failures)
 
+        if "contact_semantics" in parameters:
+            collision_parameters = parameters["contact_semantics"]
+            checks = {
+                "contact semantics evidence is raw simulator contact": (
+                    str(_decode_attr(collision_parameters.attrs.get("evidence", "")))
+                    == "raw_simulator_contact"
+                ),
+                "contact semantics exclude support contact": (
+                    str(_decode_attr(
+                        collision_parameters.attrs.get("support_contact_policy", "")
+                    )) == "excluded"
+                ),
+                "collision subtype precedence is declared": (
+                    not requires_collision_semantics
+                    or str(_decode_attr(
+                        collision_parameters.attrs.get("classification_precedence", "")
+                    )) == "intentional,static,robot_collision,unexpected"
+                ),
+                "robot contact mapping is declared": (
+                    not requires_collision_semantics
+                    or bool(_decode_attr(
+                        collision_parameters.attrs.get("robot_contact_mapping", "")
+                    ))
+                ),
+                "baseline static-contact rule is declared": (
+                    not requires_collision_semantics
+                    or str(_decode_attr(
+                        collision_parameters.attrs.get("static_contact_rule", "")
+                    )) == "frame0_non_robot_non_support_contact_or_furniture_pair"
+                ),
+                "baseline static-contact frame is zero": (
+                    not requires_collision_semantics
+                    or int(collision_parameters.attrs.get("baseline_frame_index", -1)) == 0
+                ),
+            }
+            _record_checks(checks, failures)
+        if "blocks" in parameters:
+            blocks_parameters = parameters["blocks"]
+            clearance = float(blocks_parameters["corridor_clearance_m"][()]) if "corridor_clearance_m" in blocks_parameters else -1.0
+            endpoint_margin = float(blocks_parameters["endpoint_margin_m"][()]) if "endpoint_margin_m" in blocks_parameters else -1.0
+            print(f"    blocks: corridor_clearance_m={clearance}, endpoint_margin_m={endpoint_margin}")
+            _record_checks({
+                "blocks corridor clearance is finite and non-negative": np.isfinite(clearance) and clearance >= 0,
+                "blocks endpoint margin is finite and non-negative": np.isfinite(endpoint_margin) and endpoint_margin >= 0,
+                "blocks provenance is AABB plus effector pose": str(_decode_attr(blocks_parameters.attrs.get("provenance", ""))) == "world_aabb_and_effector_pose",
+                "blocks sim-to-real contract is declared": bool(_decode_attr(blocks_parameters.attrs.get("sim_to_real_contract", ""))),
+                "blocks limitation is declared": "does not prove" in str(_decode_attr(blocks_parameters.attrs.get("definition", ""))),
+            }, failures)
+        elif requires_blocks:
+            _record_checks({"schema-1.9 blocks parameters are present": False}, failures)
+
+        if "occludes" in parameters:
+            occlusion_parameters = parameters["occludes"]
+            occludes_threshold = (
+                int(occlusion_parameters["min_overlap_pixel_count"][()])
+                if "min_overlap_pixel_count" in occlusion_parameters else 0
+            )
+            occludes_fraction_threshold = (
+                float(occlusion_parameters["min_overlap_fraction"][()])
+                if "min_overlap_fraction" in occlusion_parameters else -1.0
+            )
+            depth_margin = (
+                float(occlusion_parameters["min_depth_margin_m"][()])
+                if "min_depth_margin_m" in occlusion_parameters else None
+            )
+            print(
+                "    occludes: "
+                f"min_overlap_pixel_count={occludes_threshold}, "
+                f"min_overlap_fraction={occludes_fraction_threshold}, "
+                f"min_depth_margin_m={depth_margin}"
+            )
+            checks = {
+                "occludes overlap pixel threshold is positive": (
+                    occludes_threshold >= 1
+                ),
+                "occludes overlap fraction is in [0,1]": (
+                    not requires_refined_occludes
+                    or (
+                        np.isfinite(occludes_fraction_threshold)
+                        and 0 <= occludes_fraction_threshold <= 1
+                    )
+                ),
+                "occludes depth margin is finite and non-negative": (
+                    depth_margin is not None
+                    and np.isfinite(depth_margin)
+                    and depth_margin >= 0
+                ),
+                "occludes provenance is projected AABB plus segmentation": (
+                    str(_decode_attr(
+                        occlusion_parameters.attrs.get("provenance", "")
+                    )) == "privileged_projected_aabb_and_actor_segmentation"
+                ),
+                "occludes sim-to-real contract is declared": (
+                    not requires_refined_occludes
+                    or bool(_decode_attr(
+                        occlusion_parameters.attrs.get("sim_to_real_contract", "")
+                    ))
+                ),
+                "occludes approximation is declared": bool(
+                    _decode_attr(
+                        occlusion_parameters.attrs.get("approximation", "")
+                    )
+                ),
+            }
+            _record_checks(checks, failures)
+        elif requires_occludes:
+            _record_checks(
+                {"schema-1.8 occludes parameters are present": False},
+                failures,
+            )
+        if "part_of" in parameters:
+            part_parameters = parameters["part_of"]
+            checks = {
+                "part_of provenance is privileged catalog structure": (
+                    str(_decode_attr(part_parameters.attrs.get("provenance", "")))
+                    == "privileged_catalog_structure"
+                ),
+                "part_of exports direct membership only": (
+                    str(_decode_attr(part_parameters.attrs.get("closure", "")))
+                    == "direct_membership_only"
+                ),
+            }
+            _record_checks(checks, failures)
+        if "visible_to" in parameters:
+            visibility_parameters = parameters["visible_to"]
+            visible_threshold = (
+                int(visibility_parameters["min_visible_pixel_count"][()])
+                if "min_visible_pixel_count" in visibility_parameters else 0
+            )
+            print(f"    visible_to: min_visible_pixel_count={visible_threshold}")
+            checks = {
+                "visible_to minimum pixel count is positive": visible_threshold >= 1,
+                "visible_to evidence is actor segmentation": (
+                    str(_decode_attr(visibility_parameters.attrs.get("evidence", "")))
+                    == "actor_segmentation_pixels"
+                ),
+            }
+            _record_checks(checks, failures)
+
     if "relation_state" in support:
         state = support["relation_state"]
         print("  relation_state:")
@@ -326,6 +484,10 @@ def _summarize_benchmark_support(root: h5py.File) -> None:
         object_ids = state["object_ids"][()].tolist() if "object_ids" in state else []
         raw_contact = state["raw_contact"][()] if "raw_contact" in state else None
         near = state["near"][()] if "near" in state else None
+        blocks = state["blocks"][()] if "blocks" in state else None
+        blocks_valid = state["blocks_valid"][()] if "blocks_valid" in state else None
+        blocks_by_effector = state["blocks_by_effector"][()] if "blocks_by_effector" in state else None
+        blocks_by_effector_valid = state["blocks_by_effector_valid"][()] if "blocks_by_effector_valid" in state else None
         grasped_by_code = state["grasped_by_code"][()] if "grasped_by_code" in state else None
         on_matrix = state["on"][()] if "on" in state else None
         in_matrix = state["in"][()] if "in" in state else None
@@ -333,7 +495,11 @@ def _summarize_benchmark_support(root: h5py.File) -> None:
         contains_matrix = state["contains"][()] if "contains" in state else None
         containment_valid = state["containment_valid"][()] if "containment_valid" in state else None
         contains_valid = state["contains_valid"][()] if "contains_valid" in state else None
-        collides_with = state["collides_with"][()] if "collides_with" in state else None
+        static_contact_with = state["static_contact_with"][()] if "static_contact_with" in state else None
+        intentional_contact_with = state["intentional_contact_with"][()] if "intentional_contact_with" in state else None
+        robot_collision_with = state["robot_collision_with"][()] if "robot_collision_with" in state else None
+        unexpected_collision_with = state["unexpected_collision_with"][()] if "unexpected_collision_with" in state else None
+        contact_semantics_valid = state["contact_semantics_valid"][()] if "contact_semantics_valid" in state else None
         held_by = state["held_by"][()] if "held_by" in state else None
         held_by_valid = state["held_by_valid"][()] if "held_by_valid" in state else None
         reachable_by = state["reachable_by"][()] if "reachable_by" in state else None
@@ -342,20 +508,51 @@ def _summarize_benchmark_support(root: h5py.File) -> None:
         visible_to = state["visible_to"][()] if "visible_to" in state else None
         visible_to_valid = state["visible_to_valid"][()] if "visible_to_valid" in state else None
         visible_pixel_count = state["visible_pixel_count"][()] if "visible_pixel_count" in state else None
+        occludes = state["occludes"][()] if "occludes" in state else None
+        occludes_valid = state["occludes_valid"][()] if "occludes_valid" in state else None
+        occlusion_overlap_pixel_count = (
+            state["occlusion_overlap_pixel_count"][()]
+            if "occlusion_overlap_pixel_count" in state else None
+        )
+        occlusion_overlap_fraction = (
+            state["occlusion_overlap_fraction"][()]
+            if "occlusion_overlap_fraction" in state else None
+        )
+        occlusion_source_depth_m = (
+            state["occlusion_source_depth_m"][()]
+            if "occlusion_source_depth_m" in state else None
+        )
+        occlusion_target_front_depth_m = (
+            state["occlusion_target_front_depth_m"][()]
+            if "occlusion_target_front_depth_m" in state else None
+        )
+        occlusion_target_projected_pixel_count = (
+            state["occlusion_target_projected_pixel_count"][()]
+            if "occlusion_target_projected_pixel_count" in state else None
+        )
         part_of = state["part_of"][()] if "part_of" in state else None
+        part_of_valid = state["part_of_valid"][()] if "part_of_valid" in state else None
         held_by_effector_names = _decode_string_array(state["held_by_effector_names"]) if "held_by_effector_names" in state else []
         reachable_by_effector_names = _decode_string_array(state["reachable_by_effector_names"]) if "reachable_by_effector_names" in state else []
+        blocks_effector_names = _decode_string_array(state["blocks_effector_names"]) if "blocks_effector_names" in state else []
         visible_to_camera_names = _decode_string_array(state["visible_to_camera_names"]) if "visible_to_camera_names" in state else []
         canonical_relation_names = _decode_string_array(state["canonical_relation_names"]) if "canonical_relation_names" in state else []
         implemented_relation_names = _decode_string_array(state["implemented_relation_names"]) if "implemented_relation_names" in state else []
         implemented_binary_relation_names = _decode_string_array(state["implemented_binary_relation_names"]) if "implemented_binary_relation_names" in state else []
         implemented_bipartite_relation_names = _decode_string_array(state["implemented_bipartite_relation_names"]) if "implemented_bipartite_relation_names" in state else []
+        implemented_camera_conditioned_relation_names = _decode_string_array(
+            state["implemented_camera_conditioned_relation_names"]
+        ) if "implemented_camera_conditioned_relation_names" in state else []
         auxiliary_relation_state_names = _decode_string_array(state["auxiliary_relation_state_names"]) if "auxiliary_relation_state_names" in state else []
 
         if raw_contact is not None:
             print(f"    raw_contact shape: {raw_contact.shape}")
         if near is not None:
             print(f"    near shape: {near.shape}")
+        if blocks is not None:
+            print(f"    blocks shape: {blocks.shape}")
+        if blocks_by_effector is not None:
+            print(f"    blocks_by_effector shape: {blocks_by_effector.shape}")
         if grasped_by_code is not None:
             print(f"    grasped_by_code shape: {grasped_by_code.shape}")
         if on_matrix is not None:
@@ -366,8 +563,6 @@ def _summarize_benchmark_support(root: h5py.File) -> None:
             print(f"    supports shape: {supports_matrix.shape}")
         if contains_matrix is not None:
             print(f"    contains shape: {contains_matrix.shape}")
-        if collides_with is not None:
-            print(f"    collides_with shape: {collides_with.shape}")
         if held_by is not None:
             print(f"    held_by shape: {held_by.shape}")
         if reachable_by is not None:
@@ -376,12 +571,16 @@ def _summarize_benchmark_support(root: h5py.File) -> None:
             print(f"    reachable_by fresh-evaluation frames: {int(np.count_nonzero(reachable_by_evaluated))}/{len(reachable_by_evaluated)}")
         if visible_to is not None:
             print(f"    visible_to shape: {visible_to.shape}")
+        if occludes is not None:
+            print(f"    occludes shape: {occludes.shape}")
         if part_of is not None:
             print(f"    part_of shape: {part_of.shape}")
         if held_by_effector_names:
             print(f"    held_by_effector_names: {held_by_effector_names}")
         if reachable_by_effector_names:
             print(f"    reachable_by_effector_names: {reachable_by_effector_names}")
+        if blocks_effector_names:
+            print(f"    blocks_effector_names: {blocks_effector_names}")
         if visible_to_camera_names:
             print(f"    visible_to_camera_names: {visible_to_camera_names}")
         if canonical_relation_names:
@@ -392,14 +591,41 @@ def _summarize_benchmark_support(root: h5py.File) -> None:
             print(f"    implemented_binary_relation_names: {implemented_binary_relation_names}")
         if implemented_bipartite_relation_names:
             print(f"    implemented_bipartite_relation_names: {implemented_bipartite_relation_names}")
+        if implemented_camera_conditioned_relation_names:
+            print(
+                "    implemented_camera_conditioned_relation_names: "
+                f"{implemented_camera_conditioned_relation_names}"
+            )
         if auxiliary_relation_state_names:
             print(f"    auxiliary_relation_state_names: {auxiliary_relation_state_names}")
 
         checks = {}
         if raw_contact is not None:
             checks["raw_contact dims are (T,N,N)"] = raw_contact.ndim == 3
+            checks["raw_contact is symmetric"] = np.array_equal(
+                raw_contact, raw_contact.transpose(0, 2, 1)
+            )
+            checks["raw_contact has a false diagonal"] = (
+                not np.any(np.diagonal(raw_contact, axis1=1, axis2=2))
+            )
         if near is not None:
             checks["near dims are (T,N,N)"] = near.ndim == 3
+        if requires_blocks:
+            checks["schema-1.9 blocks relation is present"] = blocks is not None
+            checks["schema-1.9 blocks validity is present"] = blocks_valid is not None
+            checks["schema-1.9 per-effector blocks evidence is present"] = blocks_by_effector is not None
+        if blocks is not None:
+            checks["blocks dims are (T,N,N)"] = blocks.ndim == 3
+            checks["blocks has a false object diagonal"] = not np.any(np.diagonal(blocks, axis1=1, axis2=2))
+        if blocks_valid is not None:
+            checks["blocks_valid matches blocks shape"] = blocks is not None and blocks_valid.shape == blocks.shape
+            checks["true blocks edges are valid"] = blocks is not None and np.all(np.logical_or(~blocks, blocks_valid))
+        if blocks_by_effector is not None:
+            checks["blocks_by_effector dims are (T,N,N,E)"] = blocks_by_effector.ndim == 4
+            checks["blocks evidence E matches effector names"] = blocks_by_effector.ndim == 4 and blocks_by_effector.shape[3] == len(blocks_effector_names)
+            checks["blocks is union of per-effector evidence"] = blocks is not None and np.array_equal(blocks, np.any(blocks_by_effector, axis=3))
+        if blocks_by_effector_valid is not None:
+            checks["blocks_by_effector_valid matches evidence shape"] = blocks_by_effector is not None and blocks_by_effector_valid.shape == blocks_by_effector.shape
         if grasped_by_code is not None:
             checks["grasped_by_code dims are (T,N)"] = grasped_by_code.ndim == 2
         if on_matrix is not None:
@@ -408,8 +634,56 @@ def _summarize_benchmark_support(root: h5py.File) -> None:
             checks["in dims are (T,N,N)"] = in_matrix.ndim == 3
         if supports_matrix is not None:
             checks["supports dims are (T,N,N)"] = supports_matrix.ndim == 3
-        if collides_with is not None:
-            checks["collides_with dims are (T,N,N)"] = collides_with.ndim == 3
+        collision_subtypes = (
+            static_contact_with,
+            intentional_contact_with,
+            robot_collision_with,
+            unexpected_collision_with,
+        )
+        subtype_names = (
+            "static_contact_with",
+            "intentional_contact_with",
+            "robot_collision_with",
+            "unexpected_collision_with",
+        )
+        if requires_collision_semantics:
+            checks["schema-1.7 collision semantic subtypes are present"] = all(
+                matrix is not None for matrix in collision_subtypes
+            )
+            checks["schema-1.7 contact semantic validity is present"] = (
+                contact_semantics_valid is not None
+            )
+        if all(matrix is not None for matrix in collision_subtypes):
+            for name, matrix in zip(subtype_names, collision_subtypes):
+                checks[f"{name} matches raw_contact shape"] = (
+                    raw_contact is not None and matrix.shape == raw_contact.shape
+                )
+                checks[f"{name} is symmetric"] = np.array_equal(
+                    matrix, matrix.transpose(0, 2, 1)
+                )
+            subtype_count = sum(
+                matrix.astype(np.uint8) for matrix in collision_subtypes
+            )
+            checks["collision semantic subtypes are mutually exclusive"] = bool(
+                np.all(subtype_count <= 1)
+            )
+            expected_non_support_contact = np.logical_and(
+                raw_contact,
+                np.logical_not(np.logical_or(on_matrix, supports_matrix)),
+            )
+            checks["collision semantic subtypes partition non-support contact"] = (
+                raw_contact is not None and on_matrix is not None
+                and supports_matrix is not None
+                and np.array_equal(subtype_count > 0, expected_non_support_contact)
+            )
+        if contact_semantics_valid is not None:
+            checks["contact_semantics_valid matches raw_contact shape"] = (
+                raw_contact is not None
+                and contact_semantics_valid.shape == raw_contact.shape
+            )
+            checks["contact semantic validity is closed-world"] = bool(
+                np.all(contact_semantics_valid)
+            )
         if contains_matrix is not None:
             checks["contains is inverse of in"] = (
                 in_matrix is not None and np.array_equal(contains_matrix, in_matrix.transpose(0, 2, 1))
@@ -465,11 +739,119 @@ def _summarize_benchmark_support(root: h5py.File) -> None:
             checks["visible_pixel_count matches visible_to shape"] = (
                 visible_to is not None and visible_pixel_count.shape == visible_to.shape
             )
-            checks["visible_to equals visible_pixel_count > 0"] = (
-                visible_to is not None and np.array_equal(visible_to, visible_pixel_count > 0)
+            checks["visible_to matches configured pixel threshold"] = (
+                visible_to is not None
+                and np.array_equal(visible_to, visible_pixel_count >= visible_threshold)
+            )
+        if requires_refined_occludes:
+            checks["schema-1.8.1 overlap fraction is present"] = (
+                occlusion_overlap_fraction is not None
+            )
+            checks["schema-1.8.1 source depth is present"] = (
+                occlusion_source_depth_m is not None
+            )
+            checks["schema-1.8.1 target-front depth is present"] = (
+                occlusion_target_front_depth_m is not None
+            )
+            checks["schema-1.8.1 projected target area is present"] = (
+                occlusion_target_projected_pixel_count is not None
+            )
+        if requires_occludes:
+            checks["schema-1.8 occludes relation is present"] = occludes is not None
+            checks["schema-1.8 occludes validity is present"] = (
+                occludes_valid is not None
+            )
+            checks["schema-1.8 occludes evidence count is present"] = (
+                occlusion_overlap_pixel_count is not None
+            )
+        if occludes is not None:
+            checks["occludes dims are (T,N,N,C)"] = occludes.ndim == 4
+            checks["occludes has a false object diagonal"] = (
+                occludes.ndim == 4
+                and not np.any(np.diagonal(occludes, axis1=1, axis2=2))
+            )
+        if occludes_valid is not None:
+            checks["occludes_valid matches occludes shape"] = (
+                occludes is not None and occludes_valid.shape == occludes.shape
+            )
+            checks["true occludes edges are valid"] = (
+                occludes is not None
+                and np.all(np.logical_or(~occludes, occludes_valid))
+            )
+        if occlusion_overlap_pixel_count is not None:
+            checks["occlusion overlap count matches occludes shape"] = (
+                occludes is not None
+                and occlusion_overlap_pixel_count.shape == occludes.shape
+            )
+            checks["occludes edges meet overlap threshold"] = (
+                occludes is not None
+                and np.all(
+                    np.logical_or(
+                        ~occludes,
+                        occlusion_overlap_pixel_count >= occludes_threshold,
+                    )
+                )
+            )
+        if occlusion_overlap_fraction is not None:
+            checks["occlusion overlap fraction matches occludes shape"] = (
+                occludes is not None
+                and occlusion_overlap_fraction.shape == occludes.shape
+            )
+            checks["occlusion overlap fractions are in [0,1]"] = bool(
+                np.all(np.logical_and(
+                    occlusion_overlap_fraction >= 0,
+                    occlusion_overlap_fraction <= 1,
+                ))
+            )
+            checks["occludes edges meet overlap fraction threshold"] = (
+                occludes is not None
+                and np.all(np.logical_or(
+                    ~occludes,
+                    occlusion_overlap_fraction >= occludes_fraction_threshold,
+                ))
+            )
+        if occlusion_source_depth_m is not None:
+            checks["occlusion source depth matches occludes shape"] = (
+                occludes is not None
+                and occlusion_source_depth_m.shape == occludes.shape
+            )
+            checks["true occludes edges have finite positive source depth"] = (
+                occludes is not None
+                and np.all(np.logical_or(
+                    ~occludes,
+                    np.isfinite(occlusion_source_depth_m)
+                    & (occlusion_source_depth_m > 0),
+                ))
+            )
+        if occlusion_target_front_depth_m is not None:
+            checks["target-front depth dims are (T,N,C)"] = (
+                occlusion_target_front_depth_m.ndim == 3
+            )
+        if occlusion_target_projected_pixel_count is not None:
+            checks["target projected pixel count matches target depth shape"] = (
+                occlusion_target_front_depth_m is not None
+                and occlusion_target_projected_pixel_count.shape
+                == occlusion_target_front_depth_m.shape
             )
         if part_of is not None:
             checks["part_of dims are (T,N,N)"] = part_of.ndim == 3
+            checks["part_of is constant across frames"] = (
+                part_of.shape[0] > 0 and np.all(part_of == part_of[0])
+            )
+            checks["part_of has no self edges"] = (
+                not np.any(np.diagonal(part_of, axis1=1, axis2=2))
+            )
+            checks["part_of children have at most one direct parent"] = (
+                np.all(part_of.sum(axis=2) <= 1)
+            )
+        if part_of_valid is not None:
+            checks["part_of_valid matches part_of shape"] = (
+                part_of is not None and part_of_valid.shape == part_of.shape
+            )
+            checks["true part_of edges are valid"] = (
+                part_of is not None and np.all(np.logical_or(~part_of, part_of_valid))
+            )
+            checks["part_of validity is closed-world"] = bool(np.all(part_of_valid))
         if object_ids and raw_contact is not None:
             checks["same N across object_ids/raw_contact"] = raw_contact.shape[1] == len(object_ids)
         if object_ids and grasped_by_code is not None:
@@ -478,6 +860,10 @@ def _summarize_benchmark_support(root: h5py.File) -> None:
             checks["same N across object_ids/held_by"] = held_by.shape[1] == len(object_ids)
         if object_ids and part_of is not None:
             checks["same N across object_ids/part_of"] = part_of.shape[1] == len(object_ids)
+        if object_ids and occludes is not None:
+            checks["same N across object_ids/occludes"] = (
+                occludes.shape[1:3] == (len(object_ids), len(object_ids))
+            )
         if held_by is not None and held_by_effector_names:
             checks["same E across held_by/effector_names"] = held_by.shape[2] == len(held_by_effector_names)
         if reachable_by is not None and reachable_by_effector_names:
@@ -487,6 +873,10 @@ def _summarize_benchmark_support(root: h5py.File) -> None:
         if visible_to is not None and visible_to_camera_names:
             checks["same C across visible_to/camera_names"] = (
                 visible_to.shape[2] == len(visible_to_camera_names)
+            )
+        if occludes is not None and visible_to_camera_names:
+            checks["same C across occludes/camera_names"] = (
+                occludes.shape[3] == len(visible_to_camera_names)
             )
         catalog_ids = support["object_catalog"]["object_ids"][()].tolist() if "object_catalog" in support else []
         if catalog_ids and object_ids:
@@ -688,8 +1078,6 @@ def _summarize_benchmark_support(root: h5py.File) -> None:
             print(f"    frame0 grasped objects: {frame0_grasped}")
         if on_matrix is not None and on_matrix.shape[0] > 0:
             print(f"    frame0 on edges: {int(np.count_nonzero(on_matrix[0]))}")
-        if collides_with is not None and collides_with.shape[0] > 0:
-            print(f"    frame0 collides_with edges: {int(np.count_nonzero(np.triu(collides_with[0], k=1)))}")
         if held_by is not None and held_by.shape[0] > 0:
             print(f"    frame0 held_by edges: {int(np.count_nonzero(held_by[0]))}")
         if part_of is not None and part_of.shape[0] > 0:
@@ -841,11 +1229,6 @@ def main():
                         relation_state_summary["supports_shape"] = list(state["supports"].shape)
                     if "contains" in state:
                         relation_state_summary["contains_shape"] = list(state["contains"].shape)
-                    if "collides_with" in state:
-                        collides_with = state["collides_with"][()]
-                        relation_state_summary["collides_with_shape"] = list(collides_with.shape)
-                        if collides_with.ndim == 3 and collides_with.shape[0] > 0:
-                            relation_state_summary["frame0_collides_with_edges"] = int(np.count_nonzero(np.triu(collides_with[0], k=1)))
                     if "held_by" in state:
                         held_by = state["held_by"][()]
                         relation_state_summary["held_by_shape"] = list(held_by.shape)

@@ -27,7 +27,13 @@ def depth_encoding(depths):
     encode_data = []
     max_len = 0
     for i in range(len(depths)):
-        depth_uint16 = depths[i].clip(0, 65535).astype(np.uint16)
+        depth_image = np.nan_to_num(
+            np.asarray(depths[i], dtype=np.float64),
+            nan=0.0,
+            posinf=65535.0,
+            neginf=0.0,
+        )
+        depth_uint16 = depth_image.clip(0, 65535).astype(np.uint16)
         success, encoded_image = cv2.imencode(".png", depth_uint16)
         png_data = encoded_image.tobytes()
         encode_data.append(png_data)
@@ -120,7 +126,11 @@ def create_hdf5_from_dict(hdf5_group, data_dict):
             if "rgb" in key:
                 encode_data, max_len = images_encoding(value)
                 hdf5_group.create_dataset(key, data=encode_data, dtype=f"S{max_len}")
-            elif "depth" in key:
+            elif key == "depth":
+                # Only camera observation leaves named exactly ``depth`` are
+                # image-encoded. Graph evidence such as
+                # ``occlusion_source_depth_m`` is a numeric tensor and must
+                # retain floating-point values, including NaN=unavailable.
                 encode_data, max_len = depth_encoding(value)
                 hdf5_group.create_dataset(key, data=encode_data, dtype=f"S{max_len}")
             elif "segmentation" in key:

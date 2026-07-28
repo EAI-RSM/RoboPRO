@@ -75,6 +75,18 @@ benchmark_relations:
     center_tolerance_m: 1.0e-4
   held_by:
     max_object_tcp_distance_m: 0.16
+  visible_to:
+    min_visible_pixel_count: 1
+  occludes:
+    min_overlap_pixel_count: 1
+    min_overlap_fraction: 0.01
+    min_depth_margin_m: 0.001
+    movable_targets_only: true
+  blocks:
+    corridor_clearance_m: 0.04
+    endpoint_margin_m: 0.02
+    movable_sources_only: true
+    movable_targets_only: true
   reachable_by:
     enabled: true
     frame_stride: 10

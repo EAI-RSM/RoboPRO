@@ -110,6 +110,29 @@ def collect(matrix: dict, tasks: list[dict], args) -> list[dict]:
             "ROBOPRO_HELD_BY_MAX_OBJECT_TCP_DISTANCE_M": str(
                 args.held_by_max_object_tcp_distance
             ),
+            "ROBOPRO_VISIBLE_TO_MIN_VISIBLE_PIXEL_COUNT": str(
+                args.visible_to_min_visible_pixel_count
+            ),
+            "ROBOPRO_OCCLUDES_MIN_OVERLAP_PIXEL_COUNT": str(
+                args.occludes_min_overlap_pixel_count
+            ),
+            "ROBOPRO_OCCLUDES_MIN_DEPTH_MARGIN_M": str(
+                args.occludes_min_depth_margin
+            ),
+            "ROBOPRO_OCCLUDES_MIN_OVERLAP_FRACTION": str(
+                args.occludes_min_overlap_fraction
+            ),
+            "ROBOPRO_OCCLUDES_MOVABLE_TARGETS_ONLY": (
+                "1" if bool(args.occludes_movable_targets_only) else "0"
+            ),
+            "ROBOPRO_BLOCKS_CORRIDOR_CLEARANCE_M": str(args.blocks_corridor_clearance),
+            "ROBOPRO_BLOCKS_ENDPOINT_MARGIN_M": str(args.blocks_endpoint_margin),
+            "ROBOPRO_BLOCKS_MOVABLE_SOURCES_ONLY": (
+                "1" if bool(args.blocks_movable_sources_only) else "0"
+            ),
+            "ROBOPRO_BLOCKS_MOVABLE_TARGETS_ONLY": (
+                "1" if bool(args.blocks_movable_targets_only) else "0"
+            ),
             "ROBOPRO_RELATION_SAVE_PATH": str(args.output_root),
             "COLLECT_START_SEED": str(args.start_seed),
         })
@@ -483,6 +506,21 @@ def main() -> int:
     parser.add_argument("--on-supports-max-vertical-separation", type=float, default=0.06)
     parser.add_argument("--on-supports-min-xy-overlap-ratio", type=float, default=0.20)
     parser.add_argument("--held-by-max-object-tcp-distance", type=float, default=0.16)
+    parser.add_argument("--visible-to-min-visible-pixel-count", type=int, default=1)
+    parser.add_argument("--occludes-min-overlap-pixel-count", type=int, default=1)
+    parser.add_argument("--occludes-min-depth-margin", type=float, default=1e-3)
+    parser.add_argument("--occludes-min-overlap-fraction", type=float, default=0.01)
+    parser.add_argument(
+        "--occludes-movable-targets-only", type=int, choices=(0, 1), default=1
+    )
+    parser.add_argument("--blocks-corridor-clearance", type=float, default=0.04)
+    parser.add_argument("--blocks-endpoint-margin", type=float, default=0.02)
+    parser.add_argument(
+        "--blocks-movable-sources-only", type=int, choices=(0, 1), default=1
+    )
+    parser.add_argument(
+        "--blocks-movable-targets-only", type=int, choices=(0, 1), default=1
+    )
     parser.add_argument("--on-supports-min-xy-area", type=float, default=1e-8)
     parser.add_argument("--in-contains-center-tolerance", type=float, default=1e-4)
     parser.add_argument("--obstacle-density", type=int, default=10)
