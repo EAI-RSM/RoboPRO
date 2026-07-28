@@ -2447,6 +2447,7 @@ def make_occluder_task():
                 return self._approach_seed_cache[key]
 
             seed = None
+            ik = None
             try:
                 import numpy as _np
                 import seed_from_clearance as sfc
@@ -2480,7 +2481,8 @@ def make_occluder_task():
                     obstacles=os.environ.get("SEED_OBSTACLES", "all").strip().lower(),
                     res=float(os.environ.get("SEED_RES", "0.02")),
                     zres=float(os.environ.get("SEED_ZRES", "0.03")),
-                    zmax=float(os.environ.get("SEED_ZMAX", "1.23")))
+                    zmax=float(os.environ.get("SEED_ZMAX", "1.23")),
+                    chunk=int(os.environ.get("SEED_CHUNK", "256")))
                 seed, res = sfc.build_seed(self, planner, tag, ik, grasp_q, start_q, None,
                                            start_xyz, goal_xyz, cfg=cfg, action_horizon=H)
                 if seed is None:
@@ -2520,6 +2522,32 @@ def make_occluder_task():
                 print(f"[seed] arm={tag}: build_seed FAILED ({e}); stock fallback (no seed)")
                 self._note_seed_stat(tag, False, f"exception:{type(e).__name__}", None, None, None)
                 seed = None
+            finally:
+                # RELEASE THE IK SOLVER. _build_ik_solver constructs a fresh curobo IKSolver
+                # with its own GPU rollout/seed buffers, and this runs once per (arm, SCENE) --
+                # i.e. every episode, since the cache key includes the scene. Every other
+                # call site in this repo pairs it with `del ik; empty_cache()`
+                # (reachability_map.py:192, clearance_metric_3d.py:440); this one did not, so
+                # solvers accumulated across a run until CUDA ran out. That is what produced
+                # the 43 exception:OutOfMemoryError no-route reasons, and why the GPU stayed
+                # saturated even once the process had stopped making progress -- torch's
+                # caching allocator holds reserved memory away from the driver (and so from
+                # every other process) until empty_cache() gives it back.
+                try:
+                    del ik
+                    torch.cuda.empty_cache()
+                except Exception:
+                    pass
+                if os.environ.get("SEED_MEM_LOG", "1") != "0":
+                    # One line per build so unbounded growth is visible in the cell log
+                    # instead of only surfacing as an OOM tens of episodes later.
+                    try:
+                        _al = torch.cuda.memory_allocated() / 2**30
+                        _rs = torch.cuda.memory_reserved() / 2**30
+                        print(f"[seed-mem] arm={tag}: cuda allocated={_al:.2f}GiB "
+                              f"reserved={_rs:.2f}GiB (after release)")
+                    except Exception:
+                        pass
             self._approach_seed_cache[key] = seed
             return seed
 

@@ -56,6 +56,9 @@ class SeedMetricConfig:
     seed_snap: float = 0.10      # m; max snap of an endpoint to the nearest FREE voxel
     warm_seeds: int = 8          # multi-branch candidates per voxel (return_seeds)
     ik_seeds: int = 30           # IK seeds per solve
+    # IK batch size. This is the knob that bounds PEAK GPU memory during the grid solve --
+    # lower it (128 / 64) if a scene still OOMs after the solver-release fix, since it caps
+    # the allocation without coarsening the grid or losing any fidelity.
     chunk: int = 256
     occ_shape: str = "mesh"      # true tapering collision mesh (vs "extruded")
     # Which actors the clearance field measures against. "all" = every mesh in

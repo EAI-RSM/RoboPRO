@@ -59,6 +59,8 @@
 #   SEED_OBSTACLES            all | occluders             (default all)
 #   SEED_RES / SEED_ZRES      clearance grid res (m)      (default 0.02 / 0.03)
 #   SEED_ZMAX                 clearance grid ceiling (m)  (default 1.23)
+#   SEED_CHUNK                IK batch size, caps peak GPU (default 256)
+#   SEED_MEM_LOG              1/0, per-build cuda mem line (default 1)
 #   DEBUG                     1 -> ROBOTWIN_LOG_MOVE      (default 0)
 # Frozen curobo knobs -- identical in all cells, so the ONLY variable is the mode:
 #   CUROBO_MAX_ATTEMPTS(24) CUROBO_TRAJOPT_SEEDS(16) CUROBO_BATCH_GRAPH_SEEDS(1)
@@ -152,6 +154,11 @@ export SEED_ZRES="${SEED_ZRES:-0.03}"
 # Ceiling of the climb-over grid. Must stay above the tallest obstacle or a route that needs
 # to pass over it cannot connect, which reads as a build miss.
 export SEED_ZMAX="${SEED_ZMAX:-1.23}"
+# Peak-GPU knob for the seed build. Lower to 128/64 if a scene still OOMs; it bounds the
+# IK batch without coarsening the grid. SEED_MEM_LOG prints cuda allocated/reserved after
+# each build so unbounded growth is visible in the cell log rather than only as an OOM.
+export SEED_CHUNK="${SEED_CHUNK:-256}"
+export SEED_MEM_LOG="${SEED_MEM_LOG:-1}"
 if [[ "$DEBUG" == "1" ]]; then
   export ROBOTWIN_LOG_MOVE=1
   echo "DEBUG=1 -> verbose per-move planning trace enabled in cell logs"
