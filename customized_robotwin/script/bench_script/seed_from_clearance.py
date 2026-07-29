@@ -53,6 +53,14 @@ class SeedMetricConfig:
     zres: float = 0.03
     # metric knobs
     gate_tau: float = 0.35       # rad; joint-continuity edge gate (the mandatory 2.5D gate)
+    # Ladder of LOOSER taus tried when gate_tau itself fails to connect the two seeds but the
+    # UNGATED path does -- i.e. the route exists geometrically and only the gate cut it. merged
+    # is monotone non-decreasing in tau (a larger tau admits strictly more edges), so the scan
+    # runs ascending and stops at the first value that connects: the answer is "the smallest tau
+    # that would have worked", not a guess. Costs nothing but a few extra widest-path runs over
+    # volumes already in memory -- no IK, no rebuild, which is the whole point of keeping label/
+    # edt/q_warm_3d on the result. Set () to disable.
+    gate_tau_sweep: tuple = (0.5, 0.7, 1.0, 1.5, 2.0)
     seed_snap: float = 0.10      # m; max snap of an endpoint to the nearest FREE voxel
     warm_seeds: int = 8          # multi-branch candidates per voxel (return_seeds)
     ik_seeds: int = 30           # IK seeds per solve
@@ -89,6 +97,11 @@ class RouteResult:
     # other gate_tau without recomputing the metric (geometry-fail vs gate-seam-fail; tau sweeps)
     merged_ungated: bool = False
     eps_ungated: float = 0.0
+    # [(tau, merged, eps), ...] from the ascending gate_tau_sweep, present only when the
+    # configured gate_tau failed on a route the ungated pass found. The first entry with
+    # merged=True is the smallest tau that would have connected this scene.
+    tau_sweep: list | None = None
+    tau_needed: float | None = None      # that smallest connecting tau, or None if none did
     edt: np.ndarray | None = None
     seed_start: tuple | None = None
     seed_goal: tuple | None = None
@@ -130,6 +143,25 @@ def _build_warm_field(env, planner, ik, arm, grasp_q, XX, YY, zs, label, cfg):
     if cand_q_vol is None:                                  # no FREE voxel had a converged branch
         return None
     return cm.warm_start_branches_3d(free_vol, cand_q_vol, cand_ok_vol)
+
+
+def sweep_gate_tau(widest_path_at, taus, gate_tau):
+    """Smallest tau in `taus` that connects the two seeds. Returns ([(tau, merged, eps), ...],
+    tau_needed_or_None), the list holding every tau actually tried, in ascending order.
+
+    widest_path_at(tau) -> (eps, bottleneck, merged); the caller closes over the volumes so this
+    stays pure and testable without a scene. Only taus strictly LOOSER than the configured
+    gate_tau are tried -- it already failed, and the gate is monotone (a larger tau admits a
+    superset of edges), so anything tighter cannot connect either. That same monotonicity is why
+    the scan stops at the first success: the first hit IS the minimum over the ladder."""
+    tried, needed = [], None
+    for tau in sorted(float(t) for t in taus if float(t) > float(gate_tau)):
+        eps, _bott, merged = widest_path_at(tau)
+        tried.append((float(tau), bool(merged), float(eps)))
+        if merged:
+            needed = float(tau)
+            break
+    return tried, needed
 
 
 def compute_route_configs(env, planner, arm, ik, grasp_q, start_xyz, goal_xyz,
@@ -210,10 +242,21 @@ def compute_route_configs(env, planner, arm, ik, grasp_q, start_xyz, goal_xyz,
         tgt_p = np.asarray(env.target_obj.get_pose().p, dtype=float)
     except Exception:
         tgt_p = None
+    # Tau sweep: only when the gate is the thing that cut an otherwise-existing route. If the
+    # UNGATED pass also failed, no tau can help (the route is geometrically absent) and running
+    # the ladder would just burn time to reprint that. Ascending + early exit, because merged is
+    # monotone in tau. Reuses label/edt/q_warm_3d as they are -- no IK, no rebuild.
+    tau_sweep, tau_needed = None, None
+    if merged_u and not merged_g and cfg.gate_tau_sweep:
+        tau_sweep, tau_needed = sweep_gate_tau(
+            lambda tau: cm.widest_path_eps_3d(label, edt, q_warm_3d, sa, ga, tau),
+            cfg.gate_tau_sweep, cfg.gate_tau)
+
     diag = dict(merged_ungated=bool(merged_u), eps_ungated=float(eps_u), edt=edt,
                 seed_start=sa, seed_goal=ga, q_warm_3d=q_warm_3d, label=label, XX=XX, YY=YY, zs=zs,
                 foots=foots, occ_ps=occ_ps, start_xyz=np.asarray(start_xyz, float),
                 goal_xyz=np.asarray(goal_xyz, float), tgt_p=tgt_p,
+                tau_sweep=tau_sweep, tau_needed=tau_needed,
                 bott_xyz=(_w(bott_g) if (merged_g and bott_g) else None))
 
     if not merged_g:
@@ -222,6 +265,24 @@ def compute_route_configs(env, planner, arm, ik, grasp_q, start_xyz, goal_xyz,
                   if not merged_u else
                   f"ungated route EXISTS but the joint gate (tau={cfg.gate_tau}) disconnects it "
                   f"(branch seam; coarse res inflates adjacent-voxel joint steps -> gate over-cuts)")
+        # Append the sweep's verdict so the actionable number reaches records.jsonl, not just
+        # the console: seed_stats.reason is what the summary reports, and "set SEED_GATE_TAU=X"
+        # is the whole point of running the sweep.
+        if tau_needed is not None:
+            reason += (f" -- SWEEP: tau={tau_needed} WOULD connect "
+                       f"(eps={dict((t, e) for t, m, e in tau_sweep)[tau_needed]:.3f}m); "
+                       f"set SEED_GATE_TAU={tau_needed}")
+        elif tau_sweep:
+            # No tau connecting is NOT "the gate is too tight" -- at a large enough tau the gate
+            # admits every edge the ungated pass does, so if it still fails the blocker cannot be
+            # the threshold. It is NaN holes in the warm field: _wrap_linf returns NaN where a
+            # voxel has no converged branch, and `NaN <= tau` is False at EVERY tau, so such a
+            # voxel is permanently un-gateable while still counting as FREE for the ungated pass.
+            # The levers are warm-field convergence (warm_seeds, ik_seeds), not tau and not res.
+            reason += (f" -- SWEEP: no tau up to {max(t for t, _, _ in tau_sweep)} connects it, so the "
+                       "gate THRESHOLD is not the blocker: the route must cross voxels with no "
+                       "converged warm config (NaN, un-gateable at any tau). Levers: warm_seeds / "
+                       "ik_seeds, not SEED_GATE_TAU")
         return RouteResult(None, None, None, False, float(eps_g), reason,
                            seconds=time.perf_counter() - t0, **diag)
 
@@ -432,6 +493,43 @@ def _selftest():
     assert np.allclose(t.view(H, dof).numpy(), row, atol=0), "tensor != resampled row"
     assert route_qs_to_seed_tensor(None, s0, s0, H) is None, "degenerate should pass through as None"
     print("[selftest] route_qs_to_seed_tensor (2c): ALL PASS (shape/dtype/cpu/contiguous/None-passthrough)")
+
+    # ---- gate-tau sweep: the scan is what turns "the gate cut it" into an actionable number,
+    # so its early exit and its monotonicity assumption both need pinning.
+    calls = []
+
+    def fake(connect_at):
+        """widest_path stand-in that connects once tau >= connect_at."""
+        def f(tau):
+            calls.append(tau)
+            return (0.05 + 0.01 * tau, None, tau >= connect_at)
+        return f
+
+    ladder = (0.5, 0.7, 1.0, 1.5, 2.0)
+    calls.clear()
+    tried, needed = sweep_gate_tau(fake(1.0), ladder, 0.35)
+    assert needed == 1.0, needed
+    assert calls == [0.5, 0.7, 1.0], f"must stop at the FIRST connecting tau: {calls}"
+    assert [t for t, _, _ in tried] == [0.5, 0.7, 1.0] and [m for _, m, _ in tried] == [False, False, True]
+
+    # nothing connects -> every rung tried, needed is None (the "tau is not the problem" verdict)
+    calls.clear()
+    tried, needed = sweep_gate_tau(fake(99.0), ladder, 0.35)
+    assert needed is None and len(tried) == len(ladder), (needed, tried)
+
+    # only LOOSER taus are worth trying: the configured one already failed and the gate is
+    # monotone, so a tighter tau cannot connect. A high gate_tau must shrink the ladder.
+    calls.clear()
+    tried, needed = sweep_gate_tau(fake(0.5), ladder, 1.0)
+    assert calls == [1.5] and needed == 1.5, (calls, needed)   # 0.5/0.7/1.0 filtered out, then early exit
+    calls.clear()
+    assert sweep_gate_tau(fake(0.5), ladder, 5.0) == ([], None), "no rung above gate_tau -> no work"
+    assert calls == [], calls
+    # unsorted / duplicate ladders still scan ascending
+    calls.clear()
+    sweep_gate_tau(fake(99.0), (1.0, 0.5, 0.7), 0.35)
+    assert calls == [0.5, 0.7, 1.0], calls
+    print("[selftest] sweep_gate_tau: ALL PASS (early-exit/no-connect/monotone-floor/empty/unsorted)")
 
 
 if __name__ == "__main__":

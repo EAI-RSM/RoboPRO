@@ -10,6 +10,15 @@
 # success delta is attributable to it. Neither falls back to the around-box waypoint,
 # so a miss fails the candidate and the floor is not contaminated by the heuristic.
 #
+# Both cells also run with the backward (carry/place) leg stripped -- PLACEMENT_MODE=
+# direct, see below. That leg was never gated by APPROACH_MODE, so until now every cell
+# carried the object to the pad along a hand-authored chain whose x is read off occluder 0
+# and whose heights are a fixed ladder: scene-specific in exactly the way the around-box
+# waypoint is, blind to every other occluder and to all clutter. Leaving it on would mean
+# the seed is only asked to move the grasp leg while the leg where most of the planning
+# happens stays hand-authored. It is a shared constant across cells either way, so it never
+# threatened the pairing -- it threatened the generality claim.
+#
 # The third mode, `off` (stock around-box waypoint), is deliberately NOT in the
 # default set. It is a hardcoded one-occluder-in-front heuristic, so on the general
 # scenes this benchmark is aiming at it is not a control -- it is a different task.
@@ -61,6 +70,7 @@
 #   SEED_ZMAX                 clearance grid ceiling (m)  (default 1.23)
 #   SEED_CHUNK                IK batch size, caps peak GPU (default 256)
 #   SEED_MEM_LOG              1/0, per-build cuda mem line (default 1)
+#   PLACEMENT_MODE            direct | scripted           (default direct)
 #   DEBUG                     1 -> ROBOTWIN_LOG_MOVE      (default 0)
 # Frozen curobo knobs -- identical in all cells, so the ONLY variable is the mode:
 #   CUROBO_MAX_ATTEMPTS(24) CUROBO_TRAJOPT_SEEDS(16) CUROBO_BATCH_GRAPH_SEEDS(1)
@@ -91,6 +101,18 @@ CURATED_CLUTTER_DENSITY="${CURATED_CLUTTER_DENSITY:-0}"
 STANDARD_CLUTTER_DENSITY="${STANDARD_CLUTTER_DENSITY:-8}"
 BASE_CONFIG="${BASE_CONFIG:-bench_demo_office_clean}"
 DEBUG="${DEBUG:-0}"
+# Backward (carry/place) leg. Shared by EVERY cell, so it is a property of the run, not a
+# variable within it -- direct vs seed still differ by exactly the forward-leg seed.
+#   direct    (default) no placement subgoals: lift -> generic blended intermediate ->
+#             place_actor. Nothing in the route reads the occluder or the clutter.
+#   scripted  the hand-authored beside_box/lift_above_box/over_box_to_pad_y/center_over_pad
+#             chain, whose x comes from occluder 0's pose + a per-asset footprint constant
+#             and whose heights come from a fixed ladder. Reproduces the older runs.
+# Expect a markedly lower absolute success rate on `direct`: place_actor must absorb the
+# whole lift->pad transit as one trajopt problem, which is exactly the jump the scripted
+# chain was built to break up. That floor is the point of the measurement.
+PLACEMENT_MODE="${PLACEMENT_MODE:-direct}"
+export PLACEMENT_MODE
 
 # ---- Frozen shared curobo knobs (identical for ALL cells) ----
 export CUROBO_TRAJOPT_SEEDS="${CUROBO_TRAJOPT_SEEDS:-16}"
@@ -127,7 +149,8 @@ fi
 
 echo "============================================================"
 echo " Phase 4: APPROACH_MODE A/B  (does the clearance seed help?)"
-echo "   modes        : $MODES"
+echo "   modes        : $MODES  (forward leg -- the A/B variable)"
+echo "   placement    : $PLACEMENT_MODE  (backward leg -- same in every cell)"
 echo "   scenes       : $SCENES"
 echo "   seeds        : $NUM_SEEDS per cell (from $SEED_START) -- equal across scenes"
 echo "   curated      : occluders ON, n in {$OCCLUDER_COUNTS}, radii=$OFFSET,"

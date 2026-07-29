@@ -190,6 +190,10 @@ def load_records(cell_dir: Path | None) -> dict[int, dict]:
             "success": bool(r["rollout_success"]),
             "seconds": float(secs) if secs is not None else None,
             "mode": r.get("approach_mode"),
+            # Backward-leg mode. Unlike "mode" this is NOT the A/B variable -- it must be
+            # the SAME in every cell, so it is collected only to assert that it was.
+            # None on records written before PLACEMENT_MODE existed (those were scripted).
+            "placement_mode": r.get("placement_mode"),
             "plan_effort": r.get("rollout_plan_effort") or [],
             "seed_stats": r.get("rollout_seed_stats") or [],
             "failure_stage": r.get("rollout_failure_stage"),
@@ -298,6 +302,7 @@ def cell_stats(res: dict[int, dict]) -> dict | None:
     att_ok = [a for s, a in ((v["success"], pre_grasp_effort(v, "attempts")) for v in res.values())
               if s and a is not None]
     modes = {v["mode"] for v in res.values() if v["mode"]}
+    placements = {v.get("placement_mode") or "scripted" for v in res.values()}
     return {
         "n": n, "k": k, "rate": rate, "ci": (lo, hi),
         "avg_seconds": avg_seconds,
@@ -310,15 +315,23 @@ def cell_stats(res: dict[int, dict]) -> dict | None:
         "trajopt_median": (statistics.median(tro) if tro else None),
         "trajopt_mean": (sum(tro) / len(tro) if tro else None),
         "modes_seen": modes,
+        "placements_seen": placements,
     }
 
 
-def seed_firing(res: dict[int, dict]) -> dict | None:
+def seed_firing(res: dict[int, dict], leg: str | None = None) -> dict | None:
     """Seed build outcomes across the cell. Counts FRESH builds only (cache hits are
     tagged reason='cached' and would double-count the same route). Returns None when
-    nothing was recorded -- i.e. this cell never tried to seed."""
+    nothing was recorded -- i.e. this cell never tried to seed.
+
+    leg=None pools every leg; leg='approach'/'carry' restricts to one. They MUST be read
+    separately as well as pooled: the carry grid is labelled with the object attached, which
+    shrinks its FREE set and so its firing rate, and a healthy approach rate would otherwise
+    hide a carry leg that never fires. Records written before the carry leg existed have no
+    'leg' key and count as 'approach'."""
     fresh = [s for v in res.values() for s in v.get("seed_stats") or []
-             if s.get("reason") != "cached"]
+             if s.get("reason") != "cached"
+             and (leg is None or (s.get("leg") or "approach") == leg)]
     if not fresh:
         return None
     built = [s for s in fresh if s.get("built")]
@@ -331,7 +344,8 @@ def seed_firing(res: dict[int, dict]) -> dict | None:
     # A build is per (scene, arm), so "episodes with >=1 seed" is the number that says
     # whether the METHOD was actually in play for a given rollout.
     eps_with_seed = sum(1 for v in res.values()
-                        if any(s.get("built") for s in v.get("seed_stats") or []))
+                        if any(s.get("built") for s in v.get("seed_stats") or []
+                               if leg is None or (s.get("leg") or "approach") == leg))
     return {
         "builds": len(fresh), "built": len(built),
         "rate": len(built) / len(fresh),
@@ -367,6 +381,13 @@ def print_cell(mode: str, st: dict | None) -> None:
     if seen and seen != {mode}:
         print(f"          !! WARNING: records say approach_mode={sorted(seen)} but this is "
               f"the '{mode}' cell -- the cells may not differ as intended")
+    # The backward leg is a shared constant, so a cell containing more than one value of
+    # it is internally inconsistent. Cross-cell agreement is checked once per scene by
+    # the caller; here we only catch a cell that was itself run in two configurations.
+    placements = st["placements_seen"]
+    if len(placements) > 1:
+        print(f"          !! WARNING: this cell mixes placement_mode={sorted(placements)} "
+              f"-- the backward leg must be identical across every rollout")
 
 
 def print_scene_shape(data: dict[str, dict[int, dict]]) -> bool:
@@ -399,8 +420,8 @@ def print_scene_shape(data: dict[str, dict[int, dict]]) -> bool:
     return no_occ and no_clutter
 
 
-def print_firing(fr: dict | None) -> None:
-    print("\n[SEED FIRING]  did the method actually engage?")
+def print_firing(fr: dict | None, label: str = "") -> None:
+    print(f"\n[SEED FIRING{label}]  did the method actually engage?")
     if fr is None:
         print("  no seed builds recorded (the 'seed' cell did not run, or never reached a build)")
         return
@@ -888,12 +909,33 @@ def summarize_scene(root: Path, label: str = "", figure: bool = True,
             continue
         print_cell(m, stats[m])
 
+    # Cross-cell: the backward leg is a property of the RUN, so every cell in a scene must
+    # agree on it. A run that mixed them (e.g. one cell relaunched by hand with a different
+    # PLACEMENT_MODE) would compare a stripped carry against a hand-authored one and read
+    # the difference as a seed effect, so say so loudly rather than pairing them.
+    _placements = {p for m in MODES if data[m]
+                   for p in ({v.get("placement_mode") or "scripted" for v in data[m].values()})}
+    if len(_placements) > 1:
+        print(f"\n  !! WARNING: cells disagree on placement_mode={sorted(_placements)} -- the "
+              "backward leg is supposed to be identical across cells; pairing is NOT valid")
+    elif _placements:
+        print(f"\n  backward leg: placement_mode={_placements.pop()} (same in every cell)")
+
     print("\n[FAILURES]")
     for m in MODES:
         if data[m]:
             print_failure_stages(m, data[m])
 
+    # Pooled first (the headline "did the method engage at all"), then per leg whenever a
+    # carry-leg build was recorded. Only one leg present -> the pooled line already says it,
+    # so the split is suppressed rather than printed twice identically.
     print_firing(seed_firing(data["seed"]))
+    _legs = {(s.get("leg") or "approach") for v in data["seed"].values()
+             for s in v.get("seed_stats") or []}
+    if len(_legs) > 1:
+        for _leg in ("approach", "carry"):
+            if _leg in _legs:
+                print_firing(seed_firing(data["seed"], leg=_leg), label=f" -- {_leg} leg")
 
     print(f"\n[PLACEMENT-ADJUSTED]  same cells, dropping failures at {'/'.join(stages)}")
     print("  place_actor is the final descent onto the pad and is broken independently of")
@@ -1132,6 +1174,27 @@ def _selftest() -> None:
                                                {"built": True, "eps_gated": 0.02}]}}}
         assert scene_eps_by_seed(two_arm)[7] == 0.02, "should take the tighter corridor"
 
+        # Phase C: the two legs must be separable. A cell where the approach leg always fires
+        # and the carry leg never does must NOT report a healthy pooled rate as the whole story.
+        two_leg = {0: {"seed_stats": [
+            {"arm": "left", "leg": "approach", "built": True, "seconds": 40.0,
+             "route_voxels": 16, "eps_gated": 0.11},
+            {"arm": "left", "leg": "carry", "built": False, "reason": "no_attached_object",
+             "seconds": 5.0}]},
+            1: {"seed_stats": [
+                {"arm": "left", "leg": "approach", "built": True, "seconds": 40.0,
+                 "route_voxels": 16, "eps_gated": 0.13},
+                {"arm": "left", "leg": "carry", "built": False, "reason": "no_attached_object",
+                 "seconds": 5.0}]}}
+        assert seed_firing(two_leg)["rate"] == 0.5, "pooled rate wrong"
+        assert seed_firing(two_leg, leg="approach")["rate"] == 1.0, "approach leg mis-split"
+        ca = seed_firing(two_leg, leg="carry")
+        assert ca["rate"] == 0.0 and ca["episodes_with_seed"] == 0, f"carry leg mis-split: {ca}"
+        # a record predating the carry leg has no 'leg' key and must read as 'approach'
+        legacy = {0: {"seed_stats": [{"arm": "left", "built": True, "seconds": 1.0}]}}
+        assert seed_firing(legacy, leg="approach")["built"] == 1, "legacy record lost its leg"
+        assert seed_firing(legacy, leg="carry") is None, "legacy record leaked into carry"
+
         summarize(root, figure=True)
         for scene, _ in found:
             assert (root / scene / "approach_mode_ab.png").is_file(), scene
@@ -1142,7 +1205,7 @@ def _selftest() -> None:
         assert (root / "success_by_difficulty.png").is_file(), "bucket-success figure missing"
         assert (root / "scene_difficulty_distribution.png").is_file(), "distribution figure missing"
 
-    print("\n[selftest] ALL PASS (loader/Wilson/McNemar/firing-rate/attempts/"
+    print("\n[selftest] ALL PASS (loader/Wilson/McNemar/firing-rate/per-leg-split/attempts/"
           "placement-adjusted/figures, flat + two-scene layouts, blind-scene warning)")
 
 

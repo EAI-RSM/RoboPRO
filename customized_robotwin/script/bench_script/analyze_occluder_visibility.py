@@ -905,21 +905,31 @@ def make_occluder_task():
             # but rank candidates by whether the FULL post-attach motion chain plans
             # successfully, not just by endpoint IK. Cache the winning trajectories so
             # these stages are replayed exactly instead of being planned again live.
-            _beside_box_pose = candidate_plan["placement_subgoals"][0][1]
-            _lift_z = _beside_box_pose[2]
-            _quat = list(_beside_box_pose[3:])
-            placement_plan = self._select_attached_placement_plan(
-                arm_tag,
-                tgt_y=self._place_target_y,
-                lift_z=_lift_z,
-                quat=_quat,
-            )
+            # PLACEMENT_MODE=direct: no subgoals, so there is no geometry to re-select --
+            # skip the whole attached-world search (it is the scene-specific part: it scores
+            # _box_side_x corridors against the PLACE_CLEARANCE_ZS ladder) and hand the lift
+            # straight to place_actor below, via the one generic blended intermediate.
+            if not candidate_plan["placement_subgoals"]:
+                placement_plan = {"placement_subgoals": [], "trajectories": [], "verified": True}
+                if log_move:
+                    print("[placement] PLACEMENT_MODE=direct -- no placement subgoals; "
+                          "lift -> intermediate -> place_actor")
+            else:
+                _beside_box_pose = candidate_plan["placement_subgoals"][0][1]
+                _lift_z = _beside_box_pose[2]
+                _quat = list(_beside_box_pose[3:])
+                placement_plan = self._select_attached_placement_plan(
+                    arm_tag,
+                    tgt_y=self._place_target_y,
+                    lift_z=_lift_z,
+                    quat=_quat,
+                )
+                if log_move:
+                    print(f"[placement] verified x_side={placement_plan['x_side']:.3f} "
+                          f"clearance_z={placement_plan['clearance_z']:.2f} "
+                          f"escape={placement_plan.get('escape_idx', 0)} "
+                          f"quat={placement_plan['quat']}")
             candidate_plan["placement_subgoals"] = placement_plan["placement_subgoals"]
-            if log_move:
-                print(f"[placement] verified x_side={placement_plan['x_side']:.3f} "
-                      f"clearance_z={placement_plan['clearance_z']:.2f} "
-                      f"escape={placement_plan.get('escape_idx', 0)} "
-                      f"quat={placement_plan['quat']}")
             for stage_name, traj in placement_plan["trajectories"]:
                 self._replay_planned_move(arm_tag, traj)
                 if self.plan_success and not self._object_retained(arm_tag, context=stage_name):
@@ -981,8 +991,43 @@ def make_occluder_task():
             # interpolate smoothly, even though both ends are individually valid. Same
             # fix pattern as the grasp side: break it into a smaller intermediate step
             # (position+orientation blend) instead of one large jump.
-            mid_pose = self._verified_intermediate(arm_tag, candidate_plan["placement_subgoals"][-1][1], place_actions[0].target_pose)
-            self._plan_and_replay_pose(arm_tag, mid_pose)
+            # The post-lift transit to place_pre_pose, which the two modes reach very differently.
+            #
+            # SCRIPTED (unchanged): the chain already ended at center_over_pad, directly above
+            # the pad, so all that remains is the short blended hop described above.
+            #
+            # DIRECT: one move, straight from the lift pose to place_pre_pose, seeded.
+            # This replaced a two-hop version (blend, then pad) for a reason worth recording.
+            # The blend is an INTERMEDIATE, not a destination. With the chain on, that is
+            # invisible -- starting above the pad, the blend lands at the pad. With the chain
+            # off it starts at the LIFT pose and stops half way, which is what the first smoke
+            # run hit: carry_transit planned Success and was the episode's LAST plan, then
+            # landing_search_preconditions_not_met(xy_distance=0.206 m). Appending a second hop
+            # fixed the reach but left the seed covering only the first half -- and on the
+            # rerun that unseeded second hop was exactly where the seeded cell died
+            # (FINETUNE_TRAJOPT_FAIL, 24/24 attempts), while its seeded first hop had converged
+            # in ONE attempt with the object held to 4e-5 m.
+            #
+            # Splitting the move is also the wrong shape for the experiment. The seed's whole
+            # claim is that it makes the big jump tractable, so the big jump is what has to be
+            # attempted -- unseeded in `direct`, seeded in `seed`. Both cells keep the generic
+            # replacement for the hand-placed midpoint: _plan_pose_with_local_waypoint_retry's
+            # shrinking-waypoint fallback, which breaks a failed move into smaller hops using
+            # CuRobo's own reported position error, reads no scene state, and applies equally
+            # to both. So the midpoint is not lost, it is earned rather than assumed.
+            if candidate_plan["placement_subgoals"]:
+                transit_pose = self._verified_intermediate(
+                    arm_tag, candidate_plan["placement_subgoals"][-1][1],
+                    place_actions[0].target_pose)
+            else:
+                transit_pose = list(place_actions[0].target_pose)
+            # Phase C seed: goal is the pose actually being planned to, which is now the whole
+            # transit. None in every other mode, so this call is byte-identical to the unseeded
+            # one there. (Scripted's plan-effort label changes from "pose" to "carry_transit";
+            # that is a record label only, no behaviour rides on it.)
+            _carry_seed = self._get_carry_seed(arm_tag, transit_pose[:3])
+            self._plan_and_replay_pose(arm_tag, transit_pose, seed_traj=_carry_seed,
+                                       stage_label="carry_transit")
             if self.plan_success and not self._object_retained(arm_tag, context="placement:pre_place_descent"):
                 self.plan_success = False
                 self._last_fail_reason = "object_lost:placement:pre_place_descent"
@@ -1046,7 +1091,16 @@ def make_occluder_task():
             return candidates[0]  # none verified reachable; fall back to the plain midpoint
 
         def _backward_subgoal_poses(self, arm_tag, x_side, clearance_z, lift_pose):
-            """Ordered BACKWARD (placement) subgoals for a chosen candidate path."""
+            """Ordered BACKWARD (placement) subgoals for a chosen candidate path.
+
+            Empty in PLACEMENT_MODE=direct. Killed HERE, at the single source every caller
+            goes through (_candidate_specs, _plan_candidate, _select_attached_placement_plan
+            and its no-geometry fallback, the no-contact-point fallback), rather than at each
+            call site -- the same reason the around-box waypoint is suppressed inside
+            _candidate_specs: a chain that merely goes unplanned still gets live-re-planned
+            downstream by whatever branches on its poses."""
+            if self._placement_mode() == "direct":
+                return []
             quat = list(lift_pose[3:])
             tgt_y = self._place_target_y
             pad_x, pad_y = self.fixed_pad_xy
@@ -2068,7 +2122,7 @@ def make_occluder_task():
                 start_pose = list(self.get_arm_pose(arm_tag))
                 already_placed = placed
 
-        def _plan_and_replay_pose(self, arm_tag, pose):
+        def _plan_and_replay_pose(self, arm_tag, pose, seed_traj=None, stage_label="pose"):
             """Plan a single pose from the CURRENT live qpos and immediately replay
             it via _replay_planned_move, instead of self.move(self.move_to_pose(...)).
             For a lone plan-then-immediately-execute call like this there's no
@@ -2076,12 +2130,21 @@ def make_occluder_task():
             grasp/place_actor), so this isn't fixing a re-plan-divergence bug here --
             its value is exposing the specific CuRobo fail_reason via
             self._last_fail_reason for the structured failure recorder, and using the
-            same execution primitive as the rest of this file for consistency."""
+            same execution primitive as the rest of this file for consistency.
+
+            seed_traj: optional clearance-route trajopt seed (Phase C). Warm-starts only the
+            DIRECT attempt inside the retry helper; the shrinking-waypoint fallback stays
+            unseeded, matching how the approach leg is seeded. None => unseeded, i.e. identical
+            to what this did before, which is what makes seeded-vs-unseeded a one-variable
+            contrast at this call site.
+            stage_label: what the plan-effort recorder files this attempt under. Defaults to the
+            historical "pose" so existing call sites keep their labels."""
             if not self.plan_success:
                 return
             start_qpos = self.robot.left_entity.get_qpos() if str(arm_tag) == "left" else self.robot.right_entity.get_qpos()
             ok, fail_reason, _, trajectories = self._plan_pose_with_local_waypoint_retry(
-                arm_tag, pose, np.array(start_qpos, dtype=np.float64, copy=True), "pose")
+                arm_tag, pose, np.array(start_qpos, dtype=np.float64, copy=True), stage_label,
+                seed_traj=seed_traj)
             if not ok:
                 self.plan_success = False
                 self._last_fail_reason = fail_reason
@@ -2365,12 +2428,25 @@ def make_occluder_task():
                 # Emitting None here kills it on every return path -- verified candidates AND the
                 # deepest-progress fallback, which never reaches _plan_candidate's tail.
                 waypoints_off = self._approach_mode() != "off"
-                gaps = SIDE_WAYPOINT_GAPS if occluder_present else (SIDE_WAYPOINT_GAPS[1],)
+                placement_off = self._placement_mode() == "direct"
                 # z_lift/orient/y_offset only ever shape the waypoint, so with no waypoint they
                 # would expand the candidate list into exact duplicates -- each with its own
                 # _plan_grasp_side cache key, so each re-running get_grasp_pose's 10-rotation
-                # batch-plan for nothing. `gap` is NOT collapsed: it also feeds _box_side_x and
-                # so the placement subgoals, which stay just as varied as before.
+                # batch-plan for nothing. `gap` and `clearance_z` survive that collapse only
+                # because they ALSO feed _box_side_x / _backward_subgoal_poses; with the
+                # placement chain off they too are pure duplicate multipliers, so collapse them.
+                #
+                # Collapsing both also removes the last way the candidate SPACE depends on the
+                # scene: `occluder_present` conditioning below is what made a curated cell
+                # search 3 gaps and a standard cell search 1, i.e. the planner behaved
+                # differently by scene type before any planning happened. With waypoints and
+                # the placement chain both off, every list here is single-valued regardless of
+                # what is on the table, and a candidate is just a contact point. The
+                # occluder_present branches are left intact for APPROACH_MODE=off, which is
+                # the acknowledged scene-specific reference mode.
+                gaps = ((SIDE_WAYPOINT_GAPS[1],) if (waypoints_off and placement_off) else
+                        (SIDE_WAYPOINT_GAPS if occluder_present else (SIDE_WAYPOINT_GAPS[1],)))
+                clearance_zs = (PLACE_CLEARANCE_ZS[1],) if placement_off else PLACE_CLEARANCE_ZS
                 z_lifts = ((0.0,) if waypoints_off else
                            (SIDE_WAYPOINT_Z_LIFTS if occluder_present else (0.0,)))
                 orients = WAYPOINT_ORIENTATIONS if occluder_present else ("grasp_aligned",)
@@ -2384,7 +2460,7 @@ def make_occluder_task():
                                     self._around_box_waypoint(
                                         arm_tag, grasp_pre_pose, gap=gap, z_lift=z_lift,
                                         orient=orient, y_offset=y_offset)
-                                for clearance_z in PLACE_CLEARANCE_ZS:
+                                for clearance_z in clearance_zs:
                                     placement_subgoals = self._backward_subgoal_poses(
                                         arm_tag,
                                         x_side=x_side,
@@ -2415,6 +2491,31 @@ def make_occluder_task():
             if os.environ.get("SEED_FROM_CLEARANCE", "") == "1":
                 return "seed"
             return "off"
+
+        def _placement_mode(self):
+            """Carry/placement experiment mode: 'scripted' | 'direct'. Env PLACEMENT_MODE.
+
+              scripted = the hand-authored backward chain (default; unchanged behaviour).
+              direct   = NO placement subgoals at all: after the lift, go straight into
+                         place_actor via the one generic blended intermediate.
+
+            APPROACH_MODE only ever gated the FORWARD (rest -> pre_grasp) leg. The backward
+            leg is scene-specific in the same way the around-box waypoint is: its x comes
+            from _box_side_x, which reads occluder 0's world pose plus OCC_HALF_FOOTPRINT (a
+            constant hand-entered for the olive-oil asset), and its heights come from the
+            fixed PLACE_CLEARANCE_ZS ladder rather than anything measured off the scene. With
+            more than one occluder the corridor it picks is only cleared against bottle 0; on
+            an occluder-free scene _box_side_x silently falls back to the TARGET's x, so the
+            chain is routed with reference to nothing that is actually in the way. None of the
+            clutter is consulted anywhere. So for a generality claim the whole chain has to be
+            switchable off, leaving only mechanisms that read no scene-specific state:
+            _verified_intermediate (blend two poses, accept on IK), the local-offset bridge
+            pool / shrinking-waypoint retry, and curobo's own collision world.
+
+            Deliberately NOT folded into APPROACH_MODE: the two legs are independent knobs and
+            the A/B pairs cells that differ by exactly one of them."""
+            m = os.environ.get("PLACEMENT_MODE", "").strip().lower()
+            return m if m in ("scripted", "direct") else "scripted"
 
         def _get_approach_seed(self, arm_tag):
             """ROBOPRO Phase 3: the clearance-metric route as a curobo trajopt seed for the grasp approach,
@@ -2482,7 +2583,16 @@ def make_occluder_task():
                     res=float(os.environ.get("SEED_RES", "0.02")),
                     zres=float(os.environ.get("SEED_ZRES", "0.03")),
                     zmax=float(os.environ.get("SEED_ZMAX", "1.23")),
-                    chunk=int(os.environ.get("SEED_CHUNK", "256")))
+                    chunk=int(os.environ.get("SEED_CHUNK", "256")),
+                    # Joint-continuity gate. Exposed because the build's own tau sweep
+                    # reports the smallest tau that would have connected a route it had
+                    # to reject, and that number is only useful if it can be set back in.
+                    # Raising it admits larger joint steps between adjacent voxels: too
+                    # low and a smooth stretch reads as a branch seam (what coarse
+                    # SEED_RES causes); too high and the route may hop IK branches, which
+                    # makes the seed a worse initialization but never an unsafe one --
+                    # trajopt still has to produce the trajectory it executes.
+                    gate_tau=float(os.environ.get("SEED_GATE_TAU", "0.35")))
                 seed, res = sfc.build_seed(self, planner, tag, ik, grasp_q, start_q, None,
                                            start_xyz, goal_xyz, cfg=cfg, action_horizon=H)
                 if seed is None:
@@ -2551,19 +2661,193 @@ def make_occluder_task():
             self._approach_seed_cache[key] = seed
             return seed
 
-        def _note_seed_stat(self, arm_tag, built, reason, seconds, voxels, eps):
+        def _carry_seed_on(self):
+            """Is the CARRY leg (lift -> pad transit) seeded? Env CARRY_SEED overrides ('0'/'1').
+
+            Defaults to the approach leg's mode, so the A/B stays two cells that differ by exactly
+            one thing -- 'does the clearance metric's route help' -- rather than four. The override
+            exists for diagnosis (seed one leg, not the other) and must NOT be set per-cell in a
+            real run, or the cells stop differing by a single variable.
+
+            Only meaningful under PLACEMENT_MODE=direct: with the hand-authored chain on, the carry
+            is a sequence of short scripted hops that a route seed has nothing to contribute to."""
+            v = os.environ.get("CARRY_SEED", "").strip()
+            if v in ("0", "1"):
+                return v == "1"
+            return self._approach_mode() == "seed"
+
+        def _get_carry_seed(self, arm_tag, goal_xyz):
+            """Phase C: the clearance-metric route as a curobo trajopt seed for the CARRY transit
+            (the post-lift move toward the pad), built with the target object ATTACHED. Returns a
+            CPU seed tensor (1,1,H,dof) or None (=> the plan runs unseeded, exactly as 'direct').
+
+            Differences from _get_approach_seed, all forced by the object being in the gripper:
+
+            1. HELD-OBJECT COLLISION. The grid's IK solver gets the SAME attached-object spheres
+               curobo built for the motion_gen during the expert's own attach_object() -- copied
+               across verbatim by carry_object_spheres (see that module for why nothing is
+               approximated here). Without this the sweep would label voxels FREE that the bottle
+               does not fit through: already observed in this file, where beside_box "flips from
+               IK-feasible to infeasible once attached with this same chained qpos".
+
+            2. ORIENTATION. The grid is a single-orientation slice, and the carry leg is labelled
+               GRASP-ALIGNED: the orientation the arm is already holding after the lift. That costs
+               no reorientation move before the transit, and the rotation into place_actor's
+               handoff pose stays where it already happens -- at the end, in place_actor.
+
+            3. NO CROSS-CANDIDATE REUSE, and none needed. The approach seed is cached per (arm,
+               scene) and shared across the candidate search; the carry runs ONCE per episode,
+               after a grasp has already succeeded, so the exact attached geometry is simply
+               available by then. The cache below only guards the grasp-retry loop re-entering
+               with the same scene and goal.
+
+            Any failure returns None; the transit then plans unseeded, which is the 'direct'
+            behaviour, so a miss costs firing rate and never correctness."""
+            if not self._carry_seed_on():
+                return None
+            if not hasattr(self, "_carry_seed_cache"):
+                self._carry_seed_cache = {}
+            tag = str(arm_tag)
+            import numpy as _np
+            try:
+                _sig = [tuple(_np.round(_np.asarray(self.target_obj.get_pose().p, float), 3))]
+                for _o in (getattr(self, "occluders", None) or []):
+                    _sig.append(tuple(_np.round(_np.asarray(_o.get_pose().p, float), 3)))
+                scene_sig = tuple(_sig)
+            except Exception:
+                scene_sig = None
+            key = (tag, scene_sig, tuple(_np.round(_np.asarray(goal_xyz, float), 3)))
+            if key in self._carry_seed_cache:
+                self._note_seed_stat(tag, self._carry_seed_cache[key] is not None,
+                                     "cached", 0.0, None, None, leg="carry")
+                return self._carry_seed_cache[key]
+
+            seed = None
+            ik = None
+            try:
+                import seed_from_clearance as sfc
+                import clearance_metric_3d as cm
+                import carry_object_spheres as cos
+                planner = self.robot.left_planner if tag == "left" else self.robot.right_planner
+
+                # The held object, exactly as the motion_gen models it. attach_object() ran in
+                # play_once before the placement section, so these slots are populated; if they
+                # are not, an unattached grid would silently promise routes the bottle cannot
+                # take, so refuse to build rather than build a wrong one.
+                spheres = cos.attached_spheres_from_planner(planner)
+                if spheres is None:
+                    print(f"[carry-seed] arm={tag}: nothing attached -> no seed")
+                    self._note_seed_stat(tag, False, "no_attached_object", 0.0, None, None, leg="carry")
+                    self._carry_seed_cache[key] = None
+                    return None
+
+                # grasp-aligned slice: the orientation the arm is holding right now (post-lift)
+                live = list(self.get_arm_pose(arm_tag))
+                carry_q = _np.asarray(live[3:], dtype=float)
+                start_xyz = _np.asarray(live[:3], dtype=float)
+                goal_xyz = _np.asarray(goal_xyz, dtype=float)
+
+                full_q = (self.robot.left_entity.get_qpos() if tag == "left"
+                          else self.robot.right_entity.get_qpos())
+                idx = [planner.all_joints.index(n) for n in planner.active_joints_name]
+                start_q = _np.asarray([full_q[i] for i in idx], dtype=float)
+
+                ik = cm._build_ik_solver(planner)
+                cos.apply_attached_spheres(ik, spheres)
+                H = int(planner.motion_gen.trajopt_solver.action_horizon)
+                # Same knobs as the approach seed so the two legs are measured on one grid
+                # geometry; only the labelling differs (attached, carry orientation).
+                cfg = sfc.SeedMetricConfig(
+                    obstacles=os.environ.get("SEED_OBSTACLES", "all").strip().lower(),
+                    res=float(os.environ.get("SEED_RES", "0.02")),
+                    zres=float(os.environ.get("SEED_ZRES", "0.03")),
+                    zmax=float(os.environ.get("SEED_ZMAX", "1.23")),
+                    chunk=int(os.environ.get("SEED_CHUNK", "256")),
+                    # Joint-continuity gate. Exposed because the build's own tau sweep
+                    # reports the smallest tau that would have connected a route it had
+                    # to reject, and that number is only useful if it can be set back in.
+                    # Raising it admits larger joint steps between adjacent voxels: too
+                    # low and a smooth stretch reads as a branch seam (what coarse
+                    # SEED_RES causes); too high and the route may hop IK branches, which
+                    # makes the seed a worse initialization but never an unsafe one --
+                    # trajopt still has to produce the trajectory it executes.
+                    gate_tau=float(os.environ.get("SEED_GATE_TAU", "0.35")))
+                seed, res = sfc.build_seed(self, planner, tag, ik, carry_q, start_q, None,
+                                           start_xyz, goal_xyz, cfg=cfg, action_horizon=H)
+                if seed is None:
+                    print(f"[carry-seed] arm={tag}: NO route ({res.reason}) -> unseeded transit "
+                          f"({res.seconds:.1f}s)")
+                    self._note_seed_stat(tag, False, res.reason, res.seconds, None, None, leg="carry")
+                else:
+                    print(f"[carry-seed] arm={tag}: route {len(res.route_qs)} voxels, "
+                          f"eps={res.eps_gated:.3f}m (object extent "
+                          f"{cos.carry_sphere_extent(spheres):.3f}m) -> seed {tuple(seed.shape)} "
+                          f"({res.seconds:.1f}s)")
+                    self._note_seed_stat(tag, True, None, res.seconds, len(res.route_qs),
+                                         res.eps_gated, leg="carry")
+                    try:
+                        if os.environ.get("SEED_VISUALS", "1") != "0":
+                            from pathlib import Path as _P
+                            ep = getattr(self, "_rollout_ep", None)
+                            out_root = getattr(self, "_rollout_out_dir", None)
+                            if out_root is not None:
+                                sub = (_P(out_root) / "seed_route_visuals"
+                                       / f"episode{ep}_{tag}_carry")
+                                sfc.save_route_visuals(res, sub,
+                                                       seed_label=f"{ep}-carry", arm=tag)
+                    except Exception as _ve:
+                        print(f"[carry-seed-viz] skipped ({_ve})")
+            except Exception as e:      # never let seeding break the expert
+                print(f"[carry-seed] arm={tag}: FAILED ({e}); unseeded transit")
+                self._note_seed_stat(tag, False, f"exception:{type(e).__name__}", None, None, None,
+                                     leg="carry")
+                seed = None
+            finally:
+                # Same release discipline as _get_approach_seed -- a fresh IKSolver per episode
+                # that is never freed is what saturated the GPU on the first full A/B run. Detach
+                # first: the solver is about to go, but the detach also documents the pairing and
+                # keeps this correct if the solver is ever made reusable.
+                try:
+                    if ik is not None:
+                        import carry_object_spheres as _cos
+                        _cos.detach_attached_spheres(ik)
+                except Exception:
+                    pass
+                try:
+                    del ik
+                    torch.cuda.empty_cache()
+                except Exception:
+                    pass
+                if os.environ.get("SEED_MEM_LOG", "1") != "0":
+                    try:
+                        _al = torch.cuda.memory_allocated() / 2**30
+                        _rs = torch.cuda.memory_reserved() / 2**30
+                        print(f"[seed-mem] arm={tag} carry: cuda allocated={_al:.2f}GiB "
+                              f"reserved={_rs:.2f}GiB (after release)")
+                    except Exception:
+                        pass
+            self._carry_seed_cache[key] = seed
+            return seed
+
+        def _note_seed_stat(self, arm_tag, built, reason, seconds, voxels, eps, leg="approach"):
             """ROBOPRO Phase 4: record one _get_approach_seed outcome so the A/B can
             report the seed's FIRING RATE (the 2a smoke test showed IK is
             nondeterministic, so an identical scene can build a route on one run and not
             the next -- a miss is absorbed silently by the unseeded plan, which would
             otherwise make 'seed' mode look like it did nothing). reason='cached' marks a
             cache hit rather than a fresh build, so build cost isn't double-counted.
-            Read by run() into records.jsonl. Never raises."""
+            Read by run() into records.jsonl. Never raises.
+
+            leg: 'approach' (rest -> pre_grasp) or 'carry' (post-lift -> pad). The two legs have
+            very different firing rates and build costs -- the carry grid is labelled with the
+            object attached, which shrinks its FREE set -- so they must be reported separately or
+            a healthy approach rate would mask a dead carry one. Defaults to 'approach' so records
+            written before the carry leg existed read back correctly."""
             try:
                 if not hasattr(self, "rollout_seed_stats"):
                     self.rollout_seed_stats = []
                 self.rollout_seed_stats.append({
-                    "arm": str(arm_tag), "built": bool(built), "reason": reason,
+                    "arm": str(arm_tag), "leg": str(leg), "built": bool(built), "reason": reason,
                     "seconds": (float(seconds) if seconds is not None else None),
                     "route_voxels": (int(voxels) if voxels is not None else None),
                     "eps_gated": (float(eps) if eps is not None else None),
@@ -2726,11 +3010,17 @@ def make_occluder_task():
             # was built in _candidate_specs from the geometric approximation) and
             # write the corrected version back onto the candidate so real execution
             # (play_once) uses it too, not just this validation pass.
-            x_side = self._box_side_x(arm_tag, gap=candidate["gap"])
             placement_subgoals = self._backward_subgoal_poses(
-                arm_tag, x_side=x_side, clearance_z=candidate["clearance_z"], lift_pose=lift_pose)
+                arm_tag, x_side=self._box_side_x(arm_tag, gap=candidate["gap"]),
+                clearance_z=candidate["clearance_z"], lift_pose=lift_pose)
             candidate["placement_subgoals"] = placement_subgoals
             candidate["lift_pose"] = lift_pose
+            if not placement_subgoals:
+                # PLACEMENT_MODE=direct: there is no backward chain to dry-run. Return
+                # before the attach/detach below rather than letting it certify an empty
+                # pose list as trivially plannable -- the real placement work then happens
+                # entirely inside place_actor, which does its own planning.
+                return True, None, None
 
             # Real execution calls attach_object (holding the target) before planning
             # the placement subgoals; the check above doesn't, so it can wrongly
@@ -3054,6 +3344,10 @@ def run(args):
                     # record so a results folder is self-describing and the summary can refuse
                     # to compare cells that were not actually run in different modes.
                     rec["approach_mode"] = env._approach_mode()
+                    # Same reason: the backward leg is an independent knob, so a cell is only
+                    # fully identified by BOTH modes. Without this, a scripted-placement run
+                    # and a direct-placement run are indistinguishable in the results folder.
+                    rec["placement_mode"] = env._placement_mode()
                     rec["rollout_plan_effort"] = getattr(env, "rollout_plan_effort", None)
                     rec["rollout_seed_stats"] = getattr(env, "rollout_seed_stats", None)
                     # Physics collision metrics for THIS episode (accumulated by
