@@ -79,7 +79,7 @@ from lib.widest_path import (
     reconstruct_widest_path_3d, widest_path_eps, widest_path_eps_3d,
 )
 
-from analyze_occluder_visibility import make_occluder_task
+from task.occluder_task import make_occluder_task
 import matplotlib.pyplot as plt
 from matplotlib.colors import ListedColormap, BoundaryNorm
 

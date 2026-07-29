@@ -57,7 +57,7 @@ import torch  # noqa: E402  (after setup_paths so curobo's torch is on the path)
 from lib.ik_grid import _build_ik_solver, _solve_grid, _world_gripper_to_curobo
 from lib.scene_build import DR_CLEAN, build_cfg
 from lib.scene_constants import OCC_HALF_FOOTPRINT, PAD_XY
-from analyze_occluder_visibility import make_occluder_task  # noqa: E402
+from task.occluder_task import make_occluder_task  # noqa: E402
 
 
 # ----------------------------------------------------------------------------- frames
