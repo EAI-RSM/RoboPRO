@@ -422,7 +422,7 @@ def save_route_visuals(res: RouteResult, out_dir, seed_label="0", arm="left", cf
         return
     from pathlib import Path as _Path
     from types import SimpleNamespace
-    import clearance_metric_3d as cm
+    import metric_viz as cm
     out_dir = _Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     cfg = cfg or SeedMetricConfig()
