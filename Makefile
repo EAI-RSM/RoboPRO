@@ -76,7 +76,6 @@ SAVE_IMAGES ?= 0
 REACH_SEED ?= 1
 REACH_Z ?= 0.90
 REACH_ARMS ?= both
-PICKUP_SEEDS ?= 1,2,3,4,5
 
 define RUN_IN_CUSTOMIZED
 	cd "$(CUSTOMIZED_ROOT)"
@@ -89,7 +88,7 @@ endef
 	patch-curobo-config setup render-test verify-scene verify-rollout collect-data \
 	precollect-seeds eval-direct eval-client policy-server eval-pi05-single eval-pi05-double \
 	collect-rollout-pi05 diag-kitchen-curobo occluder-visibility reachability-map \
-	pickup-reachability analyze-occluder-rollout show-config
+	analyze-occluder-rollout show-config
 
 help:
 	@printf '%s\n' \
@@ -122,8 +121,6 @@ help:
 	'  make analyze-occluder-rollout Summarize saved rollout success/failure modes.' \
 	'  make reachability-map         Collision-free gripper IK reachability map (one scene).' \
 	'    Vars: REACH_SEED=1 OFFSET=0.2 REACH_ARMS=both|left|right REACH_Z=0.90' \
-	'  make pickup-reachability      Per-seed post-pickup reachability maps (backward subgoals).' \
-	'    Vars: PICKUP_SEEDS=1,2,3 OFFSET=0.2 REACH_Z=0.90' \
 	'' \
 	'Data collection:' \
 	'  make collect-data             Run collect_data.sh for one task/config.' \
@@ -334,11 +331,6 @@ reachability-map:
 	$(call RUN_IN_CUSTOMIZED,\
 		$(PYTHON) script/bench_script/reachability_map.py --base-config "$(TASK_CONFIG)" \
 			--seed "$(REACH_SEED)" --offset "$(OFFSET)" --arms "$(REACH_ARMS)" --z "$(REACH_Z)")
-
-pickup-reachability:
-	$(call RUN_IN_CUSTOMIZED,\
-		$(PYTHON) script/bench_script/pickup_reachability_map.py --base-config "$(TASK_CONFIG)" \
-			--seeds "$(PICKUP_SEEDS)" --offset "$(OFFSET)" --z "$(REACH_Z)")
 
 analyze-occluder-rollout:
 	"$(PYTHON)" scripts/validation/analyze_occluder_rollout_failures.py

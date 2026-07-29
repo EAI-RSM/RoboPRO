@@ -2,8 +2,8 @@
 """
 3D SWEPT VOLUME of the arm over an occluder rollout (issue #35 visualisation).
 
-Companion to gripper_path_3d.py: that script draws where the gripper TCP went (a line),
-this one draws the space the whole ARM occupied over the rollout (a volume).
+Draws the space the whole ARM occupied over the rollout as a volume, with the
+gripper TCP path retained as a line through the rendered volume.
 
 Runs the REAL expert rollout (OccluderTask.play_once) on a chosen seed with the milk-box
 occluder ON and NO table clutter (density 0). Via `env.step_hook` (in take_dense_action)
@@ -11,7 +11,7 @@ it samples every arm LINK's pose each executed physics step, transforms that lin
 collision spheres into the world, and stamps them into a boolean occupancy grid. The union
 over all steps IS the swept volume; it is rendered as a marching-cubes isosurface with the
 scene landmarks marked (milk-box wireframe, bottle start, pad) and the TCP path drawn
-inside it for continuity with gripper_path_3d.py.
+inside it for continuity with the earlier path visualisations.
 
 WHAT THE VOLUME ACTUALLY IS -- READ THIS BEFORE INTERPRETING THE FIGURE:
 The spheres come from the embodiment's curobo collision model
@@ -75,9 +75,9 @@ from analyze_occluder_visibility import (make_occluder_task, PAD_XY,  # noqa: E4
                                          OCC_HALF_FOOTPRINT)
 from analyze_natural_visibility import build_cfg, DR_CLEAN  # noqa: E402
 from reachability_view import OCC_HEIGHT  # noqa: E402  (milk-box height, 0.2542 m)
-# Landmark drawing / view angles / video+close handling are shared with the polyline script
-# so the two figures stay visually comparable and the conventions live in one place.
-from gripper_path_3d import VIEWS, _box_wireframe, _write_video  # noqa: E402
+# Landmark drawing / view angles / video+close handling are shared so the figures
+# stay visually comparable and the conventions live in one place.
+from lib.plotting import VIEWS, _box_wireframe, _write_video  # noqa: E402
 
 # Per-arm curobo collision model. The LEFT file defines both arms, the RIGHT file only fr_*,
 # so each arm is read from its own canonical file rather than assuming one covers both.

@@ -588,9 +588,6 @@ def make_occluder_task():
         # delete this flag + the grasp_actor_from_table override below) to restore the
         # stock straight-in, wrist-locked constrained approach.
         DROP_GRASP_ORIENTATION_CONSTRAINT = True
-        # When True, play_once stops right after the lift (pickup only) -- used by
-        # pickup_reachability_map.py to reach the picked-up state, then probe IK.
-        PICKUP_ONLY = False
         spawn_occluder = False
         # Occluder ring: num_occluders bottles equally spaced (2*pi/n apart) on a circle of
         # radius occluder_offset centred on the target. occluder_offset is the RING RADIUS
@@ -814,8 +811,6 @@ def make_occluder_task():
                 pre_lift_object_z = float(self.target_obj.get_pose().p[2])
                 self.move(self.move_by_displacement(arm_tag=arm_tag, z=GRASP_LIFT_HEIGHT))
                 checkpoint("lift")
-                if self.PICKUP_ONLY:        # stop at the picked-up state (reachability probe)
-                    return
                 # Verify the grasp actually captured the object before trusting it. plan_success
                 # only reflects whether CuRobo found a valid motion plan for the COMMANDED
                 # gripper move -- it says nothing about whether the object moved with it.
