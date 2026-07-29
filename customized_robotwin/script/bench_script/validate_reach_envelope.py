@@ -32,11 +32,13 @@ import numpy as np
 from clearance_metric_3d import select_arm
 from lib.ik_grid import build_grid
 from lib.labeling import BEYOND, label_volume, load_reach_envelope
+from lib.metric_config import SeedMetricConfig
 from lib.run_io import CLEARANCE_RESULTS_DIR as RESULTS_DIR, Timings
 from lib.scene_build import DR_CLEAN, build_cfg
 from task.occluder_task import make_occluder_task
 
 VAL_DIR = RESULTS_DIR.parent / "reach_envelope_validation"
+METRIC_DEFAULTS = SeedMetricConfig()
 
 
 def diagnose_violations(out_dir, args, xs, ys, zs, prune_mask, bad):
@@ -117,19 +119,19 @@ def main():
     ap.set_defaults(occluder=True)
     ap.add_argument("--arm", choices=["left", "right", "auto"], default="auto")
     ap.add_argument("--topdown", action="store_true")
-    ap.add_argument("--zmin", type=float, default=0.78)
-    ap.add_argument("--zmax", type=float, default=1.4)
-    ap.add_argument("--zres", type=float, default=0.03,
+    ap.add_argument("--zmin", type=float, default=METRIC_DEFAULTS.zmin)
+    ap.add_argument("--zmax", type=float, default=METRIC_DEFAULTS.zmax)
+    ap.add_argument("--zres", type=float, default=METRIC_DEFAULTS.zres,
                     help="MUST match the occupancy artifact's grid (default = the metric/producer grid)")
-    ap.add_argument("--xmin", type=float, default=-0.6)
-    ap.add_argument("--xmax", type=float, default=0.6)
-    ap.add_argument("--ymin", type=float, default=-0.35)
-    ap.add_argument("--ymax", type=float, default=0.35)
-    ap.add_argument("--res", type=float, default=0.01,
+    ap.add_argument("--xmin", type=float, default=METRIC_DEFAULTS.xmin)
+    ap.add_argument("--xmax", type=float, default=METRIC_DEFAULTS.xmax)
+    ap.add_argument("--ymin", type=float, default=METRIC_DEFAULTS.ymin)
+    ap.add_argument("--ymax", type=float, default=METRIC_DEFAULTS.ymax)
+    ap.add_argument("--res", type=float, default=METRIC_DEFAULTS.res,
                     help="MUST match the occupancy artifact's grid (default = the metric/producer grid)")
     ap.add_argument("--ik-seeds", type=int, default=60, help="use a HIGH seed count so 'reachable' is not "
                     "under-counted (a missed reachable cell would give a falsely-passing bound)")
-    ap.add_argument("--chunk", type=int, default=256)
+    ap.add_argument("--chunk", type=int, default=METRIC_DEFAULTS.chunk)
     ap.add_argument("--reach-mode", choices=["occupancy", "sphere"], default="occupancy",
                     help="which precomputed mask to validate: occupancy (Tier 2) or sphere (Tier 1)")
     ap.add_argument("--reach-cache-dir", default=str(RESULTS_DIR / "_reach_cache"),

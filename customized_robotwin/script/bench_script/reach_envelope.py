@@ -40,6 +40,7 @@ from scipy.ndimage import distance_transform_edt
 from clearance_metric_3d import select_arm
 from lib.ik_grid import _build_ik_solver_no_world, build_grid
 from lib.labeling import BEYOND, FREE, geometric_envelope
+from lib.metric_config import SeedMetricConfig
 from lib.run_io import CLEARANCE_RESULTS_DIR as RESULTS_DIR, Timings
 from lib.scene_build import DR_CLEAN, build_cfg
 from metric_viz import LABEL_COLORS
@@ -49,6 +50,7 @@ from matplotlib.colors import ListedColormap
 
 DEFAULT_CACHE = RESULTS_DIR / "_reach_cache"
 DEFAULT_OUT = RESULTS_DIR.parent / "reach_envelope"
+METRIC_DEFAULTS = SeedMetricConfig()
 
 
 def compute_reach_radius(ik, n_samples=2_000_000, batch=100_000):
@@ -272,12 +274,15 @@ def main():
     ap.add_argument("--reach-recompute", action="store_true",
                     help="force-recompute the FK radius (otherwise the cached per-arm value is reused)")
     # demo-image grid (must match the metric's grid for the picture to match the runs)
-    ap.add_argument("--xmin", type=float, default=-0.6); ap.add_argument("--xmax", type=float, default=0.6)
-    ap.add_argument("--ymin", type=float, default=-0.35); ap.add_argument("--ymax", type=float, default=0.35)
-    ap.add_argument("--res", type=float, default=0.01)
-    ap.add_argument("--zmin", type=float, default=0.78); ap.add_argument("--zmax", type=float, default=1.4)
-    ap.add_argument("--zres", type=float, default=0.03)
-    ap.add_argument("--chunk", type=int, default=256)
+    ap.add_argument("--xmin", type=float, default=METRIC_DEFAULTS.xmin)
+    ap.add_argument("--xmax", type=float, default=METRIC_DEFAULTS.xmax)
+    ap.add_argument("--ymin", type=float, default=METRIC_DEFAULTS.ymin)
+    ap.add_argument("--ymax", type=float, default=METRIC_DEFAULTS.ymax)
+    ap.add_argument("--res", type=float, default=METRIC_DEFAULTS.res)
+    ap.add_argument("--zmin", type=float, default=METRIC_DEFAULTS.zmin)
+    ap.add_argument("--zmax", type=float, default=METRIC_DEFAULTS.zmax)
+    ap.add_argument("--zres", type=float, default=METRIC_DEFAULTS.zres)
+    ap.add_argument("--chunk", type=int, default=METRIC_DEFAULTS.chunk)
     ap.add_argument("--cache-dir", default=str(DEFAULT_CACHE),
                     help="stable location for the per-arm envelope artifact the runs load")
     ap.add_argument("--out-dir", default=str(DEFAULT_OUT),

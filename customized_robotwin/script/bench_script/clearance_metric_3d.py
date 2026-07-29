@@ -29,7 +29,7 @@ it invents up to ~4 cm of phantom obstacle around the neck (wider than the gripp
 climb-over routes look tighter than they are. eps* differs between the two.
 
 USAGE (from the benchmark folder, env sourced + ROBOTWIN_BENCH_TASK=bench):
-    python clearance_metric_3d.py --seed 1 --offset 0.2 --arm right --zmin 0.78 --zmax 1.4 --zres 0.03
+    python clearance_metric_3d.py --seed 1 --offset 0.2 --arm right --zmin 0.78 --zmax 1.23 --zres 0.03
     #   add --warm-start to also propagate a continuity branch field per slice (slower, one extra IK pass/slice)
     #   add --occ-shape extruded to reproduce the pre-2026-07-24 (prism-occluder) eps* numbers
 """
