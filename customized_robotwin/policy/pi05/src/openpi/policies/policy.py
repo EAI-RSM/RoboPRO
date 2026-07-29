@@ -61,7 +61,15 @@ class Policy(BasePolicy):
             self._sample_actions = model.sample_actions
         else:
             # JAX model setup
-            self._sample_actions = nnx_utils.module_jit(model.sample_actions)
+            import os as _os
+            self._bestof_n = int(_os.environ.get("PI05_BESTOF_N", "1"))
+            print(f"[policy-init] bestof_n={self._bestof_n}", flush=True)
+            self._capture_embeds = ((_os.environ.get("PI05_CAPTURE_EMBEDS") == "1" or self._bestof_n > 1)
+                                    and hasattr(model, "sample_actions_with_embeds"))
+            if self._capture_embeds:
+                self._sample_actions = nnx_utils.module_jit(model.sample_actions_with_embeds)
+            else:
+                self._sample_actions = nnx_utils.module_jit(model.sample_actions)
             self._rng = rng or jax.random.key(0)
 
     @override
@@ -72,6 +80,8 @@ class Policy(BasePolicy):
         if not self._is_pytorch_model:
             # Make a batch and convert to jax.Array.
             inputs = jax.tree.map(lambda x: jnp.asarray(x)[np.newaxis, ...], inputs)
+            if getattr(self, "_bestof_n", 1) > 1:
+                inputs = jax.tree.map(lambda x: jnp.repeat(x, self._bestof_n, axis=0), inputs)
             self._rng, sample_rng_or_pytorch_device = jax.random.split(self._rng)
         else:
             # Convert inputs to PyTorch tensors and move to correct device
@@ -89,17 +99,35 @@ class Policy(BasePolicy):
 
         observation = _model.Observation.from_dict(inputs)
         start_time = time.monotonic()
+        _embeds = None
+        if getattr(self, "_capture_embeds", False) and not self._is_pytorch_model:
+            _acts, _embeds = self._sample_actions(sample_rng_or_pytorch_device, observation, **sample_kwargs)
+        else:
+            _acts = self._sample_actions(sample_rng_or_pytorch_device, observation, **sample_kwargs)
         outputs = {
             "state": inputs["state"],
-            "actions": self._sample_actions(sample_rng_or_pytorch_device, observation, **sample_kwargs),
+            "actions": _acts,
         }
         model_time = time.monotonic() - start_time
         if self._is_pytorch_model:
             outputs = jax.tree.map(lambda x: np.asarray(x[0, ...].detach().cpu()), outputs)
         else:
             outputs = jax.tree.map(lambda x: np.asarray(x[0, ...]), outputs)
-
         outputs = self._output_transform(outputs)
+        if getattr(self, "_bestof_n", 1) > 1 and _embeds is not None:
+            # per-candidate: run the SAME output transform on each chunk (unnormalize etc.)
+            _cands = []
+            for _i in range(self._bestof_n):
+                _o = {"state": np.asarray(inputs["state"][_i]), "actions": np.asarray(_acts[_i])}
+                _o = self._output_transform(_o)
+                _cands.append(np.asarray(_o["actions"]))
+            outputs["cand_actions"] = np.stack(_cands)                                   # (N,H,dim)
+            outputs["cand_embeds"] = np.asarray(_embeds).transpose(1, 0, 2, 3).astype(np.float16)  # (N,10,50,1024)
+        if _embeds is not None:
+            # added AFTER the output transform (which rebuilds the dict and would drop
+            # unknown keys). batch axis stripped separately: tree.map above takes index 0
+            # of the FIRST axis, which for embeds is the denoise axis.
+            outputs["embeds"] = np.asarray(_embeds[:, 0]).astype(np.float16)
         outputs["policy_timing"] = {
             "infer_ms": model_time * 1000,
         }
