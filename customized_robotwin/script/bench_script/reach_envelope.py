@@ -37,12 +37,13 @@ import torch
 import transforms3d as t3d
 from scipy.ndimage import distance_transform_edt
 
-# reachability_map import pulls in torch + the env stack and selects the Agg backend (headless-safe).
-from clearance_metric_3d import LABEL_COLORS, make_occluder_task, select_arm
+from clearance_metric_3d import select_arm
 from lib.ik_grid import _build_ik_solver_no_world, build_grid
 from lib.labeling import BEYOND, FREE, geometric_envelope
 from lib.run_io import CLEARANCE_RESULTS_DIR as RESULTS_DIR, Timings
 from lib.scene_build import DR_CLEAN, build_cfg
+from metric_viz import LABEL_COLORS
+from task.occluder_task import make_occluder_task
 import matplotlib.pyplot as plt
 from matplotlib.colors import ListedColormap
 

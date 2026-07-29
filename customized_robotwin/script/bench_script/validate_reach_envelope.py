@@ -29,11 +29,12 @@ from pathlib import Path
 
 import numpy as np
 
-from clearance_metric_3d import make_occluder_task, select_arm
+from clearance_metric_3d import select_arm
 from lib.ik_grid import build_grid
 from lib.labeling import BEYOND, label_volume, load_reach_envelope
 from lib.run_io import CLEARANCE_RESULTS_DIR as RESULTS_DIR, Timings
 from lib.scene_build import DR_CLEAN, build_cfg
+from task.occluder_task import make_occluder_task
 
 VAL_DIR = RESULTS_DIR.parent / "reach_envelope_validation"
 

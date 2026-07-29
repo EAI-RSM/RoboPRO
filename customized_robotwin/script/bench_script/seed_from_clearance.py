@@ -37,10 +37,7 @@ from lib.scene_constants import OCC_HALF_FOOTPRINT
 from lib.widest_path import (
     nearest_free_voxel, reconstruct_widest_path_3d, widest_path_eps_3d,
 )
-
-# clearance_metric_3d is imported LAZILY inside the scene-coupled functions (2a): it pulls in
-# reachability_map -> torch + the env stack. The pure resampler (2b, resample_route_to_seed) must NOT
-# require any of that, so it stays CPU-unit-testable via `python seed_from_clearance.py --selftest`.
+import metric_viz as cm
 
 
 @dataclass
@@ -379,7 +376,6 @@ def save_route_visuals(res: RouteResult, out_dir, seed_label="0", arm="left", cf
         return
     from pathlib import Path as _Path
     from types import SimpleNamespace
-    import metric_viz as cm
     out_dir = _Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     cfg = cfg or SeedMetricConfig()
