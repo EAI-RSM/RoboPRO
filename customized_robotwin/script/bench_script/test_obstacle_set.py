@@ -19,7 +19,7 @@ import tempfile
 
 import numpy as np
 
-import clearance_metric_3d as cm
+import lib.obstacles as cm
 
 
 class FakeActor:

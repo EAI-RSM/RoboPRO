@@ -46,103 +46,52 @@ from pathlib import Path
 import numpy as np
 from scipy.ndimage import distance_transform_edt
 
-# reachability_map runs setup_paths() at import and pulls in torch + the env stack,
-# so importing it makes all the shared helpers (and curobo's torch) available.
-# It also selects matplotlib's Agg backend, so importing pyplot here is headless-safe.
-import reachability_map as rm
-from reachability_map import (
-    make_occluder_task,
-    build_cfg,
-    DR_CLEAN,
-    PAD_XY,
-    OCC_HALF_FOOTPRINT,
-    _build_ik_solver,
-    _solve_grid,
+from setup_paths import setup_paths
+setup_paths()
+
+import torch
+from lib.continuity import (
+    _NEIGH8, _pick_nearest, _wrap_linf, warm_start_branches, warm_start_branches_3d,
 )
-from analyze_occluder_visibility import OCCLUDER_COLLISION
+from lib.ik_grid import (
+    _build_ik_solver, _build_ik_solver_no_world, _solve_grid, _solve_grid_q,
+    _solve_grid_q_multi, build_grid, grasp_orientation,
+)
+from lib.labeling import (
+    BEYOND, FREE, LABEL_NAMES, OBSTACLE, geometric_envelope, label_volume,
+    load_reach_envelope,
+)
+from lib.obstacles import (
+    _load_collision_mesh, obstacle_centers, occluder_clearance,
+    occluder_clearance_3d, occluder_footprint_polys, occluder_footprints_3d,
+    occluder_mask_3d, occluder_slice_polys, scene_obstacle_entries,
+    surface_distance_to_occluders,
+)
+from lib.plotting import (
+    _draw_eps_sphere, _draw_occluder_solids_3d, _equal_aspect_3d, _line_axis,
+    _scene_anchor_markers,
+)
+from lib.run_io import CLEARANCE_RESULTS_DIR as RESULTS_DIR, Timings
+from lib.scene_build import DR_CLEAN, build_cfg
+from lib.scene_constants import OCC_HALF_FOOTPRINT, OCCLUDER_COLLISION, PAD_XY
+from lib.widest_path import (
+    nearest_free_cell, nearest_free_voxel, reconstruct_widest_path,
+    reconstruct_widest_path_3d, widest_path_eps, widest_path_eps_3d,
+)
+
+from analyze_occluder_visibility import make_occluder_task
 import matplotlib.pyplot as plt
 from matplotlib.colors import ListedColormap, BoundaryNorm
 
 # repo-root results dir for this metric, anchored to THIS file (same layout as reachability_map);
 # separate folder from the frozen 2D tool so the 3D sandbox never mixes into clearance_metric/
-RESULTS_DIR = Path(__file__).resolve().parents[3] / "scripts" / "validation" / "results" / "clearance_metric_3d"
 
 
-class Timings:
-    """Reusable per-component timer (project convention: time every script by phase and save the
-    breakdown with the run). Use `with tm.section("name"):` around each logical phase; call
-    `tm.save(out_dir)` at the end to print a summary table and write timings.json into the run folder."""
-
-    def __init__(self):
-        self.records = []
-        self._wall0 = time.perf_counter()
-
-    @contextmanager
-    def section(self, name):
-        t0 = time.perf_counter()
-        try:
-            yield
-        finally:
-            dt = time.perf_counter() - t0
-            self.records.append((name, dt))
-            print(f"[time] {name}: {dt:.2f}s")
-
-    def save(self, out_dir, off_seconds=0.0):
-        total = time.perf_counter() - self._wall0
-        projected = total - off_seconds                       # cost if the OFF pass were skipped (--free-only)
-        data = {"components": [{"name": n, "seconds": round(s, 3)} for n, s in self.records],
-                "total_seconds": round(total, 3),
-                "off_pass_seconds": round(off_seconds, 3),
-                "projected_free_only_seconds": round(projected, 3)}
-        (Path(out_dir) / "timings.json").write_text(json.dumps(data, indent=2))
-        width = max((len(n) for n, _ in self.records), default=10)
-        print("[time] ---------------- component timing ----------------")
-        for n, s in self.records:
-            print(f"[time]   {n:<{width}}  {s:8.2f}s  ({100 * s / total if total else 0:4.1f}%)")
-        print(f"[time]   {'TOTAL':<{width}}  {total:8.2f}s")
-        if off_seconds > 0:
-            print(f"[time] projected WITH --free-only: {projected:.2f}s  "
-                  f"(OFF pass {off_seconds:.2f}s = {100 * off_seconds / total if total else 0:.1f}% would be skipped)")
-        else:
-            print("[time] projected WITH --free-only: equals TOTAL above (--free-only already active)")
-        print("[time] wrote timings.json")
-        return total
 
 
 # ----------------------------------------------------------------------------- grid
-def build_grid(args):
-    """Regular (x, y) lattice of gripper positions (constant across z) plus the z-slice axis for the
-    stack. Returns xs, ys, zs (1D axes) and XX, YY (ny, nx meshgrids); the stack is swept over zs at
-    run time (x,y do not depend on z, so we keep XX/YY 2D and vary z as a scalar per slice)."""
-    xs = np.arange(args.xmin, args.xmax + 1e-9, args.res)
-    ys = np.arange(args.ymin, args.ymax + 1e-9, args.res)
-    zs = np.arange(args.zmin, args.zmax + 1e-9, args.zres)
-    XX, YY = np.meshgrid(xs, ys)                      # (ny, nx)
-    return xs, ys, zs, XX, YY
 
 
-def _build_ik_solver_no_world(planner, num_seeds=100):
-    """Companion to reachability_map._build_ik_solver, but with NO collision world at all,
-    so IK success == pure kinematic reachability + self-collision. This is the 'collisions-OFF'
-    sweep: a cell that fails here is BEYOND-REACH (kinematic or self-collision), not
-    clutter-blocked. The table therefore falls into OBSTACLE, as intended.
-
-    We pass world_model=None (and no world_coll_checker): curobo only builds the primitive
-    collision cost when a checker exists (arm_base.py: `... and world_coll_checker is not None`),
-    so with both None there is no world-collision cost -- an EMPTY world would instead keep the
-    cost active and error with 'Primitive Collision has no obstacles'."""
-    from curobo.wrap.reacher.ik_solver import IKSolver, IKSolverConfig
-    mg = planner.motion_gen
-    cfg = IKSolverConfig.load_from_robot_config(
-        planner.yml_path,
-        None,                                   # world_model=None -> no checker, no world-collision cost
-        tensor_args=mg.tensor_args,
-        num_seeds=num_seeds,                    # fewer seeds = faster IK (Tier-1 speedup knob)
-        use_cuda_graph=False,
-        self_collision_check=True,
-        self_collision_opt=False,
-    )
-    return IKSolver(cfg)
 
 
 # --------------------------------------------------------- reach envelope: CONSUMER side (Tier 1/2)
@@ -153,483 +102,40 @@ def _build_ik_solver_no_world(planner, num_seeds=100):
 # is computed once and reused by every actual run here without a single FK or IK solve.
 
 
-def load_reach_envelope(cache_dir, arm, xs, ys, zs, XX, YY, mode="occupancy"):
-    """Load the precomputed envelope for `arm` and return the prune mask (nz, ny, nx bool, True=skip)
-    on THIS run's grid.
-
-    mode='occupancy' (Tier 2, default): use the real reachable-workspace mask -- but it is grid-
-    specific, so it is only valid when the artifact grid matches the run grid (else raise with regen
-    instructions). mode='sphere' (Tier 1) or an artifact with no occupancy mask: build the max-reach
-    ball from the stored shoulder centre + radius, which is grid-INDEPENDENT (works on any grid).
-
-    Raises a clear error pointing at the producer if the artifact is missing (runs never silently
-    recompute)."""
-    path = Path(cache_dir) / f"reach_envelope_{arm}.npz"
-    if not path.exists():
-        raise FileNotFoundError(
-            f"no reach-envelope artifact for arm '{arm}' at {path}. "
-            f"Precompute it ONCE with:  python reach_envelope.py --arms both   (see reach_envelope.py)")
-    d = np.load(path)
-    base_world = np.asarray(d["base_world"], dtype=float)
-    reach_radius = float(d["reach_radius"])
-    has_occ = "occupancy_prune" in getattr(d, "files", [])
-
-    if mode == "occupancy" and has_occ:
-        gmatch = (d["xs"].shape == xs.shape and d["ys"].shape == ys.shape and d["zs"].shape == zs.shape
-                  and np.allclose(d["xs"], xs) and np.allclose(d["ys"], ys) and np.allclose(d["zs"], zs))
-        if not gmatch:
-            raise ValueError(
-                f"occupancy artifact grid != run grid for arm '{arm}'. The occupancy mask is grid-"
-                f"specific; regenerate it on THIS grid:\n"
-                f"  python reach_envelope.py --arms {arm} --xmin {xs[0]:.4g} --xmax {xs[-1]:.4g} "
-                f"--res {float(xs[1] - xs[0]):.4g} --ymin {ys[0]:.4g} --ymax {ys[-1]:.4g} "
-                f"--zmin {zs[0]:.4g} --zmax {zs[-1]:.4g} --zres {float(zs[1] - zs[0]):.4g}\n"
-                f"  (or pass --reach-mode sphere to use the grid-independent max-reach ball instead)")
-        prune = np.asarray(d["occupancy_prune"], dtype=bool)
-        print(f"[reach-env] loaded OCCUPANCY mask {path.name}: prune {100 * prune.mean():.1f}%  "
-              f"(grid matches; {int(d['n_feasible']):,} feasible samples)")
-        return prune
-
-    if mode == "occupancy" and not has_occ:
-        print(f"[reach-env] artifact {path.name} has no occupancy mask -> falling back to SPHERE "
-              f"(regenerate with the current reach_envelope.py for the occupancy mask)")
-    prune = geometric_envelope(XX, YY, zs, base_world, reach_radius)      # grid-independent max-reach ball
-    print(f"[reach-env] loaded SPHERE {path.name}: prune {100 * prune.mean():.1f}%  "
-          f"radius={reach_radius:.3f}m base={np.round(base_world, 3)}")
-    return prune
 
 
-def geometric_envelope(XX, YY, zs, base_world, reach_radius):
-    """Stamp the prune mask onto a grid with NO IK and NO FK: a voxel is eliminated iff its distance
-    to the arm base exceeds reach_radius (the precomputed pose-independent max reach). This is the
-    entire per-run cost of the envelope -- a distance comparison. Returns bool (nz, ny, nx), True =
-    eliminated (skip the IK solve, label BEYOND). Shared with the producer so both stamp identically."""
-    ny, nx = XX.shape
-    env = np.zeros((len(zs), ny, nx), dtype=bool)
-    for iz, z in enumerate(zs):
-        d = np.sqrt((XX - base_world[0]) ** 2 + (YY - base_world[1]) ** 2 + (z - base_world[2]) ** 2)
-        env[iz] = d > reach_radius
-    return env
 
 
-def _solve_grid_q(robot, planner, ik, arm_tag, gp_world, chunk=256, num_seeds=None):
-    """Like reachability_map._solve_grid, but ALSO returns the IK joint solution per pose -- the
-    fuel for the joint-space gate. curobo already computes it inside solve_batch, so returning it
-    costs no extra IK; the 2D tool simply throws it away by reading only result.success.
-    num_seeds (None = solver default 100) caps the per-pose seed optimisation (Tier-1 speedup).
-
-    Returns (success (N,) bool, q (N, dof) float32; rows where success is False are NaN)."""
-    from curobo.types.math import Pose as CuroboPose
-    ta = planner.motion_gen.tensor_args
-    N = len(gp_world)
-    pos = np.empty((N, 3), dtype=np.float32)
-    quat = np.empty((N, 4), dtype=np.float32)
-    for i, gp in enumerate(gp_world):
-        p, q = rm._world_gripper_to_curobo(robot, planner, arm_tag, gp)
-        pos[i], quat[i] = p, q
-    succ = np.zeros(N, dtype=bool)
-    qout = None
-    for s in range(0, N, chunk):
-        e = min(s + chunk, N)
-        goal = CuroboPose(position=ta.to_device(pos[s:e]), quaternion=ta.to_device(quat[s:e]))
-        result = ik.solve_batch(goal, num_seeds=num_seeds)
-        sc = result.success.detach().cpu().numpy().reshape(e - s, -1)[:, 0].astype(bool)
-        # VALIDATE (first GPU run): result.solution is expected (batch, n_seeds, dof); we take seed 0
-        # to match the [:, 0] used on success. The one-time shape print below confirms the axis.
-        sol = result.solution.detach().cpu().numpy()
-        if s == 0:
-            print(f"[solve_q] result.solution raw shape = {sol.shape}  (expect (chunk, n_seeds, dof))")
-        sol = sol.reshape(e - s, -1, sol.shape[-1])[:, 0, :]        # (batch, dof)
-        if qout is None:
-            qout = np.full((N, sol.shape[-1]), np.nan, dtype=np.float32)
-        succ[s:e] = sc
-        qout[s:e] = sol
-        del result, goal
-        rm.torch.cuda.empty_cache()
-    return succ, qout
 
 
-def _solve_grid_q_multi(robot, planner, ik, arm_tag, gp_world, chunk=256, return_seeds=8, num_seeds=None):
-    """Multi-branch IK: like _solve_grid_q but returns the top-`return_seeds` CONVERGED solutions
-    per pose. curobo already optimises ~100 seeds internally per pose; asking for K of them back
-    (instead of only the best) is nearly free and hands us the distinct IK branches at each cell --
-    the menu the warm-start propagation chooses among to enforce branch continuity.
-
-    Returns (cand_q (N, K, dof) float32, NaN where that candidate did not converge; cand_ok (N, K) bool)."""
-    from curobo.types.math import Pose as CuroboPose
-    ta = planner.motion_gen.tensor_args
-    N = len(gp_world)
-    pos = np.empty((N, 3), dtype=np.float32)
-    quat = np.empty((N, 4), dtype=np.float32)
-    for i, gp in enumerate(gp_world):
-        p, q = rm._world_gripper_to_curobo(robot, planner, arm_tag, gp)
-        pos[i], quat[i] = p, q
-    cand_q = None
-    cand_ok = np.zeros((N, return_seeds), dtype=bool)
-    for s in range(0, N, chunk):
-        e = min(s + chunk, N)
-        goal = CuroboPose(position=ta.to_device(pos[s:e]), quaternion=ta.to_device(quat[s:e]))
-        result = ik.solve_batch(goal, return_seeds=return_seeds, num_seeds=num_seeds)   # top-K branches per pose
-        sol = result.solution.detach().cpu().numpy()                 # (b, K, dof)
-        ok = result.success.detach().cpu().numpy().reshape(e - s, -1).astype(bool)  # (b, K)
-        if cand_q is None:
-            cand_q = np.full((N, return_seeds, sol.shape[-1]), np.nan, dtype=np.float32)
-        cand_q[s:e] = sol[:, :return_seeds]
-        cand_ok[s:e] = ok[:, :return_seeds]
-        del result, goal
-        rm.torch.cuda.empty_cache()
-    cand_q[~cand_ok] = np.nan
-    return cand_q, cand_ok
 
 
-def _wrap_linf(a, b):
-    """Joint distance the gate uses: max over joints of the wrapped |a-b| (radians, wrap to (-pi,pi])."""
-    return float(np.abs((a - b + np.pi) % (2.0 * np.pi) - np.pi).max())
 
 
-def _pick_nearest(candQ_cell, okmask, ref):
-    """Among a cell/voxel's CONVERGED candidate branches, the one closest (wrapped-Linf) to ref.
-    Vectorised over the candidate axis so the BFS propagations stay fast."""
-    valid = candQ_cell[okmask]                                       # (nok, dof)
-    d = np.abs((valid - ref + np.pi) % (2.0 * np.pi) - np.pi).max(axis=1)
-    return valid[int(np.argmin(d))]
 
 
-def warm_start_branches(free, cand_q, cand_ok):
-    """Continuity propagation over the FREE region: BFS out from a central stable cell; each cell is
-    assigned the CANDIDATE branch closest (wrapped-Linf) to the branch already assigned to the
-    neighbour it is first reached from. This is the warm-start done offline on the candidate menu.
-
-    Effect: a SPURIOUS branch-hop collapses -- if a nearby branch exists in the cell's candidate set
-    it gets chosen, so the jump to the neighbour vanishes. A REAL seam survives -- if the cell simply
-    has no candidate near the neighbour, the smallest available jump is still large. So comparing the
-    warm field against the raw (best-cost) field separates noise from genuine config-space seams.
-
-    Returns q_warm (ny, nx, dof), NaN on FREE cells with no converged candidate."""
-    ny, nx = free.shape
-    K, dof = cand_q.shape[1], cand_q.shape[2]
-    candQ = cand_q.reshape(ny, nx, K, dof)
-    candOK = cand_ok.reshape(ny, nx, K)
-    have = free & candOK.any(axis=2)
-    q_warm = np.full((ny, nx, dof), np.nan, dtype=np.float32)
-    if not have.any():
-        return q_warm
-    ys, xs = np.nonzero(have)                       # start at the FREE cell nearest the FREE centroid
-    start = int(np.argmin((ys - ys.mean()) ** 2 + (xs - xs.mean()) ** 2))
-    s0 = (int(ys[start]), int(xs[start]))
-    q_warm[s0] = candQ[s0][np.flatnonzero(candOK[s0])[0]]      # seed cell: its best-cost branch
-    seen = np.zeros_like(have)
-    seen[s0] = True
-    dq = deque([s0])
-    while dq:
-        iy, ix = dq.popleft()
-        qref = q_warm[iy, ix]
-        for dy, dx in _NEIGH8:
-            jy, jx = iy + dy, ix + dx
-            if 0 <= jy < ny and 0 <= jx < nx and have[jy, jx] and not seen[jy, jx]:
-                ks = np.flatnonzero(candOK[jy, jx])
-                q_warm[jy, jx] = candQ[jy, jx, ks[int(np.argmin([_wrap_linf(candQ[jy, jx, k], qref)
-                                                                 for k in ks]))]]
-                seen[jy, jx] = True
-                dq.append((jy, jx))
-    return q_warm
 
 
-def warm_start_branches_3d(free_vol, cand_q_vol, cand_ok_vol):
-    """3D continuity propagation: like warm_start_branches but BFS over the whole FREE VOLUME,
-    26-connected. Because it walks between adjacent z-slices, it enforces VERTICAL branch continuity
-    -- the edges a climb-over route actually rides on. The per-slice 2D version never sees vertical
-    neighbours, so its columns are branch-inconsistent (a voxel and the one directly above it can be
-    on different branches for no reason). Each voxel takes the candidate branch nearest the branch of
-    the neighbour it is first reached from. Returns q_warm (nz, ny, nx, dof), NaN where no candidate."""
-    nz, ny, nx, _K, dof = cand_q_vol.shape
-    have = free_vol & cand_ok_vol.any(axis=-1)
-    q_warm = np.full((nz, ny, nx, dof), np.nan, dtype=np.float32)
-    if not have.any():
-        return q_warm
-    zi, yi, xi = np.nonzero(have)                      # start at the FREE voxel nearest the 3D centroid
-    start = int(np.argmin((zi - zi.mean()) ** 2 + (yi - yi.mean()) ** 2 + (xi - xi.mean()) ** 2))
-    s0 = (int(zi[start]), int(yi[start]), int(xi[start]))
-    q_warm[s0] = cand_q_vol[s0][np.flatnonzero(cand_ok_vol[s0])[0]]
-    seen = np.zeros_like(have)
-    seen[s0] = True
-    dq = deque([s0])
-    while dq:
-        iz, iy, ix = dq.popleft()
-        qref = q_warm[iz, iy, ix]
-        for dz, dy, dx in _NEIGH26:
-            jz, jy, jx = iz + dz, iy + dy, ix + dx
-            if (0 <= jz < nz and 0 <= jy < ny and 0 <= jx < nx
-                    and have[jz, jy, jx] and not seen[jz, jy, jx]):
-                q_warm[jz, jy, jx] = _pick_nearest(cand_q_vol[jz, jy, jx], cand_ok_vol[jz, jy, jx], qref)
-                seen[jz, jy, jx] = True
-                dq.append((jz, jy, jx))
-    return q_warm
 
 
 # label codes for the three-way raster
-BEYOND, OBSTACLE, FREE = 0, 1, 2
-LABEL_NAMES = {BEYOND: "BEYOND-REACH", OBSTACLE: "OBSTACLE", FREE: "FREE"}
 
 
-def label_volume(env, planner, ik_on, arm_tag, XX, YY, zs, grasp_q, chunk, num_seeds=None,
-                 free_only=False, prune_mask=None):
-    """Sweep the two-pass ON/OFF labelling over every z in the stack. Per slice, identical to the 2D
-    label_grid: reach_on = reachable AND collision-free -> FREE; reach_off = reachable ignoring world
-    collision; OBSTACLE = reach_off & ~reach_on; BEYOND = ~reach_off. The ON sweep also keeps the
-    joint config q per voxel (the gate's fuel). The empty-world OFF solver is built ONCE and reused
-    across slices.
-
-    With free_only=True the collision-OFF sweep is SKIPPED entirely (Tier-4 speedup): non-FREE cells
-    are all labelled BEYOND (no OBSTACLE/BEYOND split, which is viz-only), halving the IK per slice.
-    The OFF-pass time is measured either way so the run can report the projected --free-only cost.
-
-    REACH ENVELOPE (Tier-1 speedup): if prune_mask (nz, ny, nx bool) is given -- the PRECOMPUTED
-    pose-independent envelope, stamped by geometric_envelope from the artifact reach_envelope.py
-    produced -- every True voxel is skipped (forced BEYOND, no IK solve); only the un-masked cells
-    are solved. This is exact: a FREE cell is reachable at the real grasp pose, hence inside the
-    max-reach sphere, so it is never masked. label_volume does NO envelope computation itself; it
-    only consumes the mask.
-
-    Returns (label int8 (nz, ny, nx), qfield float32 (nz, ny, nx, dof), off_seconds float)."""
-    ny, nx = XX.shape
-    nz = len(zs)
-    ik_off = None if free_only else _build_ik_solver_no_world(planner, num_seeds)   # empty world = kinematics + self-collision
-    label = np.empty((nz, ny, nx), dtype=np.int8)
-    qfield = None
-    off_seconds = 0.0
-    use_env = prune_mask is not None
-    xr, yr = XX.ravel(), YY.ravel()
-    for iz, z in enumerate(zs):
-        t_s = time.perf_counter()
-        near = (~prune_mask[iz].ravel()) if use_env else np.ones(XX.size, dtype=bool)
-        idx = np.flatnonzero(near)                            # only these cells get an IK solve
-
-        reach_on_flat = np.zeros(XX.size, dtype=bool)
-        reach_off_flat = np.zeros(XX.size, dtype=bool)
-        gp = None
-        if idx.size:
-            gp = np.zeros((idx.size, 7))
-            gp[:, 0] = xr[idx]; gp[:, 1] = yr[idx]; gp[:, 2] = z; gp[:, 3:] = grasp_q
-            ron, qk = _solve_grid_q(env.robot, planner, ik_on, arm_tag, gp, chunk=chunk, num_seeds=num_seeds)
-            reach_on_flat[idx] = ron
-            if qfield is None:
-                qfield = np.full((nz, ny, nx, qk.shape[-1]), np.nan, dtype=np.float32)
-            qslab = np.full((XX.size, qk.shape[-1]), np.nan, dtype=np.float32)
-            qslab[idx] = qk                                   # scatter solved q back; far cells stay NaN
-            qfield[iz] = qslab.reshape(ny, nx, qk.shape[-1])
-        reach_on = reach_on_flat.reshape(ny, nx)
-
-        anomaly = 0
-        if free_only:
-            label[iz] = np.where(reach_on, FREE, BEYOND)      # OBSTACLE/BEYOND split (OFF pass) skipped
-        else:
-            if idx.size:
-                t_off = time.perf_counter()
-                reach_off_flat[idx] = _solve_grid(env.robot, planner, ik_off, arm_tag, gp, chunk=chunk)
-                off_seconds += time.perf_counter() - t_off
-            reach_off = reach_off_flat.reshape(ny, nx)         # far/pruned cells -> False -> BEYOND
-            label[iz] = np.where(reach_on, FREE, np.where(reach_off & ~reach_on, OBSTACLE, BEYOND))
-            anomaly = int((reach_on & ~reach_off).sum())      # IK seed noise, not a logic error
-        pruned = int((~near).sum()) if use_env else 0
-        print(f"[label] slice {iz + 1}/{nz} z={z:.3f}  FREE={int(reach_on.sum())} (of {XX.size})"
-              + (f"  pruned={pruned} (reach-env, no solve)" if use_env else "")
-              + (f"  WARN {anomaly} ON&~OFF kept FREE" if anomaly else "")
-              + f"  {time.perf_counter() - t_s:.2f}s")
-    if ik_off is not None:
-        del ik_off
-        rm.torch.cuda.empty_cache()
-    if qfield is None:                                        # every voxel pruned -> radius too small / grid off
-        raise RuntimeError("reach envelope masked the ENTIRE grid; check the artifact radius / base pose / "
-                           "grid bounds (no cell fell inside the max-reach sphere)")
-    return label, qfield, off_seconds
 
 
-def occluder_footprint_polys(env):
-    """True 2D footprints of the occluders, for BOTH the distance calc and the drawing.
-
-    Each occluder's COLLISION mesh -- the exact geometry curobo collides against (base<id>.glb,
-    used with convex=True) -- is transformed by the occluder's ACTUAL world pose (position +
-    orientation, including the random yaw), projected to xy, and convex-hulled. So the footprint
-    is orientation-faithful: a non-round bottle comes out as a correctly-rotated polygon, and it
-    matches the same mesh that produced the FREE/OBSTACLE labels (no shape mismatch between the
-    clearance value and the reachability).
-
-    Returns a list of (K,2) world-xy hull polygons; None if the mesh can't be loaded (the caller
-    then falls back to the OCC_HALF_FOOTPRINT circle)."""
-    occs = getattr(env, "occluders", None)
-    if not occs:
-        return []
-    try:
-        import trimesh
-        import transforms3d as t3d
-        from scipy.spatial import ConvexHull
-        path = os.path.join(os.environ["BENCH_ROOT"], OCCLUDER_COLLISION)
-        V = np.asarray(trimesh.load(path, force="mesh").vertices)   # same mesh for every bottle
-    except Exception as e:
-        print(f"[footprint] could not load occluder collision mesh ({e}); falling back to circle")
-        return None
-    polys = []
-    for occ in occs:
-        pose = occ.get_pose()
-        R = t3d.quaternions.quat2mat(np.asarray(pose.q, dtype=float))   # SAPIEN quat is wxyz
-        xy = (V @ R.T + np.asarray(pose.p, dtype=float))[:, :2]         # posed world footprint (xy)
-        try:
-            polys.append(xy[ConvexHull(xy).vertices])
-        except Exception:
-            polys.append(None)
-    return polys
 
 
-def occluder_clearance(polys, occ_ps, XX, YY, res, r_foot):
-    """Clearance (m) from each grid cell to the nearest OCCLUDER footprint -- not the table /
-    furniture / target that also sit in curobo's world.
-
-    Primary path: rasterise the TRUE posed mesh footprints (polys) onto the grid and take the
-    Euclidean distance transform -> distance to the real oriented shape, 0 inside a footprint.
-    Fallback (polys is None): analytic distance to circles of radius r_foot around occ_ps.
-
-    Measuring to the occluders alone means a table-blocked cell reads FAR here (the table never
-    contributes clearance) and we never measure to the reach boundary either. Full-arm/EE-point
-    caveat still applies (addendum 2 §5): this is the EE control-point distance to the footprint;
-    routability stays body-aware via the IK-FREE node set. No occluders -> +inf."""
-    if polys is not None and any(p is not None for p in polys):
-        from matplotlib.path import Path as MplPath
-        pts = np.column_stack([XX.ravel(), YY.ravel()])
-        mask = np.zeros(XX.size, dtype=bool)
-        for p in polys:
-            if p is not None:
-                mask |= MplPath(p).contains_points(pts)
-        mask = mask.reshape(XX.shape)
-        if not mask.any():
-            return np.full(XX.shape, np.inf, dtype=float)
-        return distance_transform_edt(~mask, sampling=res)
-    if len(occ_ps) == 0:
-        return np.full(XX.shape, np.inf, dtype=float)
-    d = np.full(XX.shape, np.inf, dtype=float)
-    for op in occ_ps:
-        d = np.minimum(d, np.hypot(XX - op[0], YY - op[1]) - r_foot)
-    return np.clip(d, 0.0, None)
 
 
-def nearest_free_cell(free, XX, YY, xy, max_dist):
-    """Grid cell (iy, ix) of the nearest FREE cell to world point `xy`, or None if the
-    closest FREE cell is farther than max_dist (m). Used to plant the DSU seeds: the grasp
-    cell (target end) and the pad cell (other end)."""
-    if not free.any():
-        return None
-    d2 = (XX - xy[0]) ** 2 + (YY - xy[1]) ** 2
-    d2 = np.where(free, d2, np.inf)
-    iy, ix = np.unravel_index(int(np.argmin(d2)), free.shape)
-    dist = float(np.sqrt(d2[iy, ix]))
-    if dist > max_dist:
-        return None
-    return (iy, ix), dist
 
 
-_NEIGH8 = [(-1, -1), (-1, 0), (-1, 1), (0, -1), (0, 1), (1, -1), (1, 0), (1, 1)]
 # 3D 26-neighbourhood (used by warm_start_branches_3d; forward-referenced, resolved at call time)
-_NEIGH26 = [(dz, dy, dx) for dz in (-1, 0, 1) for dy in (-1, 0, 1) for dx in (-1, 0, 1)
-            if not (dz == 0 and dy == 0 and dx == 0)]
 
 
-def widest_path_eps(label, edt, seed_a, seed_b):
-    """Widest-path (max-min) bottleneck between seed_a and seed_b over FREE cells, 8-connected.
-
-    Kruskal: add FREE cells in DESCENDING clearance, unioning each with already-present FREE
-    neighbours; the clearance of the cell whose addition first connects the two seeds is eps* --
-    the tightest squeeze on the least-bad route (the max-spanning-tree bottleneck). Clearance
-    VALUES come from the Euclidean EDT; 8-connectivity only decides whether a diagonal corner
-    can be turned, so it never contaminates the number.
-
-    (2.5D hook: the union step is exactly where the joint-space edge gate goes -- only union
-    neighbours whose IK configs are close. In 2D, under the no-mazy-middle assumption, it's off.)
-
-    Returns (eps_star_m, bottleneck_iyix, merged_bool)."""
-    ny, nx = label.shape
-    free = label == FREE
-    free_flat = free.ravel()
-    edt_flat = edt.ravel()
-    parent = np.arange(ny * nx)
-
-    def find(i):
-        while parent[i] != i:
-            parent[i] = parent[parent[i]]
-            i = parent[i]
-        return i
-
-    def union(a, b):
-        ra, rb = find(a), find(b)
-        if ra != rb:
-            parent[ra] = rb
-
-    sa = seed_a[0] * nx + seed_a[1]
-    sb = seed_b[0] * nx + seed_b[1]
-    if not (free_flat[sa] and free_flat[sb]):
-        return 0.0, None, False          # a seed isn't FREE -> nothing to connect
-
-    idxs = np.flatnonzero(free_flat)
-    order = idxs[np.argsort(-edt_flat[idxs], kind="stable")]     # descending clearance
-    added = np.zeros(ny * nx, dtype=bool)
-
-    for c in order:
-        cy, cx = divmod(int(c), nx)
-        added[c] = True
-        for dy, dx in _NEIGH8:
-            y2, x2 = cy + dy, cx + dx
-            if 0 <= y2 < ny and 0 <= x2 < nx:
-                nb = y2 * nx + x2
-                if added[nb] and free_flat[nb]:
-                    union(int(c), int(nb))
-        if added[sa] and added[sb] and find(sa) == find(sb):
-            return float(edt_flat[c]), (cy, cx), True
-
-    return 0.0, None, False              # seeds never connect -> inaccessible
 
 
-def reconstruct_widest_path(free, edt, seed_a, seed_b, eps_star):
-    """Recover an actual widest-path route to draw. Every cell on the max-min path has clearance
-    >= eps* (the bottleneck), and the DSU guarantees seed_a and seed_b are connected within the
-    sub-grid {FREE and clearance >= eps*}. So a BFS through exactly those cells returns a valid
-    bottleneck-optimal route (the shortest such, since BFS). Returns a list of (iy, ix) or None."""
-    if eps_star is None:
-        return None
-    ny, nx = free.shape
-    allowed = free & (edt >= eps_star - 1e-9)     # inf-clearance case: inf >= inf holds
-    sa, sb = tuple(seed_a), tuple(seed_b)
-    if not (allowed[sa] and allowed[sb]):
-        return None
-    prev = {sa: None}
-    dq = deque([sa])
-    while dq:
-        cur = dq.popleft()
-        if cur == sb:
-            break
-        cy, cx = cur
-        for dy, dx in _NEIGH8:
-            y2, x2 = cy + dy, cx + dx
-            if 0 <= y2 < ny and 0 <= x2 < nx and allowed[y2, x2] and (y2, x2) not in prev:
-                prev[(y2, x2)] = cur
-                dq.append((y2, x2))
-    if sb not in prev:
-        return None
-    path, node = [], sb
-    while node is not None:
-        path.append(node)
-        node = prev[node]
-    return path[::-1]
 
 
-def grasp_orientation(env, arm_tag, topdown):
-    """The fixed EE orientation the whole slice is evaluated at: the target's own
-    horizontal side-grasp for this arm (or top-down). Returns (grasp_q, grasp_pose)
-    where grasp_pose is the full [x,y,z,qw,qx,qy,qz] world grasp (or None)."""
-    if topdown:
-        return np.array([0, 1, 0, 0], dtype=float), None
-    cp_id = env._pick_side_grasp_id(env.target_obj, arm_tag)
-    grasp_pose = env._geometric_grasp_pose(env.target_obj, cp_id, pre_dis=0.0) if cp_id is not None else None
-    grasp_q = np.array(grasp_pose[-4:]) if grasp_pose is not None else np.array([0, 1, 0, 0], dtype=float)
-    return grasp_q, grasp_pose
 
 
 def select_arm(env, args):
@@ -677,7 +183,7 @@ def select_arm(env, args):
     for c in cands:
         if c is not chosen and c["ik"] is not None:
             del c["ik"]
-    rm.torch.cuda.empty_cache()
+    torch.cuda.empty_cache()
     ik = chosen["ik"] if chosen["ik"] is not None else _build_ik_solver(chosen["planner"])
     print(f"[auto-arm] chosen: {chosen['arm']}")
     return chosen["arm"], chosen["planner"], chosen["grasp_q"], chosen["grasp_pose"], ik
@@ -1016,279 +522,20 @@ def phase2_vertical_report(out_dir, args, zs, free_vol, q_warm_2d, q_warm_3d):
 
 
 # ----------------------------------------------------------------------------- step 3: 3D occluder EDT
-_MESH_CACHE: dict = {}
 
 
-def _load_collision_mesh(path):
-    """The collision mesh at `path`, in the actor's own local frame, cached by path.
-
-    Two forms, matching _bench_base_task.update_world: a single mesh FILE (base<id>.glb for
-    the convex assets, coacd_collision.obj for the objaverse ones), or a DIRECTORY of convex
-    parts, which we concatenate into one mesh -- the union is what the actor collides as.
-    Returns (vertices, faces) or None. Never raises; a missing asset just drops that obstacle
-    from the metric (and is reported by the caller)."""
-    if path in _MESH_CACHE:
-        return _MESH_CACHE[path]
-    out = None
-    try:
-        import trimesh
-        if os.path.isdir(path):
-            parts = []
-            for fn in sorted(os.listdir(path)):
-                if fn.lower().endswith((".obj", ".glb", ".ply", ".stl")):
-                    try:
-                        parts.append(trimesh.load(os.path.join(path, fn), force="mesh"))
-                    except Exception:
-                        continue
-            m = trimesh.util.concatenate(parts) if parts else None
-        else:
-            m = trimesh.load(path, force="mesh")
-        if m is not None and len(getattr(m, "vertices", [])):
-            out = (np.asarray(m.vertices, dtype=float), np.asarray(m.faces))
-    except Exception:
-        out = None
-    _MESH_CACHE[path] = out
-    return out
 
 
-def scene_obstacle_entries(env, obstacles="all"):
-    """The (actor, collision_path) pairs the clearance metric should treat as obstacles.
-
-    obstacles="occluders": the curated olive-oil ring only (env.occluders) -- the pre-2026-07-27
-      behaviour, kept so old eps* numbers can be reproduced.
-    obstacles="all": everything in env.collision_list, which is the SAME registry curobo's
-      update_world consumes, minus the two actors that must never be obstacles -- the target
-      being grasped and the destination pad. This picks up procedural table clutter (registered
-      with its own per-object collision mesh, is_obstacle=True) and the occluders (registered
-      without the flag) in one pass, so the metric's world matches the planner's.
-
-    The table and walls are NOT here: the office base task puts them in cuboid_collision_list,
-    a separate list. That is load-bearing -- a tabletop in the obstacle set would swamp the EDT
-    and drive eps* to zero everywhere."""
-    if obstacles == "occluders":
-        occs = getattr(env, "occluders", None) or []
-        path = os.path.join(os.environ["BENCH_ROOT"], OCCLUDER_COLLISION)
-        return [(o, path) for o in occs]
-
-    skip = set()
-    for attr in ("target_obj", "des_obj"):
-        a = getattr(env, attr, None)
-        if a is not None:
-            skip.add(id(a))
-    out = []
-    for info in (getattr(env, "collision_list", None) or []):
-        actor = info.get("actor")
-        path = info.get("collision_path")
-        if actor is None or not path or id(actor) in skip:
-            continue
-        # Articulated entries carry a "link" and are posed per-link; the metric's rigid
-        # pose-the-whole-mesh transform would place them wrong, so leave them out rather
-        # than put a misplaced solid in the field.
-        if "link" in info:
-            continue
-        out.append((actor, path))
-    return out
 
 
-def occluder_footprints_3d(env, obstacles="all"):
-    """Per obstacle, the posed COLLISION geometry -- the exact mesh files curobo's world model
-    loads for these actors (see _bench_base_task.update_world). `obstacles` selects the set:
-    "all" (scene obstacles: clutter + occluders) or "occluders" (the curated ring only); see
-    scene_obstacle_entries. We keep three things:
-
-      * "mesh"  the full posed triangle mesh in WORLD coordinates -- the ground truth. Used by the
-                --occ-shape mesh path (true per-height cross-sections) and by the 3D render.
-      * "poly"  the convex-hull xy footprint (the mesh's widest silhouette from above), and
-      * zlo/zhi the mesh's true world z-range.
-
-    "poly" EXTRUDED over [zlo, zhi] is the OLD occluder solid (--occ-shape extruded): correct in
-    plan view, but it keeps the widest cross-section all the way to the cap, so it over-fills the
-    bottle's NECK badly (olive-oil: ~0.098 m wide at the body, ~0.019 m at the neck -> up to ~4 cm of
-    phantom obstacle near the top, larger than the gripper half-width). --occ-shape mesh removes that
-    by re-cutting the real mesh at every z. Either way, above zhi there is no occluder at all, so the
-    gripper is free to pass over -- the whole point of going 3D.
-
-    "center" is the actor's world spawn position (marker only). Returns a list of
-    dict(poly=(K,2)|None, zlo, zhi, mesh=Trimesh|None, center=(3,)); None if NOTHING could be
-    loaded (caller falls back to cylinders). An empty list means there were no obstacles."""
-    entries = scene_obstacle_entries(env, obstacles)
-    if not entries:
-        return []
-    try:
-        import trimesh
-        import transforms3d as t3d
-        from scipy.spatial import ConvexHull
-    except Exception as e:
-        print(f"[footprint] geometry deps unavailable ({e}); falling back to cylinders")
-        return None
-    out, missed = [], 0
-    for actor, path in entries:
-        loaded = _load_collision_mesh(path)
-        if loaded is None:
-            missed += 1
-            continue
-        V0, F0 = loaded
-        pose = actor.get_pose()
-        R = t3d.quaternions.quat2mat(np.asarray(pose.q, dtype=float))   # SAPIEN quat is wxyz
-        try:                                    # curobo scales the same mesh by the actor's scale
-            sc = np.asarray(actor.scale, dtype=float)
-        except Exception:
-            sc = 1.0
-        Vw = (V0 * sc) @ R.T + np.asarray(pose.p, dtype=float)          # (V,3) posed world verts
-        try:
-            poly = Vw[:, :2][ConvexHull(Vw[:, :2]).vertices]
-        except Exception:
-            poly = None
-        try:
-            mesh = trimesh.Trimesh(vertices=Vw, faces=F0, process=False)
-        except Exception:
-            mesh = None
-        out.append(dict(poly=poly, zlo=float(Vw[:, 2].min()), zhi=float(Vw[:, 2].max()),
-                        mesh=mesh, center=np.asarray(pose.p, dtype=float)))
-    if missed:
-        # Loud: a dropped obstacle is a hole in the clearance field, and eps* would come out
-        # optimistic through a gap that is not really there.
-        print(f"\033[93m[footprint] {missed}/{len(entries)} obstacle mesh(es) failed to load and "
-              f"are NOT in the clearance field -- eps* is optimistic by that much\033[0m")
-    if not out:
-        return None
-    return out
 
 
-def obstacle_centers(foots):
-    """World centres of the posed obstacles, for the cylinder fallback and the plot markers.
-    Derived from the footprints so it always matches the obstacle set actually used."""
-    return [np.asarray(f["center"], dtype=float) for f in (foots or [])]
 
 
-def occluder_slice_polys(f, z):
-    """The TRUE cross-section of one posed occluder mesh at height z: the closed world-xy loops where
-    the plane z cuts the mesh (outer boundary first, any inner loops after). This is what makes the
-    occluder solid taper -- a fat body low down, a thin neck up top -- instead of being a prism.
-    Returns [] when the plane misses the mesh (above the cap / below the base) or on any failure."""
-    m = f.get("mesh")
-    if m is None or not (f["zlo"] - 1e-9 <= z <= f["zhi"] + 1e-9):
-        return []
-    try:
-        sec = m.section(plane_origin=[0.0, 0.0, float(z)], plane_normal=[0.0, 0.0, 1.0])
-    except Exception:
-        return []
-    if sec is None:
-        return []
-    return [np.asarray(loop)[:, :2] for loop in sec.discrete if len(loop) >= 3]
 
 
-def occluder_mask_3d(foots, XX, YY, zs, shape="mesh"):
-    """Voxel occupancy (nz,ny,nx bool) of the occluder solid, in one of two geometries:
-
-      shape="mesh"     : re-cut the posed COLLISION mesh at every z and fill the resulting loops --
-                         the bottle tapers, so the neck is thin and the cap is gone. Faithful to the
-                         geometry curobo collides against, up to grid sampling.
-      shape="extruded" : the old solid -- the widest xy footprint held constant over [zlo, zhi].
-
-    Thin-feature guard (mesh path): a neck narrower than one grid cell can slip between sample points
-    and vanish, which would read as free space. Whenever a slice has real cross-section loops but
-    stamps no cell, we stamp the cell nearest each loop's centroid so the occluder never disappears.
-    Returns None if no footprint geometry is available at all."""
-    from matplotlib.path import Path as MplPath
-    ny, nx = XX.shape
-    nz = len(zs)
-    cols = np.column_stack([XX.ravel(), YY.ravel()])
-    mask = np.zeros((nz, ny, nx), dtype=bool)
-
-    # Per-obstacle bounding-box clip. contains_points over the FULL grid costs
-    # O(nz x n_obstacles x ny x nx), which is fine for one bottle and not fine for a cluttered
-    # table. Each cross-section only ever occupies its own xy bbox, so we test just that
-    # sub-grid: the cost becomes proportional to the obstacles' combined area, not the table's.
-    # Only valid on a regular ascending grid, which is how run() builds it; otherwise fall back
-    # to the full-grid test.
-    xs1d, ys1d = XX[0, :], YY[:, 0]
-    regular = (nx > 1 and ny > 1
-               and bool(np.all(np.diff(xs1d) > 0)) and bool(np.all(np.diff(ys1d) > 0)))
-
-    def _stamp(loops, closed=True):
-        """Boolean (ny,nx) coverage of one slice's loops, evaluated on the bbox sub-grid.
-
-        closed=True is for mesh cross-sections, whose loops repeat their first vertex at the
-        end. Do NOT pass it for a plain polygon: Path(verts, closed=True) turns the LAST vertex
-        into the CLOSEPOLY marker, so a 4-corner hull would silently become a triangle."""
-        cp = MplPath.make_compound_path(*[MplPath(l, closed=closed) for l in loops])
-        hit = np.zeros((ny, nx), dtype=bool)
-        if not regular:
-            return cp.contains_points(cols).reshape(ny, nx)
-        allpts = np.vstack(loops)
-        # +-1 cell of slack so a loop edge falling between samples still covers its cell
-        ix0 = max(0, int(np.searchsorted(xs1d, allpts[:, 0].min())) - 1)
-        ix1 = min(nx, int(np.searchsorted(xs1d, allpts[:, 0].max())) + 1)
-        iy0 = max(0, int(np.searchsorted(ys1d, allpts[:, 1].min())) - 1)
-        iy1 = min(ny, int(np.searchsorted(ys1d, allpts[:, 1].max())) + 1)
-        if ix0 >= ix1 or iy0 >= iy1:
-            return hit
-        sub = np.column_stack([XX[iy0:iy1, ix0:ix1].ravel(), YY[iy0:iy1, ix0:ix1].ravel()])
-        hit[iy0:iy1, ix0:ix1] = cp.contains_points(sub).reshape(iy1 - iy0, ix1 - ix0)
-        return hit
-
-    if shape == "mesh" and foots and any(f.get("mesh") is not None for f in foots):
-        rescued = 0
-        for iz, z in enumerate(zs):
-            for f in foots:
-                loops = occluder_slice_polys(f, float(z))
-                if not loops:
-                    continue
-                # compound path so an inner loop punches a hole rather than filling it
-                hit = _stamp(loops)
-                if not hit.any():                       # thin-feature rescue (see docstring)
-                    for l in loops:
-                        c = l.mean(axis=0)
-                        iy, ix = np.unravel_index(int(np.argmin((XX - c[0]) ** 2 + (YY - c[1]) ** 2)),
-                                                  XX.shape)
-                        hit[iy, ix] = True
-                    rescued += 1
-                mask[iz] |= hit
-        if rescued:
-            print(f"[edt] thin-feature rescue on {rescued} slice(s): the cross-section was narrower "
-                  f"than the grid, so a single centre cell was stamped")
-        return mask
-
-    if not (foots and any(f["poly"] is not None for f in foots)):
-        return None
-    inxy = np.zeros((len(foots), ny, nx), dtype=bool)      # per-occluder in-footprint (xy), cached
-    for i, f in enumerate(foots):
-        if f["poly"] is not None:
-            inxy[i] = _stamp([np.asarray(f["poly"], dtype=float)], closed=False)
-    for iz, z in enumerate(zs):
-        for i, f in enumerate(foots):
-            if f["poly"] is not None and f["zlo"] - 1e-9 <= z <= f["zhi"] + 1e-9:
-                mask[iz] |= inxy[i]
-    return mask
 
 
-def occluder_clearance_3d(foots, occ_ps, XX, YY, zs, res, zres, r_foot, shape="mesh"):
-    """3D clearance (m) from each voxel to the nearest OCCLUDER -- not the table / furniture / target
-    that also sit in curobo's world. Primary path: rasterise the occluder solid (see
-    occluder_mask_3d; --occ-shape picks the true tapering mesh or the old extruded footprint) into a
-    (nz,ny,nx) mask, then the anisotropic 3D Euclidean distance transform (sampling (zres,res,res))
-    -> 0 inside a bottle, growing outward, and UNBOUNDED above the bottle top (no occluder there =
-    free to pass over). Fallback (no footprint geometry): vertical cylinders radius r_foot.
-    No occluders -> +inf everywhere. Returns (nz, ny, nx) float.
-
-    Grid caveat (both shapes): the EDT measures voxel-centre to voxel-centre, so the returned
-    clearance sits up to about half a voxel (res/2 in x,y; zres/2 in z) ABOVE the true point-to-
-    surface distance. eps* inherits that bias -- it is slightly optimistic, by construction."""
-    ny, nx = XX.shape
-    nz = len(zs)
-    mask = occluder_mask_3d(foots, XX, YY, zs, shape=shape)
-    if mask is not None:
-        if not mask.any():
-            return np.full((nz, ny, nx), np.inf, dtype=float)
-        return distance_transform_edt(~mask, sampling=(zres, res, res))
-    if len(occ_ps) == 0:
-        return np.full((nz, ny, nx), np.inf, dtype=float)
-    d = np.full((nz, ny, nx), np.inf, dtype=float)             # vertical cylinders (xy distance only)
-    for op in occ_ps:
-        dxy = np.hypot(XX - op[0], YY - op[1]) - r_foot
-        d = np.minimum(d, np.broadcast_to(dxy, (nz, ny, nx)))
-    return np.clip(d, 0.0, None)
 
 
 def phase3_clearance_report(out_dir, args, xs, ys, zs, label, edt, foots, tgt_p=None, ee_xyz=None):
@@ -1338,179 +585,18 @@ def phase3_clearance_report(out_dir, args, xs, ys, zs, label, edt, foots, tgt_p=
 
 
 # ----------------------------------------------------------------------------- step 4: gated 3D DSU
-def nearest_free_voxel(free_vol, XX, YY, zs, xyz, max_dist):
-    """Voxel (iz, iy, ix) of the nearest FREE voxel to world point xyz (m), or None if the closest is
-    farther than max_dist. Used to plant the DSU seeds (grasp end / pad end) in the volume."""
-    if not free_vol.any():
-        return None
-    dxy2 = (XX - xyz[0]) ** 2 + (YY - xyz[1]) ** 2               # (ny, nx), same for every slice
-    best = None
-    for iz in range(len(zs)):
-        d2 = np.where(free_vol[iz], dxy2 + (zs[iz] - xyz[2]) ** 2, np.inf)
-        iy, ix = np.unravel_index(int(np.argmin(d2)), d2.shape)
-        if best is None or d2[iy, ix] < best[0]:
-            best = (float(d2[iy, ix]), (iz, int(iy), int(ix)))
-    dist = float(np.sqrt(best[0]))
-    return None if dist > max_dist else (best[1], dist)
 
 
-def widest_path_eps_3d(label, edt, qvol, seed_a, seed_b, tau):
-    """26-connected widest-path (Kruskal max-min occluder clearance) bottleneck between seed_a and
-    seed_b over FREE voxels. If qvol is not None the edges are GATED: two FREE neighbours union only if
-    their warm IK configs are within tau (branch-continuous) -- the mandatory 2.5D joint gate. Add
-    voxels in DESCENDING clearance; the clearance of the voxel whose addition first connects the seeds
-    is eps*. Clearance VALUES come from edt; the gate only decides whether an edge exists.
-    Returns (eps_star_m, bottleneck (iz,iy,ix), merged_bool)."""
-    nz, ny, nx = label.shape
-    free = (label == FREE).ravel()
-    edt_flat = edt.ravel()
-    q_flat = qvol.reshape(-1, qvol.shape[-1]) if qvol is not None else None
-    parent = np.arange(nz * ny * nx)
-
-    def find(i):
-        while parent[i] != i:
-            parent[i] = parent[parent[i]]
-            i = parent[i]
-        return i
-
-    def union(a, b):
-        ra, rb = find(a), find(b)
-        if ra != rb:
-            parent[ra] = rb
-
-    def flat(iz, iy, ix):
-        return (iz * ny + iy) * nx + ix
-
-    sa, sb = flat(*seed_a), flat(*seed_b)
-    if not (free[sa] and free[sb]):
-        return 0.0, None, False
-    idxs = np.flatnonzero(free)
-    order = idxs[np.argsort(-edt_flat[idxs], kind="stable")]      # descending clearance (inf first)
-    added = np.zeros(nz * ny * nx, dtype=bool)
-    for c in order:
-        cz, rem = divmod(int(c), ny * nx)
-        cy, cx = divmod(rem, nx)
-        added[c] = True
-        for dz, dy, dx in _NEIGH26:
-            z2, y2, x2 = cz + dz, cy + dy, cx + dx
-            if 0 <= z2 < nz and 0 <= y2 < ny and 0 <= x2 < nx:
-                nb = flat(z2, y2, x2)
-                if added[nb] and free[nb] and (q_flat is None or _wrap_linf(q_flat[c], q_flat[nb]) <= tau):
-                    union(int(c), int(nb))
-        if added[sa] and added[sb] and find(sa) == find(sb):
-            return float(edt_flat[c]), (cz, cy, cx), True
-    return 0.0, None, False
 
 
-def reconstruct_widest_path_3d(free_vol, edt, qvol, seed_a, seed_b, eps_star, tau):
-    """Recover an actual bottleneck-optimal route to draw: a gated BFS through {FREE and clearance >=
-    eps*}, 26-connected. Returns a list of (iz,iy,ix) or None."""
-    if eps_star is None:
-        return None
-    nz, ny, nx = free_vol.shape
-    allowed = free_vol & (edt >= eps_star - 1e-9)                 # inf >= inf holds
-    q_flat = qvol.reshape(-1, qvol.shape[-1]) if qvol is not None else None
-
-    def flat(iz, iy, ix):
-        return (iz * ny + iy) * nx + ix
-
-    sa, sb = tuple(seed_a), tuple(seed_b)
-    if not (allowed[sa] and allowed[sb]):
-        return None
-    prev = {sa: None}
-    dq = deque([sa])
-    while dq:
-        cur = dq.popleft()
-        if cur == sb:
-            break
-        cz, cy, cx = cur
-        for dz, dy, dx in _NEIGH26:
-            z2, y2, x2 = cz + dz, cy + dy, cx + dx
-            if (0 <= z2 < nz and 0 <= y2 < ny and 0 <= x2 < nx and allowed[z2, y2, x2]
-                    and (z2, y2, x2) not in prev
-                    and (q_flat is None or _wrap_linf(q_flat[flat(cz, cy, cx)], q_flat[flat(z2, y2, x2)]) <= tau)):
-                prev[(z2, y2, x2)] = cur
-                dq.append((z2, y2, x2))
-    if sb not in prev:
-        return None
-    path, node = [], sb
-    while node is not None:
-        path.append(node)
-        node = prev[node]
-    return path[::-1]
 
 
-def surface_distance_to_occluders(foots, pt):
-    """Exact continuous distance (m) from a world point to the nearest occluder SURFACE, measured on
-    the real posed triangle mesh -- no grid, no extrusion. This is the honest yardstick for the eps*
-    sphere: eps* itself comes from the voxel EDT, so comparing the two shows how much the grid costs
-    us. Returns None if no mesh is available."""
-    best = None
-    for f in (foots or []):
-        m = f.get("mesh")
-        if m is None:
-            continue
-        try:
-            import trimesh
-            d = float(trimesh.proximity.closest_point(m, np.asarray([pt], dtype=float))[1][0])
-        except Exception:
-            continue
-        best = d if best is None else min(best, d)
-    return best
 
 
-def _draw_occluder_solids_3d(ax, foots, shape):
-    """Draw the occluders in 3D as the SAME solid the clearance field was measured against: the true
-    posed collision mesh under --occ-shape mesh, the extruded footprint prism under extruded. Keeping
-    the picture and the metric on one geometry is what makes the eps* sphere's 'just touches' claim
-    checkable by eye."""
-    from mpl_toolkits.mplot3d.art3d import Poly3DCollection
-    for f in (foots or []):
-        m = f.get("mesh")
-        if shape == "mesh" and m is not None:
-            tris = np.asarray(m.vertices)[np.asarray(m.faces)]
-            ax.add_collection3d(Poly3DCollection(tris, facecolor="red", alpha=0.10, edgecolor="none"))
-            continue
-        if f["poly"] is None:
-            continue
-        p, zlo, zhi = f["poly"], f["zlo"], f["zhi"]
-        bottom = [(x, y, zlo) for x, y in p]
-        top = [(x, y, zhi) for x, y in p]
-        faces = [bottom, top] + [[bottom[i], bottom[(i + 1) % len(p)], top[(i + 1) % len(p)], top[i]]
-                                 for i in range(len(p))]
-        ax.add_collection3d(Poly3DCollection(faces, facecolor="red", alpha=0.12, edgecolor="red", lw=0.5))
 
 
-def _draw_eps_sphere(ax, centre, radius, n=48):
-    """Wireframe sphere of radius eps* centred on the bottleneck voxel -- the 3D twin of the 2D eps*
-    circle. Its surface is the set of points exactly eps* from the bottleneck, so with the axes at
-    equal aspect it should just KISS the nearest occluder: eps* IS that distance. A sphere that
-    visibly bites into a bottle, or floats clear of every bottle, means the clearance field and the
-    drawn geometry have drifted apart."""
-    u = np.linspace(0, 2 * np.pi, n)
-    v = np.linspace(0, np.pi, n // 2)
-    x = centre[0] + radius * np.outer(np.cos(u), np.sin(v))
-    y = centre[1] + radius * np.outer(np.sin(u), np.sin(v))
-    z = centre[2] + radius * np.outer(np.ones_like(u), np.cos(v))
-    ax.plot_wireframe(x, y, z, color="#00bcd4", lw=0.6, alpha=0.55, rstride=3, cstride=3)
-    ax.plot([centre[0]], [centre[1]], [centre[2]], ".", color="#00bcd4", ms=1,
-            label=f"eps* sphere (r = {radius:.3f} m)")
 
 
-def _equal_aspect_3d(ax, pts, pad=0.02):
-    """Force a TRUE 1:1:1 data aspect over the bounding box of `pts` (list of (3,) points). Without
-    this matplotlib stretches each axis independently, the eps* sphere renders as an ellipsoid and
-    'just touching' becomes unreadable."""
-    P = np.asarray([p for p in pts if p is not None], dtype=float)
-    if P.size == 0:
-        return
-    lo, hi = P.min(axis=0) - pad, P.max(axis=0) + pad
-    span = float(max(hi - lo))
-    mid = 0.5 * (lo + hi)
-    ax.set_xlim(mid[0] - span / 2, mid[0] + span / 2)
-    ax.set_ylim(mid[1] - span / 2, mid[1] + span / 2)
-    ax.set_zlim(mid[2] - span / 2, mid[2] + span / 2)
-    ax.set_box_aspect((1, 1, 1))
 
 
 def _metric_path3d(out_dir, args, foots, occ_ps, g_xyz, p_xyz, bott_xyz, route_w, eps_star, merged,
@@ -1652,25 +738,8 @@ def phase4_metric(out_dir, args, XX, YY, zs, label, edt, q_gate, grasp_pose, tgt
 
 
 # --------------------------------------------------------------------- step 4b: 3D-legible visuals
-def _line_axis(g_xy, p_xy):
-    """Unit direction + length of the grasp->pad line in the xy plane (the profile/side-view axis)."""
-    d = np.asarray(p_xy, float) - np.asarray(g_xy, float)
-    L = float(np.hypot(*d))
-    u = d / L if L > 1e-9 else np.array([1.0, 0.0])
-    return np.asarray(g_xy, float), u, L
 
 
-def _scene_anchor_markers(ax, tgt_p=None, ee_xyz=None, arm=""):
-    """The two scene anchors every plan-view figure needs to be readable: where the TARGET BOTTLE
-    actually spawned (the thing being picked -- distinct from the 'grasp seed', which is that pose
-    snapped to the nearest FREE voxel) and where the acting GRIPPER currently is (its rest pose, i.e.
-    the end the route has to start from). Both are plotted in the xy plane."""
-    if tgt_p is not None:
-        ax.plot(tgt_p[0], tgt_p[1], "*", color="blue", ms=17, mec="k", mew=0.6,
-                label="target bottle (spawn)")
-    if ee_xyz is not None:
-        ax.plot(ee_xyz[0], ee_xyz[1], "^", color="darkorange", ms=12, mec="k", mew=0.6,
-                label=f"gripper now ({arm})")
 
 
 def _viz_side_elevation(out_dir, args, XX, YY, zs, label, foots, g_xyz, p_xyz, route_w, eps_star,

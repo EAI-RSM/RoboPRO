@@ -69,6 +69,8 @@ import numpy as np
 
 from setup_paths import setup_paths
 setup_paths()
+
+from lib.scene_build import get_embodiment_config, get_env_class
 # Paths: script is run from benchmark folder, but changes to customized_robotwin
 current_file_path = os.path.abspath(__file__)
 script_dir = os.path.dirname(current_file_path)
@@ -191,59 +193,10 @@ def sync_viewer_to_scene_camera(env, camera_name: str) -> bool:
     return True
 
 
-def _extract_task_class(envs_module, task_name):
-    """Extract task class from module, handling class names that differ from module name."""
-    try:
-        return getattr(envs_module, task_name)
-    except AttributeError:
-        from envs._base_task import Base_Task
-        for name in dir(envs_module):
-            obj = getattr(envs_module, name)
-            if isinstance(obj, type) and issubclass(obj, Base_Task) and obj is not Base_Task:
-                return obj
-        raise SystemExit(f"No task class found in {envs_module.__name__}")
 
 
-def get_env_class(task_name, bench_subdir=None):
-    """Load task env class from bench_envs, or envs if not in bench_envs."""
-    # Known bench_envs subpackages (office, study, etc.)
-    BENCH_SUBDIRS = ["office", "study", "kitchenl", "kitchens"]
-
-    if bench_subdir:
-        # Explicit subdir: try only bench_envs.{subdir}.{task_name}
-        try:
-            envs_module = importlib.import_module(f"bench_envs.{bench_subdir}.{task_name}")
-            return _extract_task_class(envs_module, task_name)
-        except ModuleNotFoundError:
-            raise SystemExit(f"Task '{task_name}' not found in bench_envs.{bench_subdir}")
-
-    # Try bench_envs.{task_name} first (flat structure)
-    try:
-        envs_module = importlib.import_module(f"bench_envs.{task_name}")
-        return _extract_task_class(envs_module, task_name)
-    except ModuleNotFoundError:
-        pass
-
-    # Try bench_envs.{subdir}.{task_name} for each known subdir
-    for subdir in BENCH_SUBDIRS:
-        try:
-            envs_module = importlib.import_module(f"bench_envs.{subdir}.{task_name}")
-            return _extract_task_class(envs_module, task_name)
-        except ModuleNotFoundError:
-            continue
-
-    # Fallback to envs
-    try:
-        envs_module = importlib.import_module(f"envs.{task_name}")
-        return _extract_task_class(envs_module, task_name)
-    except ModuleNotFoundError:
-        raise SystemExit(f"No task class found for '{task_name}' in bench_envs or envs")
 
 
-def get_embodiment_config(robot_file):
-    robot_config_file = os.path.join(robot_file, "config.yml")
-    with open(robot_config_file, "r", encoding="utf-8") as f:
-        return yaml.load(f.read(), Loader=yaml.FullLoader)
 
 
 def _install_plan_fail_camera_saver(env, out_dir: Path, task_name: str, seed: int, camera_name: str):

@@ -38,7 +38,7 @@ os.chdir(robotwin_root)  # match path resolution used by collect_data / visualiz
 
 import yaml
 from envs import CONFIGS_PATH
-from visualize_task_scene import get_env_class, get_embodiment_config
+from lib.scene_build import get_env_class, get_embodiment_config
 
 
 def build_env(task_name, task_config, seed, bench_subdir):

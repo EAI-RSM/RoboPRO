@@ -54,70 +54,17 @@ setup_paths()
 RESULTS_DIR = Path(__file__).resolve().parents[3] / "scripts" / "validation" / "results" / "reachability"
 
 import torch  # noqa: E402  (after setup_paths so curobo's torch is on the path)
-from analyze_occluder_visibility import make_occluder_task, PAD_XY, OCC_HALF_FOOTPRINT  # noqa: E402
-from analyze_natural_visibility import build_cfg, DR_CLEAN  # noqa: E402
+from lib.ik_grid import _build_ik_solver, _solve_grid, _world_gripper_to_curobo
+from lib.scene_build import DR_CLEAN, build_cfg
+from lib.scene_constants import OCC_HALF_FOOTPRINT, PAD_XY
+from analyze_occluder_visibility import make_occluder_task  # noqa: E402
 
 
 # ----------------------------------------------------------------------------- frames
-def _world_gripper_to_curobo(robot, planner, arm_tag, gripper_pose):
-    """Replicate robot.left/right_plan_path + planner.plan_path frame chain for a single
-    WORLD gripper pose [x,y,z,qw,qx,qy,qz] -> (pos3, quat4) in curobo's IK frame.
-    (aloha-agilex branch, since the bench uses that embodiment.)"""
-    # 1) gripper -> endlink (robot frame convention)
-    endlink = robot._trans_from_gripper_to_endlink(gripper_pose, arm_tag=str(arm_tag))
-    # 2) world -> arm base
-    world_base = np.concatenate([np.array(planner.robot_origion_pose.p),
-                                 np.array(planner.robot_origion_pose.q)])
-    world_target = np.concatenate([np.array(endlink.p), np.array(endlink.q)])
-    p, q = planner._trans_from_world_to_base(world_base, world_target)
-    # 3) frame_bias + small per-arm yaw (aloha-agilex patch, see planner.plan_path)
-    T_target = t3d.affines.compose(p, t3d.quaternions.quat2mat(q), [1, 1, 1])
-    T_bias = t3d.affines.compose(planner.frame_bias, np.eye(3), [1, 1, 1])
-    rot = t3d.axangles.axangle2mat([0, 0, 1], -0.02 if str(arm_tag) == "left" else -0.01)
-    T_rot = t3d.affines.compose([0, 0, 0], rot, [1, 1, 1])
-    T_new = T_rot @ T_bias @ T_target
-    return T_new[:3, 3], t3d.quaternions.mat2quat(T_new[:3, :3])
 
 
-def _build_ik_solver(planner):
-    """Fresh IKSolver that REUSES the planner's already-loaded collision world, with
-    use_cuda_graph=False so we can pass an arbitrary-size batch (the motion_gen ik_solver
-    locks its batch size via cuda-graph, so we can't reuse it directly)."""
-    from curobo.wrap.reacher.ik_solver import IKSolver, IKSolverConfig
-    mg = planner.motion_gen
-    cfg = IKSolverConfig.load_from_robot_config(
-        planner.yml_path,
-        None,                                   # world comes from the shared checker below
-        tensor_args=mg.tensor_args,
-        world_coll_checker=mg.world_coll_checker,   # <- already has the box + table
-        use_cuda_graph=False,
-        self_collision_check=True,
-        self_collision_opt=False,
-    )
-    return IKSolver(cfg)
 
 
-def _solve_grid(robot, planner, ik, arm_tag, gp_world, chunk=256):
-    """gp_world: (N,7) world gripper poses -> (N,) bool reachable+collision-free.
-    Solved in chunks: batched IK spawns many seeds per pose, so the whole grid at once
-    is a multi-GB allocation -> chunk to cap peak memory (safe since use_cuda_graph=False)."""
-    from curobo.types.math import Pose as CuroboPose
-    ta = planner.motion_gen.tensor_args
-    N = len(gp_world)
-    pos = np.empty((N, 3), dtype=np.float32)
-    quat = np.empty((N, 4), dtype=np.float32)
-    for i, gp in enumerate(gp_world):
-        p, q = _world_gripper_to_curobo(robot, planner, arm_tag, gp)
-        pos[i], quat[i] = p, q
-    out = np.zeros(N, dtype=bool)
-    for s in range(0, N, chunk):
-        e = min(s + chunk, N)
-        goal = CuroboPose(position=ta.to_device(pos[s:e]), quaternion=ta.to_device(quat[s:e]))
-        result = ik.solve_batch(goal)
-        out[s:e] = result.success.detach().cpu().numpy().reshape(e - s, -1)[:, 0].astype(bool)
-        del result, goal
-        torch.cuda.empty_cache()
-    return out
 
 
 # ----------------------------------------------------------------------------- run

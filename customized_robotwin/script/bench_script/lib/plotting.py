@@ -1,5 +1,9 @@
 """Shared plotting helpers for benchmark analysis tools."""
 
+import numpy as np
+
+import numpy as np
+
 # Four azimuths so the depth ordering of the path vs the box is readable.
 VIEWS = [("iso", 26, -60), ("front", 8, -90), ("side", 8, 0), ("top", 78, -90)]
 
@@ -41,3 +45,78 @@ def _write_video(env, args):
     except Exception as e:
         # a missing video must not sink an otherwise-good figure run
         print(f"[video] merge failed ({type(e).__name__}: {e}); figures are unaffected")
+
+
+def _draw_occluder_solids_3d(ax, foots, shape):
+    """Draw the occluders in 3D as the SAME solid the clearance field was measured against: the true
+    posed collision mesh under --occ-shape mesh, the extruded footprint prism under extruded. Keeping
+    the picture and the metric on one geometry is what makes the eps* sphere's 'just touches' claim
+    checkable by eye."""
+    from mpl_toolkits.mplot3d.art3d import Poly3DCollection
+    for f in (foots or []):
+        m = f.get("mesh")
+        if shape == "mesh" and m is not None:
+            tris = np.asarray(m.vertices)[np.asarray(m.faces)]
+            ax.add_collection3d(Poly3DCollection(tris, facecolor="red", alpha=0.10, edgecolor="none"))
+            continue
+        if f["poly"] is None:
+            continue
+        p, zlo, zhi = f["poly"], f["zlo"], f["zhi"]
+        bottom = [(x, y, zlo) for x, y in p]
+        top = [(x, y, zhi) for x, y in p]
+        faces = [bottom, top] + [[bottom[i], bottom[(i + 1) % len(p)], top[(i + 1) % len(p)], top[i]]
+                                 for i in range(len(p))]
+        ax.add_collection3d(Poly3DCollection(faces, facecolor="red", alpha=0.12, edgecolor="red", lw=0.5))
+
+
+def _draw_eps_sphere(ax, centre, radius, n=48):
+    """Wireframe sphere of radius eps* centred on the bottleneck voxel -- the 3D twin of the 2D eps*
+    circle. Its surface is the set of points exactly eps* from the bottleneck, so with the axes at
+    equal aspect it should just KISS the nearest occluder: eps* IS that distance. A sphere that
+    visibly bites into a bottle, or floats clear of every bottle, means the clearance field and the
+    drawn geometry have drifted apart."""
+    u = np.linspace(0, 2 * np.pi, n)
+    v = np.linspace(0, np.pi, n // 2)
+    x = centre[0] + radius * np.outer(np.cos(u), np.sin(v))
+    y = centre[1] + radius * np.outer(np.sin(u), np.sin(v))
+    z = centre[2] + radius * np.outer(np.ones_like(u), np.cos(v))
+    ax.plot_wireframe(x, y, z, color="#00bcd4", lw=0.6, alpha=0.55, rstride=3, cstride=3)
+    ax.plot([centre[0]], [centre[1]], [centre[2]], ".", color="#00bcd4", ms=1,
+            label=f"eps* sphere (r = {radius:.3f} m)")
+
+
+def _equal_aspect_3d(ax, pts, pad=0.02):
+    """Force a TRUE 1:1:1 data aspect over the bounding box of `pts` (list of (3,) points). Without
+    this matplotlib stretches each axis independently, the eps* sphere renders as an ellipsoid and
+    'just touching' becomes unreadable."""
+    P = np.asarray([p for p in pts if p is not None], dtype=float)
+    if P.size == 0:
+        return
+    lo, hi = P.min(axis=0) - pad, P.max(axis=0) + pad
+    span = float(max(hi - lo))
+    mid = 0.5 * (lo + hi)
+    ax.set_xlim(mid[0] - span / 2, mid[0] + span / 2)
+    ax.set_ylim(mid[1] - span / 2, mid[1] + span / 2)
+    ax.set_zlim(mid[2] - span / 2, mid[2] + span / 2)
+    ax.set_box_aspect((1, 1, 1))
+
+
+def _line_axis(g_xy, p_xy):
+    """Unit direction + length of the grasp->pad line in the xy plane (the profile/side-view axis)."""
+    d = np.asarray(p_xy, float) - np.asarray(g_xy, float)
+    L = float(np.hypot(*d))
+    u = d / L if L > 1e-9 else np.array([1.0, 0.0])
+    return np.asarray(g_xy, float), u, L
+
+
+def _scene_anchor_markers(ax, tgt_p=None, ee_xyz=None, arm=""):
+    """The two scene anchors every plan-view figure needs to be readable: where the TARGET BOTTLE
+    actually spawned (the thing being picked -- distinct from the 'grasp seed', which is that pose
+    snapped to the nearest FREE voxel) and where the acting GRIPPER currently is (its rest pose, i.e.
+    the end the route has to start from). Both are plotted in the xy plane."""
+    if tgt_p is not None:
+        ax.plot(tgt_p[0], tgt_p[1], "*", color="blue", ms=17, mec="k", mew=0.6,
+                label="target bottle (spawn)")
+    if ee_xyz is not None:
+        ax.plot(ee_xyz[0], ee_xyz[1], "^", color="darkorange", ms=12, mec="k", mew=0.6,
+                label=f"gripper now ({arm})")

@@ -32,15 +32,17 @@ from datetime import datetime
 from pathlib import Path
 
 import numpy as np
+
+import torch
 import transforms3d as t3d
 from scipy.ndimage import distance_transform_edt
 
 # reachability_map import pulls in torch + the env stack and selects the Agg backend (headless-safe).
-import reachability_map as rm  # noqa: F401
-from clearance_metric_3d import (
-    RESULTS_DIR, Timings, build_grid, select_arm, geometric_envelope, _build_ik_solver_no_world,
-    make_occluder_task, build_cfg, DR_CLEAN, LABEL_COLORS, FREE, BEYOND,
-)
+from clearance_metric_3d import LABEL_COLORS, make_occluder_task, select_arm
+from lib.ik_grid import _build_ik_solver_no_world, build_grid
+from lib.labeling import BEYOND, FREE, geometric_envelope
+from lib.run_io import CLEARANCE_RESULTS_DIR as RESULTS_DIR, Timings
+from lib.scene_build import DR_CLEAN, build_cfg
 import matplotlib.pyplot as plt
 from matplotlib.colors import ListedColormap
 
@@ -61,12 +63,12 @@ def compute_reach_radius(ik, n_samples=2_000_000, batch=100_000):
     rmax, done = 0.0, 0
     while done < n_samples:
         b = min(batch, n_samples - done)
-        q = lo + (hi - lo) * rm.torch.rand(b, dof, device=device, dtype=dtype)
+        q = lo + (hi - lo) * torch.rand(b, dof, device=device, dtype=dtype)
         pos = ik.fk(q).ee_position                               # (b, 3) EE in the base/kinematics frame
         rmax = max(rmax, float(pos.norm(dim=1).max().item()))
         done += b
         del q, pos
-    rm.torch.cuda.empty_cache()
+    torch.cuda.empty_cache()
     return rmax
 
 
@@ -165,7 +167,7 @@ def build_occupancy(ik_nw, C, M, xs, ys, zs, gripper_offset, mc_safety, n_sample
         occ[iz[m], iy[m], ix[m]] = True                         # points off-grid are beyond it anyway
         got += int(q.shape[0])
         del q, pe
-        rm.torch.cuda.empty_cache()                             # release the rejection-sampling scratch each batch
+        torch.cuda.empty_cache()                             # release the rejection-sampling scratch each batch
     if stalls >= 20:
         print(f"[reach-env] WARN occupancy sampling stalled at {got:,}/{n_samples:,} feasible configs "
               f"(rejection too tight?); mask built from what was collected")
@@ -182,7 +184,7 @@ def produce_for_arm(env, args, arm, cache_dir, out_dir):
     args.arm = arm
     _arm, planner, grasp_q, grasp_pose, ik = select_arm(env, args)   # forced arm -> that planner + IK
     del ik                                          # the world IK isn't needed; reach is scene-independent
-    rm.torch.cuda.empty_cache()
+    torch.cuda.empty_cache()
     ik_nw = _build_ik_solver_no_world(planner)      # self-collision only -> scene-independent reachability
 
     R_max = reach_radius_cached(ik_nw, planner, arm, cache_dir, args.reach_samples,
@@ -229,7 +231,7 @@ def produce_for_arm(env, args, arm, cache_dir, out_dir):
     plot_envelope_simple(out_dir, arm, XX, YY, zs, prune, reach_radius)   # image = the occupancy prune
 
     del ik_nw
-    rm.torch.cuda.empty_cache()
+    torch.cuda.empty_cache()
 
 
 def main():

@@ -63,6 +63,8 @@ from pathlib import Path
 
 import numpy as np
 
+from lib.scene_constants import TARGET_ID, TARGET_MODEL
+
 # The mesh->gripper convention from _base_task.get_grasp_pose: the contact frame is post-multiplied
 # by this before the -0.12 m back-off along the gripper's approach axis. Duplicated here (rather
 # than imported) so the offline analysis runs without importing the whole sapien task stack; the
@@ -499,15 +501,8 @@ def main() -> int:
         return _selftest()
 
     repo = Path(__file__).resolve().parents[2]
-    # default to whatever analyze_occluder_visibility actually carries, read from the source so the
-    # two cannot drift
-    model, mid = "001_bottle", 9
-    src = (Path(__file__).parent / "analyze_occluder_visibility.py").read_text(encoding="utf-8")
-    for line in src.splitlines():
-        if line.startswith("TARGET_MODEL"):
-            model = line.split("=")[1].strip().strip('"').strip("'")
-        elif line.startswith("TARGET_ID"):
-            mid = int(line.split("=")[1].split("#")[0].strip())
+    # Default to the same shared target identity used by the rollout task.
+    model, mid = TARGET_MODEL, TARGET_ID
     model_dir = Path(args.model_dir) if args.model_dir else repo / "assets" / "objects" / model
     model_id = args.model_id if args.model_id is not None else mid
 

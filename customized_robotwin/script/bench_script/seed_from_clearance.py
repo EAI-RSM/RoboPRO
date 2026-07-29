@@ -28,6 +28,15 @@ import time
 
 import numpy as np
 
+from lib.continuity import warm_start_branches_3d
+from lib.ik_grid import _solve_grid_q_multi, build_grid
+from lib.labeling import FREE, label_volume
+from lib.obstacles import obstacle_centers, occluder_clearance_3d, occluder_footprints_3d
+from lib.scene_constants import OCC_HALF_FOOTPRINT
+from lib.widest_path import (
+    nearest_free_voxel, reconstruct_widest_path_3d, widest_path_eps_3d,
+)
+
 # clearance_metric_3d is imported LAZILY inside the scene-coupled functions (2a): it pulls in
 # reachability_map -> torch + the env stack. The pure resampler (2b, resample_route_to_seed) must NOT
 # require any of that, so it stays CPU-unit-testable via `python seed_from_clearance.py --selftest`.
@@ -119,11 +128,10 @@ def _build_warm_field(env, planner, ik, arm, grasp_q, XX, YY, zs, label, cfg):
     warm block of clearance_metric_3d.run(): a multi-branch IK solve on the FREE voxels, then 26-conn
     3D continuity propagation (vertical continuity is what a climb-over route rides on). Returns
     q_warm_3d (nz, ny, nx, dof), NaN where no converged candidate."""
-    import clearance_metric_3d as cm
     nz = len(zs)
     ny, nx = label.shape[1], label.shape[2]
     dof, K = None, cfg.warm_seeds
-    free_vol = label == cm.FREE
+    free_vol = label == FREE
     xr, yr = XX.ravel(), YY.ravel()
     cand_q_vol = None
     cand_ok_vol = np.zeros((nz, ny, nx, K), dtype=bool)
@@ -133,7 +141,7 @@ def _build_warm_field(env, planner, ik, arm, grasp_q, XX, YY, zs, label, cfg):
             continue
         gp = np.zeros((idx.size, 7))
         gp[:, 0] = xr[idx]; gp[:, 1] = yr[idx]; gp[:, 2] = z; gp[:, 3:] = grasp_q
-        cand_q, cand_ok = cm._solve_grid_q_multi(env.robot, planner, ik, arm, gp,
+        cand_q, cand_ok = _solve_grid_q_multi(env.robot, planner, ik, arm, gp,
                                                  chunk=cfg.chunk, return_seeds=K, num_seeds=cfg.ik_seeds)
         if cand_q_vol is None:
             dof = cand_q.shape[-1]
@@ -142,7 +150,7 @@ def _build_warm_field(env, planner, ik, arm, grasp_q, XX, YY, zs, label, cfg):
         cand_ok_vol[iz].reshape(ny * nx, K)[idx] = cand_ok
     if cand_q_vol is None:                                  # no FREE voxel had a converged branch
         return None
-    return cm.warm_start_branches_3d(free_vol, cand_q_vol, cand_ok_vol)
+    return warm_start_branches_3d(free_vol, cand_q_vol, cand_ok_vol)
 
 
 def sweep_gate_tau(widest_path_at, taus, gate_tau):
@@ -185,19 +193,18 @@ def compute_route_configs(env, planner, arm, ik, grasp_q, start_xyz, goal_xyz,
         widest-path can't connect the two (reason is set). The joint order is curobo's active-joint
         order (the IK solver's dof axis), i.e. what 2c must keep to match the seed tensor.
     """
-    import clearance_metric_3d as cm
     cfg = cfg or SeedMetricConfig()
     t0 = time.perf_counter()
 
-    xs, ys, zs, XX, YY = cm.build_grid(cfg)
+    xs, ys, zs, XX, YY = build_grid(cfg)
 
     # label the z-stack (reach-envelope pruning left OFF here: the builder shouldn't depend on a
     # precomputed artifact; the expert can pass a pruned variant later if cost demands it)
-    label, qfield, _off = cm.label_volume(
+    label, qfield, _off = label_volume(
         env, planner, ik, arm, XX, YY, zs, grasp_q, cfg.chunk,
         num_seeds=cfg.ik_seeds, free_only=cfg.free_only, prune_mask=None)
 
-    free_vol = label == cm.FREE
+    free_vol = label == FREE
     if not free_vol.any():
         return RouteResult(None, None, None, False, 0.0, "no FREE voxel in the grid",
                            label=label, XX=XX, YY=YY, zs=zs, seconds=time.perf_counter() - t0)
@@ -211,17 +218,17 @@ def compute_route_configs(env, planner, arm, ik, grasp_q, start_xyz, goal_xyz,
     # obstacle clearance field (edt) -- the widest-path values come from this. Under
     # cfg.obstacles="all" this covers table clutter as well as the occluder ring, so the route
     # squeezes between whatever is actually on the table (see clearance_metric_3d.--obstacles).
-    foots = cm.occluder_footprints_3d(env, obstacles=cfg.obstacles)
+    foots = occluder_footprints_3d(env, obstacles=cfg.obstacles)
     # Centres track the obstacle set actually used (cylinder fallback + plot markers).
-    occ_ps = cm.obstacle_centers(foots) or (
+    occ_ps = obstacle_centers(foots) or (
         [np.array(o.get_pose().p) for o in env.occluders]
         if getattr(env, "occluders", None) else [])
-    edt = cm.occluder_clearance_3d(foots, occ_ps, XX, YY, zs, cfg.res, cfg.zres,
-                                   cm.OCC_HALF_FOOTPRINT, shape=cfg.occ_shape)
+    edt = occluder_clearance_3d(foots, occ_ps, XX, YY, zs, cfg.res, cfg.zres,
+                                   OCC_HALF_FOOTPRINT, shape=cfg.occ_shape)
 
     # plant the two seeds: current gripper -> grasp (the APPROACH, unlike phase4_metric's grasp->pad)
-    seed_s = cm.nearest_free_voxel(free_vol, XX, YY, zs, np.asarray(start_xyz, float), cfg.seed_snap)
-    seed_g = cm.nearest_free_voxel(free_vol, XX, YY, zs, np.asarray(goal_xyz, float), cfg.seed_snap)
+    seed_s = nearest_free_voxel(free_vol, XX, YY, zs, np.asarray(start_xyz, float), cfg.seed_snap)
+    seed_g = nearest_free_voxel(free_vol, XX, YY, zs, np.asarray(goal_xyz, float), cfg.seed_snap)
     if seed_s is None or seed_g is None:
         which = "start(gripper)" if seed_s is None else "goal(grasp)"
         return RouteResult(None, None, None, False, 0.0, f"{which} seed unsnappable within {cfg.seed_snap}m",
@@ -233,8 +240,8 @@ def compute_route_configs(env, planner, arm, ik, grasp_q, start_xyz, goal_xyz,
     # into an actionable cause: ungated ALSO fails -> geometry/reachability (finer res / wider bounds);
     # ungated connects but gated fails -> a real branch seam the gate cuts (raise gate_tau / finer res,
     # since coarse res inflates adjacent-voxel joint steps and makes the fixed-tau gate over-cut).
-    eps_u, _bu, merged_u = cm.widest_path_eps_3d(label, edt, None, sa, ga, cfg.gate_tau)
-    eps_g, bott_g, merged_g = cm.widest_path_eps_3d(label, edt, q_warm_3d, sa, ga, cfg.gate_tau)
+    eps_u, _bu, merged_u = widest_path_eps_3d(label, edt, None, sa, ga, cfg.gate_tau)
+    eps_g, bott_g, merged_g = widest_path_eps_3d(label, edt, q_warm_3d, sa, ga, cfg.gate_tau)
 
     def _w(v):                                                    # voxel (iz,iy,ix) -> world (x,y,z)
         return (float(XX[v[1], v[2]]), float(YY[v[1], v[2]]), float(zs[v[0]]))
@@ -249,7 +256,7 @@ def compute_route_configs(env, planner, arm, ik, grasp_q, start_xyz, goal_xyz,
     tau_sweep, tau_needed = None, None
     if merged_u and not merged_g and cfg.gate_tau_sweep:
         tau_sweep, tau_needed = sweep_gate_tau(
-            lambda tau: cm.widest_path_eps_3d(label, edt, q_warm_3d, sa, ga, tau),
+            lambda tau: widest_path_eps_3d(label, edt, q_warm_3d, sa, ga, tau),
             cfg.gate_tau_sweep, cfg.gate_tau)
 
     diag = dict(merged_ungated=bool(merged_u), eps_ungated=float(eps_u), edt=edt,
@@ -286,7 +293,7 @@ def compute_route_configs(env, planner, arm, ik, grasp_q, start_xyz, goal_xyz,
         return RouteResult(None, None, None, False, float(eps_g), reason,
                            seconds=time.perf_counter() - t0, **diag)
 
-    route = cm.reconstruct_widest_path_3d(free_vol, edt, q_warm_3d, sa, ga, eps_g, cfg.gate_tau)
+    route = reconstruct_widest_path_3d(free_vol, edt, q_warm_3d, sa, ga, eps_g, cfg.gate_tau)
     if not route:
         return RouteResult(None, None, None, True, float(eps_g),
                            "seeds merged but route reconstruction returned empty",

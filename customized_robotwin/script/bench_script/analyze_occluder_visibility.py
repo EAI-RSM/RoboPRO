@@ -53,6 +53,19 @@ from curobo.types.state import JointState
 
 from setup_paths import setup_paths
 setup_paths()
+
+from lib.occluder_ring import (
+    draw_ring_config, occluder_ring_xy, parse_count_choices, parse_offset_specs,
+)
+from lib.planning_tuning import *  # noqa: F403
+from lib.run_io import CLEARANCE_RESULTS_DIR, _Tee, _prune_empty_topdirs, effective_out_dir
+from lib.scene_build import DR_CLEAN, build_cfg, dr_measure, get_env_class
+from lib.scene_constants import *
+from lib.visibility import (
+    CAMERA, _resolve_target, analyze, analyze_rollout, run_rollout, save_overlay,
+)
+from lib.ik_grid import _build_ik_solver, grasp_orientation
+import seed_from_clearance as sfc
 # these analysis scripts are bench-only; default the task mode so build_cfg looks
 # under bench_task_config/ (explicit ROBOTWIN_BENCH_TASK still wins)
 os.environ.setdefault("ROBOTWIN_BENCH_TASK", "bench")
@@ -62,79 +75,16 @@ os.chdir(robotwin_root)
 
 from envs.utils import rand_pose, create_actor, create_box, ArmTag
 from envs._GLOBAL_CONFIGS import GRASP_DIRECTION_DIC
-from visualize_task_scene import get_env_class
-# reuse the Phase 1 harness verbatim
-from analyze_natural_visibility import (build_cfg, DR_CLEAN, save_overlay, analyze, _resolve_target,
-                                        CAMERA, run_rollout, analyze_rollout)
-
-
-def effective_out_dir(args):
-    """Resolve this run's output directory. main() has already rewritten
-    args.out_dir to <out-dir>/<type>/<timestamp> for a live run (or left it as the
-    user-supplied folder for --plot-only), so this is now a plain passthrough that
-    every downstream helper (run() + the analysis pass) shares to hit the SAME
-    folder. Shadows the analyze_natural_visibility helper of the same name, which
-    used a `_rollout` sibling-suffix scheme instead."""
-    return Path(args.out_dir)
-
-
-class _Tee:
-    """Fan writes out to several streams at once, so a rollout's stdout/stderr lands
-    in its per-episode log file while STILL showing up live on the console."""
-    def __init__(self, *streams):
-        self.streams = streams
-
-    def write(self, s):
-        # Best-effort per stream: a rollout prints an emoji line ("Video is saved...")
-        # from images_to_video, and if ANY sink (e.g. an ASCII-encoded log file, or a
-        # non-UTF-8 console) can't encode it, a raw st.write would raise mid-rollout --
-        # which previously propagated out of merge_pkl_to_hdf5_video and skipped the
-        # success/fail bucketing entirely. Never let a logging write abort the rollout.
-        for st in self.streams:
-            try:
-                st.write(s)
-            except Exception:
-                try:
-                    st.write(s.encode("ascii", "replace").decode("ascii"))
-                except Exception:
-                    pass
-
-    def flush(self):
-        for st in self.streams:
-            try:
-                st.flush()
-            except Exception:
-                pass
-
-
-def _prune_empty_topdirs(out_dir):
-    """_bucket_rollout_artifacts moves every episode's hdf5/mp4 into success/ or
-    fail/, leaving the top-level data/ and video/ folders (created fresh by the
-    save_data machinery each rollout) empty. Remove them so those two top-layer
-    folders don't sit around empty."""
-    for name in ("data", "video"):
-        d = Path(out_dir) / name
-        try:
-            d.rmdir()          # only succeeds if empty; leaves anything unexpected in place
-        except OSError:
-            pass
 
 # target object: 001_bottle id 9 (8-way grasp ring -> side-reaches around the occluder).
 # Swap TARGET_MODEL/TARGET_ID back to 047_mouse id 0 for the stock top-down mouse.
-TARGET_MODEL = "001_bottle"
-TARGET_ID = 9
 # target spawn: back half of the table (back furniture removed). Capped at y=0.20 so it
 # stays 0.15 m off the back edge (table y in [-0.35, 0.35]); x kept to [-0.15, 0.15] so it
 # stays 0.45 m off each side edge (table x in [-0.6, 0.6]) -> leaves room for the around-
 # the-box side waypoint and keeps target + waypoint inside the arm's reach envelope.
-TARGET_XLIM = (-0.15, 0.15)
-TARGET_YLIM = (0.0, 0.20)
 # Full tabletop extent (see the target-spawn note above). A ring occluder whose CENTRE
 # would fall outside this is simply not spawned (fewer than n bottles, same formation)
 # rather than rejecting the whole seed -- see occluder_ring_xy(... xlim/ylim ...).
-TABLE_XLIM = (-0.6, 0.6)
-TABLE_YLIM = (-0.35, 0.35)
-PAD_XY = (0.0, -0.28)          # destination pad parked at the front, out of the occluder zone
 # Occluder object: 029_olive-oil id 3 -- a tall, skinny, round bottle (raw extents
 # H 0.305 m, footprint 0.080 x 0.080 m, aspect 3.8). Switched from the old 038_milk-box
 # id 2 (H 0.254 m, 0.110 x 0.122 m rectangular footprint, aspect 2.1), which was too fat.
@@ -142,101 +92,14 @@ PAD_XY = (0.0, -0.28)          # destination pad parked at the front, out of the
 # stands either upright unchanged. Olive-oil's round footprint has no yaw dependence -- ideal
 # for the planned circle-of-occluders. To swap back to the milk box: model "038_milk-box",
 # id 2, and bump OCC_HALF_FOOTPRINT/_OCC_HALF back to 0.08/0.06.
-OCCLUDER_MODEL = "029_olive-oil"
-OCCLUDER_ID = 3
-OCCLUDER_COLLISION = f"assets/objects/{OCCLUDER_MODEL}/collision/base{OCCLUDER_ID}.glb"
-OCCLUDER_QPOS = [0.66, 0.66, -0.25, -0.25]   # same upright orientation the stock milk-box used
 
 
-def occluder_ring_xy(cx, cy, radius, n, angle0=0.0, xlim=None, ylim=None):
-    """(x, y) centres of `n` occluders equally spaced IN ANGLE around the target at (cx, cy)
-    -- the formation cuts the circle into n equal 2*pi/n slices. Angle is measured from the
-    FRONT (-y, the robot/camera side) and rotates toward +x, so:
-      * n=1, angle0=0 -> one occluder directly in front (the original single-box layout),
-      * the +x quarter-turn position reproduces the old side_occluder_sign=+1 box.
-
-    `radius` is either a scalar (a true circle, the original behaviour) or a per-occluder
-    sequence of length >= n, in which case occluder k sits at its OWN radius -- the angles
-    stay evenly spaced but the formation is no longer a circle. That is what lets a scene
-    mix near and far occluders instead of presenting one uniform wall.
-
-    If xlim/ylim (each a (lo, hi) pair) are given, any position whose CENTRE falls outside
-    them is DROPPED -- the formation keeps the same equal spacing, just with fewer bottles
-    where it would leave the table, instead of failing the whole scene.
-    Returns [] for n<=0. Deterministic; the caller adds any per-actor yaw jitter."""
-    pts = []
-    n = int(n)
-    scalar = np.isscalar(radius)
-    for k in range(max(0, n)):
-        r = float(radius) if scalar else float(radius[k])
-        theta = angle0 + 2.0 * np.pi * k / n
-        x = cx + r * np.sin(theta)
-        y = cy - r * np.cos(theta)
-        if xlim is not None and not (xlim[0] <= x <= xlim[1]):
-            continue
-        if ylim is not None and not (ylim[0] <= y <= ylim[1]):
-            continue
-        pts.append((x, y))
-    return pts
 
 
-def parse_offset_specs(text):
-    """Parse --offsets into a list of specs. Each comma-separated token is either
-
-      "0.2"        a FIXED ring radius (every occluder at 0.2) -- the original behaviour, or
-      "0.1-0.25"   a RANGE: every occluder independently draws its own radius from
-                   U[0.1, 0.25], so one scene can hold both near and far occluders.
-
-    Returns [(lo, hi, nominal), ...]; lo == hi for a fixed token. `nominal` is the value used
-    to LABEL and group the spec (the midpoint of a range), so --group-by offset still buckets
-    a range into one group instead of scattering every scene into its own."""
-    specs = []
-    for tok in str(text).split(","):
-        tok = tok.strip()
-        if not tok:
-            continue
-        if "-" in tok[1:]:                      # [1:] so a leading minus is not a separator
-            i = tok.index("-", 1)
-            lo, hi = float(tok[:i]), float(tok[i + 1:])
-            if hi < lo:
-                lo, hi = hi, lo
-            specs.append((lo, hi, 0.5 * (lo + hi)))
-        else:
-            v = float(tok)
-            specs.append((v, v, v))
-    if not specs:
-        raise SystemExit("--offsets parsed to nothing")
-    return specs
 
 
-def parse_count_choices(text):
-    """Parse --num-occluders into the list of counts a scene may draw from.
-    "1" -> always 1 (original behaviour); "2,3,4,5" -> one of those, drawn per scene."""
-    vals = [int(t.strip()) for t in str(text).split(",") if t.strip()]
-    if not vals or any(v < 0 for v in vals):
-        raise SystemExit(f"--num-occluders must be one or more non-negative ints, got {text!r}")
-    return vals
 
 
-def draw_ring_config(seed, spec, count_choices, random_rotation):
-    """The occluder formation for one (seed, offset-spec), drawn DETERMINISTICALLY.
-
-    Determinism is the whole point: the formation is decided once and must come out identical
-    in the pad-distance pre-check, the Pass-1 measurement build and the Pass-2 rollout build,
-    or the scene that gets measured is not the scene that gets rolled out. Everything is drawn
-    from one RNG keyed on (seed, spec nominal), matching how the existing occluder coin flip
-    is keyed.
-
-    Returns (angle0, n, radii): ring rotation in radians (0 unless random_rotation), the
-    occluder count drawn from count_choices, and the per-occluder radii list."""
-    lo, hi, nominal = spec
-    rng = np.random.default_rng(int(seed) * 1000 + int(round(nominal * 100)) + 7919)
-    n = int(count_choices[rng.integers(len(count_choices))]) if len(count_choices) > 1 \
-        else int(count_choices[0])
-    angle0 = float(rng.uniform(0.0, 2.0 * np.pi)) if random_rotation else 0.0
-    radii = [float(rng.uniform(lo, hi)) for _ in range(max(0, n))] if hi > lo \
-        else [float(lo)] * max(0, n)
-    return angle0, n, radii
 
 # Two-step (around-the-box) planning: curobo won't reliably route around a tall obstacle
 # between start and goal, so before the grasp (and before the place) we send the gripper
@@ -244,10 +107,6 @@ def draw_ring_config(seed, spec, count_choices, random_rotation):
 # x-offset from the box CENTRE = OCC_HALF_FOOTPRINT + SIDE_WAYPOINT_GAP, i.e. SIDE_WAYPOINT
 # _GAP is the clearance from the box EDGE to the gripper (not from centre). If the waypoint
 # would leave the reachable x-range we flip to the other (table-centre) side. All tunable.
-OCC_HALF_FOOTPRINT = 0.04      # olive-oil base half-diagonal (~0.08 x 0.08 round, yaw-invariant)
-SIDE_WAYPOINT_GAP = 0.24       # clearance from the box EDGE to the waypoint (gripper)
-REACH_X_LIMIT = 0.5
-GRASP_CANDIDATE_LIMIT = 4
 # The pre_beside_box move (right after lift+attach_object+enable_table) was found
 # empirically to fail with MotionGenStatus.INVALID_START_STATE_WORLD_COLLISION in
 # 100% of its failures (5/5 in a 24-seed sweep) -- meaning the STARTING qpos for
@@ -264,7 +123,6 @@ GRASP_CANDIDATE_LIMIT = 4
 # some of the 0.2 regression is plausibly sampling noise (documented CuRobo
 # run-to-run nondeterminism) rather than a true causal effect, but 0.15 is the
 # only value with two consistent, positive data points.
-GRASP_LIFT_HEIGHT = 0.15
 # Minimum fraction of GRASP_LIFT_HEIGHT the TARGET OBJECT itself (not just the
 # gripper) must actually rise for the grasp to be considered real. Confirmed
 # empirically (seeds 11/19/26): a fully missed grasp still reports the lift
@@ -272,7 +130,6 @@ GRASP_LIFT_HEIGHT = 0.15
 # gripper motion) while the object's z stays flat (0.0-0.6% of the commanded
 # rise) -- a wide margin below any plausible "successful but marginal" grasp,
 # so 0.5 has a lot of room without risking false positives on a real grasp.
-GRASP_VERIFY_MIN_RISE_FRACTION = 0.5
 # Max drift (meters) of the object's position, expressed in the gripper's LOCAL
 # frame, from the baseline captured right after attach_object, before a stage
 # is considered to have lost the grasp. Confirmed empirically (seed 27): every
@@ -281,13 +138,11 @@ GRASP_VERIFY_MIN_RISE_FRACTION = 0.5
 # plan, never the held object's actual state. 0.03 gives room for simulation
 # jitter while still catching any real slip/drop, which in every observed case
 # was at least an order of magnitude larger.
-OBJECT_RETENTION_TOLERANCE = 0.03
 # Max rotation drift (radians) of the object's orientation, expressed in the
 # gripper's local frame, from the baseline -- translation alone misses a
 # held object rotating loose without translating past OBJECT_RETENTION_
 # TOLERANCE, leaving CuRobo's attached collision model (which assumes a
 # fixed rigid transform) inconsistent with the physical object. ~11 degrees.
-OBJECT_RETENTION_ROTATION_TOLERANCE = 0.2
 # How close (meters) the held object's actual pose must be to the intended
 # final placement pose (self.des_obj_pose) to treat place_actor's descent as
 # genuinely DONE (skip remaining moves, open the gripper) rather than a loss
@@ -299,12 +154,9 @@ OBJECT_RETENTION_ROTATION_TOLERANCE = 0.2
 # though check_success() would still reject both on at least one axis --
 # stopping the descent there only guaranteed a failure the remaining slices
 # might otherwise have corrected.
-OBJECT_PLACEMENT_XY_TOLERANCE = 0.018
-OBJECT_PLACEMENT_Z_TOLERANCE = 0.03
 # Contact handling uses the task's exact per-axis success threshold. Once the
 # object has settled, a gripper-relative retention check is no longer meaningful;
 # release only when the task's own XY predicate already passes.
-CONTACT_RELEASE_XY_TOLERANCE = 0.02
 # Gripper-relative drift (meters) beyond OBJECT_RETENTION_TOLERANCE that's
 # still treated as ambiguous-possible-contact rather than an outright loss,
 # for place_actor's descent specifically: the object settling onto the pad/
@@ -314,7 +166,6 @@ CONTACT_RELEASE_XY_TOLERANCE = 0.02
 # while genuine catastrophic drops (seeds 20/25/27) showed 30cm-1.4m -- a
 # wide, unambiguous gap. Below this, the descent continues toward the real
 # target instead of failing early; above it, it's an unambiguous loss.
-DESCENT_CONTACT_DRIFT_TOLERANCE = 0.15
 # How close (meters) the held object's world-frame z must be to the intended
 # resting height (self.des_obj_pose[2]) for a DESCENT_CONTACT_DRIFT_TOLERANCE-
 # sized drift to be plausibly explained by contact with the placement surface,
@@ -325,7 +176,6 @@ DESCENT_CONTACT_DRIFT_TOLERANCE = 0.15
 # OBJECT_PLACEMENT_Z_TOLERANCE (which gates a full "already placed" stop)
 # since this only needs to confirm plausible surface contact, not a precise
 # final resting pose.
-DESCENT_CONTACT_HEIGHT_TOLERANCE = 0.06
 # create_grasp_approach_metric's tstep_fraction for place_actor's descent
 # slices specifically -- lower than CuRobo's own default (0.8, appropriate for
 # a single large grasp-approach jump) because these slices are already tiny
@@ -353,7 +203,6 @@ DESCENT_CONTACT_HEIGHT_TOLERANCE = 0.06
 # DEVIATION and friends below) still rejects any candidate at ANY fraction
 # that takes an implausibly circuitous path, so relaxing never re-admits
 # the original 56cm-loop failure mode.
-DESCENT_APPROACH_TSTEP_FRACTIONS = [0.2, 0.4, 0.6, 0.8]
 # Max perpendicular distance (meters) a descent slice's planned Cartesian EE
 # path may stray from the FINITE straight-line SEGMENT between its own start
 # and end pose before being rejected -- a backstop against the pathological-
@@ -365,7 +214,6 @@ DESCENT_APPROACH_TSTEP_FRACTIONS = [0.2, 0.4, 0.6, 0.8]
 # infinite line through it -- an unclamped projection would report near-zero
 # deviation for a trajectory that overshoots straight past the target along
 # the same axis, which is exactly the kind of detour this needs to catch.
-DESCENT_MAX_PATH_DEVIATION = 0.08
 # Max ratio of a descent slice's actual Cartesian path length (sum of
 # consecutive EE waypoint distances) to its straight-line distance --
 # catches a trajectory that stays geometrically close to the line (small
@@ -373,21 +221,18 @@ DESCENT_MAX_PATH_DEVIATION = 0.08
 # than the direct distance requires. A conservative multiple of 1.0 (a
 # perfectly straight path); not tuned against a large empirical sample yet,
 # so treat as provisional pending broader validation.
-DESCENT_MAX_PATH_LENGTH_RATIO = 3.0
 # Max ratio of a descent slice's total joint-space path length (sum of
 # consecutive joint-position deltas) to the direct start->end joint-space
 # distance -- catches joint-space winding that an EE-only Cartesian check
 # can miss entirely (a redundant/near-singular arm can reach nearly the same
 # EE pose through very different, looping joint configurations). Same
 # provisional-pending-validation caveat as DESCENT_MAX_PATH_LENGTH_RATIO.
-DESCENT_MAX_JOINT_TRAVEL_RATIO = 3.0
 # Max excursion (radians) of any SINGLE joint's range (max-min position)
 # across a descent slice's trajectory -- flags one joint spinning through an
 # implausible range for what should be a tiny slice even when the aggregate
 # DESCENT_MAX_JOINT_TRAVEL_RATIO looks acceptable (that ratio can stay small
 # if only one joint winds while the others move normally, since it's an
 # L2-norm aggregate). Same provisional-pending-validation caveat.
-DESCENT_MAX_JOINT_RANGE = 1.0
 # Max absolute joint-space distance (radians, L2 norm across all active
 # joints) between a descent slice's own trajectory start and end -- catches
 # a monotonic (non-winding) move to a DISTANT IK branch that the ratio-only
@@ -398,7 +243,6 @@ DESCENT_MAX_JOINT_RANGE = 1.0
 # passing max_joint_range=1.0 easily). A tiny Cartesian slice should need
 # only a small joint-space move; not tuned against a large empirical sample
 # yet, so treat as provisional pending broader validation.
-DESCENT_MAX_JOINT_ENDPOINT_DISPLACEMENT = 0.5
 # Max absolute joint-space path length (radians) traveled during a descent
 # slice -- an absolute companion to DESCENT_MAX_JOINT_TRAVEL_RATIO (which
 # only bounds the path as a MULTIPLE of the endpoint distance, so it can't
@@ -406,7 +250,6 @@ DESCENT_MAX_JOINT_ENDPOINT_DISPLACEMENT = 0.5
 # DESCENT_MAX_JOINT_ENDPOINT_DISPLACEMENT above). Slightly above that
 # endpoint-displacement cap since path length is always >= endpoint
 # distance. Same provisional-pending-validation caveat.
-DESCENT_MAX_JOINT_PATH_LENGTH = 0.6
 # Local landing-region search (place_actor's final approach): instead of
 # forcing CuRobo to reach one exact final pose -- which kept failing
 # FINETUNE_TRAJOPT_FAIL right at the surface, where the attached object's
@@ -420,23 +263,19 @@ DESCENT_MAX_JOINT_PATH_LENGTH = 0.6
 # into a grid -- matches check_success's own per-axis 2cm tolerance with a
 # safety margin (max offset 1.5cm, comfortably under OBJECT_PLACEMENT_XY_
 # TOLERANCE's 1.8cm).
-LANDING_XY_OFFSETS = [-0.015, -0.010, -0.005, 0.0, 0.005, 0.010, 0.015]
 # Candidate release heights (meters above the target's resting height),
 # tried lowest first -- a lower release means less for physics to settle
 # and stays closest to the nominal target, but a higher one gives CuRobo
 # more collision-margin room to actually plan to when the exact surface
 # height is too tight to solve.
-LANDING_RELEASE_HEIGHTS = [0.01, 0.03, 0.05, 0.08]
 # Max number of IK-feasible candidates (closest-to-nominal-target first) to
 # actually PLAN per release height -- IK checks are cheap, full CuRobo plans
 # aren't, so this bounds cost instead of exhaustively planning every
 # candidate in the grid.
-LANDING_MAX_CANDIDATES_PER_HEIGHT = 12
 # Stop planning further candidates at a given height once this many have
 # been accepted (passed both plan success and the path-safety filter) --
 # picks among a reasonable sample instead of paying for the full budget
 # above every time.
-LANDING_MIN_ACCEPTED_TO_STOP = 3
 # Max XY distance (meters) from the target, and required object retention,
 # for _local_landing_search_and_place to even attempt its search -- its
 # candidate moves are short by design, so if it were ever invoked from
@@ -453,32 +292,25 @@ LANDING_MIN_ACCEPTED_TO_STOP = 3
 # LANDING_SEARCH_MAX_Z_DISTANCE below instead -- a combined 3D check would
 # treat "5cm lateral, no vertical drop left" the same as "no lateral offset,
 # 5cm still to descend", which aren't comparable for this search.
-LANDING_SEARCH_TRIGGER_DISTANCE = float(os.environ.get("LANDING_SEARCH_TRIGGER_DISTANCE", "0.10"))
 # Max vertical (Z) distance (meters) from the target for the same gate --
 # looser than the XY condition since the whole point of this search is
 # picking a release height (LANDING_RELEASE_HEIGHTS, up to 8cm) rather than
 # requiring the arm to already be at the exact final height.
-LANDING_SEARCH_MAX_Z_DISTANCE = float(os.environ.get("LANDING_SEARCH_MAX_Z_DISTANCE", "0.15"))
 # Max number of DIFFERENT contact-point candidates to actually try grasping in
 # play_once when grasp_verify detects a missed grasp, before giving up on the
 # episode entirely. _select_pick_place_candidate already ranks/generates
 # several candidates for the dry-run search -- this reuses that same ranking
 # to pick a genuinely different contact point on retry (via exclude_cp_ids)
 # instead of ending the episode after the first missed grasp.
-GRASP_VERIFY_MAX_CANDIDATES = 3
 # Replay attached-object trajectories more slowly without changing their
 # planned geometric path. A factor of 2 inserts one interpolated control point
 # between each pair and scales commanded velocity accordingly.
-ATTACHED_TRAJECTORY_SLOWDOWN = max(
-    1, int(os.environ.get("ATTACHED_TRAJECTORY_SLOWDOWN", "2")))
 # Slice length (meters) for place_actor's deterministic descent (see
 # _plan_pose_with_descent_slices). place_actor's moves are short, mostly-
 # straight-line final approaches with KNOWN structure (fixed target
 # orientation, held via approach_axis) -- a scalar-error-informed shrink
 # doesn't exploit that the way a fixed-size slice along the straight line to
 # the target does. 0.04 sits in the requested 3-5cm range.
-DESCENT_SLICE_SIZE = 0.04
-SIDE_WAYPOINT_GAPS = (0.20, 0.24, 0.28)
 # Fallback gaps tried ONLY when none of SIDE_WAYPOINT_GAPS's beside_box target verifies
 # reachable (check_ik_batch, no trajopt) -- confirmed empirically (seed 9, right arm,
 # box far from the shoulder in x): a check_ik_batch sweep at fixed y/z showed a clean
@@ -488,7 +320,6 @@ SIDE_WAYPOINT_GAPS = (0.20, 0.24, 0.28)
 # from the box on its own side, which breaks down for boxes positioned far from the
 # shoulder. Only consulted as a fallback (extra search cost) when the preferred, more
 # clearance-safe gaps all fail to verify.
-SIDE_WAYPOINT_GAPS_FALLBACK = (0.16, 0.12, 0.08)
 # Direct-plan retries for the post-attach placement search specifically (seed 8 class):
 # a check_ik_batch/live-replay probe showed the SAME post_grasp_escape/pre_beside_box
 # move -- confirmed independently reachable via pure IK -- failed 180/180 times with
@@ -501,13 +332,10 @@ SIDE_WAYPOINT_GAPS_FALLBACK = (0.16, 0.12, 0.08)
 # direct plan a few times before falling back to bridge waypoints gives that seeding
 # more chances to land on a working solution, at far lower cost than enabling bridges
 # (each retry is 1 extra trajopt call per combo; each bridge is ~local_attempts more).
-PLACEMENT_SEARCH_RETRIES = 3
 # A direct IK-reachability sweep (check_ik_batch diagnostic) showed the waypoint's
 # feasibility roughly DOUBLES at +0.15m above grasp height (64%) vs the +0.0/+0.06m
 # band this used to test alone (29-36%) -- x/gap and going even higher (+0.30, 54%)
 # both matter far less. +0.15 is the empirically-found sweet spot, not a guess.
-SIDE_WAYPOINT_Z_LIFTS = (0.0, 0.06, 0.15)
-PLACE_CLEARANCE_ZS = (1.05, 1.15, 1.25)
 # Fallback clearance heights tried when NONE of PLACE_CLEARANCE_ZS verifies reachable
 # for lift_above_box (mirrors SIDE_WAYPOINT_GAPS_FALLBACK's reasoning for gaps): a
 # check_ik_batch(relax_orientation=True) height sweep at each seed's beside_box x/y
@@ -515,13 +343,11 @@ PLACE_CLEARANCE_ZS = (1.05, 1.15, 1.25)
 # two higher values (1.15, 1.25) are unreachable outright regardless of orientation,
 # and even 1.05 needs orientation relaxed to be reachable for some gaps. These lower
 # values give the search somewhere to fall back to if 1.05 isn't enough either.
-PLACE_CLEARANCE_ZS_FALLBACK = (0.95, 0.90, 0.85)
 # Stages that must plan with a fixed (non-relaxed) orientation even when the rest
 # of the placement chain uses relax_orientation=True: center_over_pad is the last
 # placement subgoal before place_actor's own strict final descent, so it needs to
 # hand off a KNOWN, expected orientation, not whatever CuRobo happened to converge
 # to under a free-orientation goal. See _plan_pose_trajectory_sequence.
-PLACEMENT_STRICT_ORIENTATION_STAGES = ("placement:center_over_pad",)
 # Max iterations for the adaptive waypoint-shrink retry (see
 # _plan_pose_with_shrinking_waypoint), used whenever a direct Cartesian plan
 # fails. 0 preserves pure direct planning. Replaces the previous fixed-offset
@@ -533,12 +359,9 @@ PLACEMENT_STRICT_ORIENTATION_STAGES = ("placement:center_over_pad",)
 # current pose itself), needing fewer attempts than searching fixed offsets
 # blindly. POST_GRASP_ESCAPE_ATTEMPTS is accepted as a backward-compatible
 # alias for runs launched before this became universal.
-LOCAL_WAYPOINT_ATTEMPTS = int(os.environ.get(
-    "LOCAL_WAYPOINT_ATTEMPTS", os.environ.get("POST_GRASP_ESCAPE_ATTEMPTS", "5")))
 # Give up shrinking once the remaining distance from the current pose to the
 # (possibly already-shrunk) target drops below this -- not worth chasing an
 # even-tinier hop that makes no real progress toward the actual destination.
-WAYPOINT_SHRINK_MIN_DISTANCE = float(os.environ.get("WAYPOINT_SHRINK_MIN_DISTANCE", "0.05"))
 # Both a second ("top_down") waypoint orientation and a +/-0.05m y-offset search were
 # tried here and measured empirically to fail at the SAME rate as the baseline (both
 # orientations: ~equal IK_FAIL proportion; y-offset: no change in failure proportion
@@ -546,34 +369,18 @@ WAYPOINT_SHRINK_MIN_DISTANCE = float(os.environ.get("WAYPOINT_SHRINK_MIN_DISTANC
 # at the position itself). Collapsed back to single values so this search space doesn't
 # multiply the cost of the (expensive, real CuRobo batch-plan) grasp-pose check below
 # for no measured benefit. Re-widen only with new evidence, not speculatively.
-WAYPOINT_ORIENTATIONS = ("grasp_aligned",)
-WAYPOINT_Y_OFFSETS = (0.0,)
 # Ordered chain stages (see _plan_candidate) -- used to rank how far a candidate got
 # before failing, so the fallback (used when NO candidate fully plans) can pick the
 # one that progressed furthest instead of whichever was generated first. Confirmed via
 # a check_ik_batch reach-envelope probe: a fully-reachable contact point (both pre_grasp
 # and grasp) can exist among the ones tried, but the old "first-generated" fallback
 # picked an unreachable one instead because it happened to rank #1 geometrically.
-STAGE_ORDER = ["waypoint", "pre_grasp", "grasp", "lift", "post_grasp_escape",
-               "pre_beside_box", "beside_box", "pre_lift_above_box",
-               "lift_above_box", "over_box_to_pad_y", "center_over_pad"]
 
 # Reject a (seed, offset) build if the occluder would sit within OCC_PAD_CLEARANCE
 # (edge-to-edge) of the destination pad, so the occluder can never block/overlap the
 # target's final placement. Center-to-center threshold = pad_half + occluder_half + gap.
-OCC_PAD_CLEARANCE = 0.05
-_PAD_HALF = 0.06               # pad half-size (create_box half_size xy)
-_OCC_HALF = 0.04               # olive-oil base half-extent (~0.08 x 0.08 round footprint)
-OCC_PAD_MIN_DIST = _PAD_HALF + _OCC_HALF + OCC_PAD_CLEARANCE
 
 
-def dr_measure(clutter_density):
-    """Domain-randomization for the measurement build: optional default (non-curated)
-    table clutter at the given density. Density 0 -> clean (occluder only)."""
-    if clutter_density and clutter_density > 0:
-        return {"cluttered_table": True, "obstacle_density": int(clutter_density),
-                "clean_background_rate": 0}
-    return dict(DR_CLEAN)
 
 
 def make_occluder_task():
@@ -2546,10 +2353,8 @@ def make_occluder_task():
             ik = None
             try:
                 import numpy as _np
-                import seed_from_clearance as sfc
-                import clearance_metric_3d as cm
                 planner = self.robot.left_planner if tag == "left" else self.robot.right_planner
-                grasp_q, grasp_pose = cm.grasp_orientation(self, tag, topdown=False)
+                grasp_q, grasp_pose = grasp_orientation(self, tag, topdown=False)
                 if grasp_pose is None:
                     print(f"[seed] arm={tag}: no grasp pose -> no seed")
                     self._note_seed_stat(tag, False, "no_grasp_pose", 0.0, None, None)
@@ -2563,7 +2368,7 @@ def make_occluder_task():
                           else self.robot.right_entity.get_qpos())
                 idx = [planner.all_joints.index(n) for n in planner.active_joints_name]
                 start_q = _np.asarray([full_q[i] for i in idx], dtype=float)
-                ik = cm._build_ik_solver(planner)
+                ik = _build_ik_solver(planner)
                 H = int(planner.motion_gen.trajopt_solver.action_horizon)
                 # Obstacle set the clearance field measures against. Default "all" = every mesh
                 # in env.collision_list except the target and pad, so table CLUTTER counts and
@@ -2616,7 +2421,7 @@ def make_occluder_task():
                                 sub = _P(out_root) / "seed_route_visuals" / epname
                             else:
                                 base = os.environ.get("SEED_VISUALS_DIR") or str(
-                                    _P(cm.RESULTS_DIR).parent / "seed_visuals")
+                                    _P(CLEARANCE_RESULTS_DIR).parent / "seed_visuals")
                                 sub = _P(base) / f"{_now.now().strftime('%Y%m%d-%H%M%S')}_{tag}"
                             sfc.save_route_visuals(
                                 res, sub, seed_label=(str(ep) if ep is not None
@@ -2720,8 +2525,6 @@ def make_occluder_task():
             seed = None
             ik = None
             try:
-                import seed_from_clearance as sfc
-                import clearance_metric_3d as cm
                 import carry_object_spheres as cos
                 planner = self.robot.left_planner if tag == "left" else self.robot.right_planner
 
@@ -2747,7 +2550,7 @@ def make_occluder_task():
                 idx = [planner.all_joints.index(n) for n in planner.active_joints_name]
                 start_q = _np.asarray([full_q[i] for i in idx], dtype=float)
 
-                ik = cm._build_ik_solver(planner)
+                ik = _build_ik_solver(planner)
                 cos.apply_attached_spheres(ik, spheres)
                 H = int(planner.motion_gen.trajopt_solver.action_horizon)
                 # Same knobs as the approach seed so the two legs are measured on one grid

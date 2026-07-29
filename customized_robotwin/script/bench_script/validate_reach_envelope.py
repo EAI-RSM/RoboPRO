@@ -29,11 +29,11 @@ from pathlib import Path
 
 import numpy as np
 
-import reachability_map as rm  # noqa: F401  (import side effects: torch + env stack + Agg backend)
-from clearance_metric_3d import (
-    RESULTS_DIR, Timings, build_grid, select_arm, label_volume, load_reach_envelope,
-    BEYOND, make_occluder_task, build_cfg, DR_CLEAN,
-)
+from clearance_metric_3d import make_occluder_task, select_arm
+from lib.ik_grid import build_grid
+from lib.labeling import BEYOND, label_volume, load_reach_envelope
+from lib.run_io import CLEARANCE_RESULTS_DIR as RESULTS_DIR, Timings
+from lib.scene_build import DR_CLEAN, build_cfg
 
 VAL_DIR = RESULTS_DIR.parent / "reach_envelope_validation"
 

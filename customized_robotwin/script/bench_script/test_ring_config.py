@@ -14,7 +14,7 @@ import sys
 
 import numpy as np
 
-import analyze_occluder_visibility as A
+import lib.occluder_ring as A
 
 
 def test_parse_offset_specs():
