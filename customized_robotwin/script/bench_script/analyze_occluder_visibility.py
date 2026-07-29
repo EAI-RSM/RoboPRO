@@ -1175,9 +1175,6 @@ def make_occluder_task():
                 print(f"[grasp_id] arm={arm_tag} candidates={ids}")
             return ids
 
-        def _pick_side_grasp_id(self, actor, arm_tag):
-            ranked = self._rank_side_grasp_ids(actor, arm_tag, limit=1)
-            return ranked[0] if ranked else None
 
         def _geometric_grasp_pose(self, actor, cp_id, pre_dis=0.0):
             """Grasp pose for a contact point, computed geometrically (same math as
@@ -1878,51 +1875,6 @@ def make_occluder_task():
                 print(f"[landing-search] failed: no candidate at any height "
                       f"{LANDING_RELEASE_HEIGHTS} planned and passed the filter")
 
-        def _execute_actions_via_plan_and_replay(self, arm_tag, actions, retries=1):
-            """Execute each 'move' Action via deterministic descent slicing (see
-            _plan_pose_with_descent_slices), which plans AND replays incrementally
-            and checks grasp retention after every slice; non-move actions
-            (gripper open/close) execute normally through self.move.
-
-            retries: place_actor's failures are 100% MotionGenStatus.FINETUNE_TRAJOPT_FAIL
-            (confirmed empirically) -- a marginal-feasibility trajopt-difficulty problem,
-            not a reachability one. We've directly observed the SAME setup succeed on
-            one run and fail on another (CuRobo's trajopt has internal randomized
-            seeding), so retrying a failed plan_func call with fresh internal seeding
-            has a real chance of finding a solution the first attempt missed. Each
-            retry re-attempts ONLY the failed slice, not the whole chain."""
-            if not self.plan_success:
-                return
-            start_pose = list(self.get_arm_pose(arm_tag))
-            move_idx = 0
-            already_placed = False
-            for a in actions:
-                if a.action != "move":
-                    self.move((arm_tag, [a]))
-                    if not self.plan_success:
-                        return
-                    continue
-                if already_placed:
-                    # A previous move already reached a placement that would
-                    # pass check_success (placed=True) -- skip any remaining
-                    # descent moves (continuing could only push an already-good
-                    # placement out of tolerance or into the surface) but still
-                    # fall through to whatever non-move actions (gripper open)
-                    # come after this one.
-                    continue
-                move_idx += 1
-                qpos = self.robot.left_entity.get_qpos() if str(arm_tag) == "left" else self.robot.right_entity.get_qpos()
-                ok, fail_reason, _, placed = self._plan_pose_with_descent_slices(
-                    arm_tag, a.target_pose, np.array(qpos, dtype=np.float64, copy=True),
-                    f"place_actor:move{move_idx}", start_pose=start_pose, retries=retries,
-                    constraint_pose=a.args.get("constraint_pose"),
-                    approach_axis=a.args.get("approach_axis"))
-                if not ok:
-                    self.plan_success = False
-                    self._last_fail_reason = fail_reason
-                    return
-                start_pose = list(self.get_arm_pose(arm_tag))
-                already_placed = placed
 
         def _plan_and_replay_pose(self, arm_tag, pose, seed_traj=None, stage_label="pose"):
             """Plan a single pose from the CURRENT live qpos and immediately replay
