@@ -195,12 +195,17 @@ def _finish_cmd_video(proc):
 
 def collect_rollouts(TASK_ENV, args, model, usr_args, collect_num, instruction_type):
     run_dir = Path(args["save_path"])            # already <save_path>/<task>/<config>
+    if os.environ.get("COLLECT_RUN_DIR"):
+        run_dir = Path(os.environ["COLLECT_RUN_DIR"])
+        args["save_path"] = os.environ["COLLECT_RUN_DIR"]  # env writes .cache/video under save_path — must match run_dir
     (run_dir / "data").mkdir(parents=True, exist_ok=True)
     (run_dir / "_traj_data").mkdir(parents=True, exist_ok=True)
 
     policy_name = args["policy_name"]
     eval_func = eval_function_decorator(policy_name, "eval")
     fixed_seed = bool(os.environ.get("COLLECT_FIXED_SEED"))
+    _SAME_SEED = bool(os.environ.get("COLLECT_SAME_SEED"))  # draws mode: N stochastic rollouts of one scene
+    _SEED_LIST = [int(x) for x in os.environ.get("COLLECT_SEED_LIST","").split()] or None  # explicit eval seeds
     noise_var = float(os.environ.get("ACTION_NOISE_VAR", usr_args.get("action_noise_var", 0.0)))
     noise_std = float(np.sqrt(noise_var)) if noise_var > 0 else 0.0
 
@@ -217,6 +222,8 @@ def collect_rollouts(TASK_ENV, args, model, usr_args, collect_num, instruction_t
 
     n_succ = n_fail = 0
     while ep_idx < collect_num:
+        if _SEED_LIST:
+            seed = _SEED_LIST[ep_idx % len(_SEED_LIST)]
         # ── expert solvability check (same role as the collector's seed search) ─
         if not fixed_seed:
             try:
@@ -232,11 +239,11 @@ def collect_rollouts(TASK_ENV, args, model, usr_args, collect_num, instruction_t
                 intended_names = set(getattr(TASK_ENV, "_intended_contact_names", set()))
                 TASK_ENV.close_env()
             except UnStableError:
-                TASK_ENV.close_env(); seed += 1; continue
+                TASK_ENV.close_env(); seed = seed if _SAME_SEED else seed + 1; continue
             except Exception:
-                traceback.print_exc(); TASK_ENV.close_env(); seed += 1; continue
+                traceback.print_exc(); TASK_ENV.close_env(); seed = seed if _SAME_SEED else seed + 1; continue
             if not solvable:
-                seed += 1
+                seed = seed if _SAME_SEED else seed + 1
                 continue
         else:
             episode_info = {"info": {}}
@@ -322,6 +329,8 @@ def collect_rollouts(TASK_ENV, args, model, usr_args, collect_num, instruction_t
                         TASK_ENV.step_lim = yaml.safe_load(f).get(args["task_name"], 1000)
                 except Exception:
                     TASK_ENV.step_lim = 1000
+            if os.environ.get("COLLECT_STEP_LIM"):
+                TASK_ENV.step_lim = int(os.environ["COLLECT_STEP_LIM"])
 
             model.reset_model()
             while TASK_ENV.take_action_cnt < TASK_ENV.step_lim and not TASK_ENV.eval_success:
@@ -356,7 +365,7 @@ def collect_rollouts(TASK_ENV, args, model, usr_args, collect_num, instruction_t
 
             if not has_frames:
                 print(f"\033[93m[rollout] episode {ep_idx}: no frames — retry next seed\033[0m")
-                seed += 1
+                seed = seed if _SAME_SEED else seed + 1
                 continue
 
             hdf5_path = str(run_dir / "data" / f"episode{ep_idx}.hdf5")
@@ -392,10 +401,10 @@ def collect_rollouts(TASK_ENV, args, model, usr_args, collect_num, instruction_t
             print(f"\033[92m[rollout] episode {ep_idx} saved (success={success})\033[0m  "
                   f"SR {n_succ}/{ep_idx + 1}")
             ep_idx += 1
-            seed += 1
+            seed = seed if _SAME_SEED else seed + 1
         except UnStableError:
             _finish_cmd_video(locals().get('_cmd_video'))
-            TASK_ENV.close_env(); seed += 1
+            TASK_ENV.close_env(); seed = seed if _SAME_SEED else seed + 1
         except (BrokenPipeError, ConnectionError) as e:
             # dead policy server — retrying seeds is pointless; abort loudly
             print(f"\033[91m[rollout] model server connection lost: {e} — aborting\033[0m")
@@ -414,7 +423,7 @@ def collect_rollouts(TASK_ENV, args, model, usr_args, collect_num, instruction_t
                     fn()
                 except Exception:
                     pass
-            seed += 1
+            seed = seed if _SAME_SEED else seed + 1
 
     # end-of-run language instructions, same as the CuRobo collector
     os.system(f"cd description && bash gen_episode_instructions.sh "
