@@ -14,6 +14,7 @@ from curobo.types.state import JointState
 
 from envs.utils import ArmTag
 from lib.ik_grid import _build_ik_solver, grasp_orientation
+from lib.metric_config import SeedMetricConfig
 from lib.planning_tuning import *  # noqa: F403
 from lib.run_io import CLEARANCE_RESULTS_DIR
 from lib.scene_constants import *  # noqa: F403
@@ -120,21 +121,7 @@ class SeedingMixin:
             # ~4x cheaper (x,y both halve) and the seed is only an INITIALIZATION that
             # trajopt refines, so it does not need the tool's full fidelity. The cost is
             # a coarser eps*, whose half-voxel optimism grows to res/2 = 10 mm.
-            cfg = sfc.SeedMetricConfig(
-                obstacles=os.environ.get("SEED_OBSTACLES", "all").strip().lower(),
-                res=float(os.environ.get("SEED_RES", "0.02")),
-                zres=float(os.environ.get("SEED_ZRES", "0.03")),
-                zmax=float(os.environ.get("SEED_ZMAX", "1.23")),
-                chunk=int(os.environ.get("SEED_CHUNK", "256")),
-                # Joint-continuity gate. Exposed because the build's own tau sweep
-                # reports the smallest tau that would have connected a route it had
-                # to reject, and that number is only useful if it can be set back in.
-                # Raising it admits larger joint steps between adjacent voxels: too
-                # low and a smooth stretch reads as a branch seam (what coarse
-                # SEED_RES causes); too high and the route may hop IK branches, which
-                # makes the seed a worse initialization but never an unsafe one --
-                # trajopt still has to produce the trajectory it executes.
-                gate_tau=float(os.environ.get("SEED_GATE_TAU", "0.35")))
+            cfg = SeedMetricConfig.from_env()
             seed, res = sfc.build_seed(self, planner, tag, ik, grasp_q, start_q, None,
                                        start_xyz, goal_xyz, cfg=cfg, action_horizon=H)
             if seed is None:
@@ -299,21 +286,7 @@ class SeedingMixin:
             H = int(planner.motion_gen.trajopt_solver.action_horizon)
             # Same knobs as the approach seed so the two legs are measured on one grid
             # geometry; only the labelling differs (attached, carry orientation).
-            cfg = sfc.SeedMetricConfig(
-                obstacles=os.environ.get("SEED_OBSTACLES", "all").strip().lower(),
-                res=float(os.environ.get("SEED_RES", "0.02")),
-                zres=float(os.environ.get("SEED_ZRES", "0.03")),
-                zmax=float(os.environ.get("SEED_ZMAX", "1.23")),
-                chunk=int(os.environ.get("SEED_CHUNK", "256")),
-                # Joint-continuity gate. Exposed because the build's own tau sweep
-                # reports the smallest tau that would have connected a route it had
-                # to reject, and that number is only useful if it can be set back in.
-                # Raising it admits larger joint steps between adjacent voxels: too
-                # low and a smooth stretch reads as a branch seam (what coarse
-                # SEED_RES causes); too high and the route may hop IK branches, which
-                # makes the seed a worse initialization but never an unsafe one --
-                # trajopt still has to produce the trajectory it executes.
-                gate_tau=float(os.environ.get("SEED_GATE_TAU", "0.35")))
+            cfg = SeedMetricConfig.from_env()
             seed, res = sfc.build_seed(self, planner, tag, ik, carry_q, start_q, None,
                                        start_xyz, goal_xyz, cfg=cfg, action_horizon=H)
             if seed is None:

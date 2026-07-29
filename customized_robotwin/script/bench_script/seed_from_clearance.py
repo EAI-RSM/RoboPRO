@@ -31,6 +31,7 @@ import numpy as np
 from lib.continuity import warm_start_branches_3d
 from lib.ik_grid import _solve_grid_q_multi, build_grid
 from lib.labeling import FREE, label_volume
+from lib.metric_config import SeedMetricConfig
 from lib.obstacles import obstacle_centers, occluder_clearance_3d, occluder_footprints_3d
 from lib.scene_constants import OCC_HALF_FOOTPRINT
 from lib.widest_path import (
@@ -40,50 +41,6 @@ from lib.widest_path import (
 # clearance_metric_3d is imported LAZILY inside the scene-coupled functions (2a): it pulls in
 # reachability_map -> torch + the env stack. The pure resampler (2b, resample_route_to_seed) must NOT
 # require any of that, so it stays CPU-unit-testable via `python seed_from_clearance.py --selftest`.
-
-
-@dataclass
-class SeedMetricConfig:
-    """Metric knobs for the seed route. Defaults mirror clearance_metric_3d.py's argparse so the seed
-    route matches the tool's eps* geometry. Field names match what build_grid/label_volume read, so an
-    instance can be passed straight through as the metric's `args`-like object."""
-    # grid bounds (build_grid reads these by name)
-    xmin: float = -0.6
-    xmax: float = 0.6
-    ymin: float = -0.35
-    ymax: float = 0.35
-    res: float = 0.01
-    zmin: float = 0.78           # ~grasp height (table ~0.74)
-    # Ceiling of the climb-over grid. 1.23 leaves headroom over the olive-oil top while cutting
-    # ~30% of the z-slices vs the old 1.4. It must stay ABOVE the tallest obstacle: a route that
-    # needs to pass over something higher than zmax cannot connect, and shows up as a build miss
-    # rather than as a long way round.
-    zmax: float = 1.23
-    zres: float = 0.03
-    # metric knobs
-    gate_tau: float = 0.35       # rad; joint-continuity edge gate (the mandatory 2.5D gate)
-    # Ladder of LOOSER taus tried when gate_tau itself fails to connect the two seeds but the
-    # UNGATED path does -- i.e. the route exists geometrically and only the gate cut it. merged
-    # is monotone non-decreasing in tau (a larger tau admits strictly more edges), so the scan
-    # runs ascending and stops at the first value that connects: the answer is "the smallest tau
-    # that would have worked", not a guess. Costs nothing but a few extra widest-path runs over
-    # volumes already in memory -- no IK, no rebuild, which is the whole point of keeping label/
-    # edt/q_warm_3d on the result. Set () to disable.
-    gate_tau_sweep: tuple = (0.5, 0.7, 1.0, 1.5, 2.0)
-    seed_snap: float = 0.10      # m; max snap of an endpoint to the nearest FREE voxel
-    warm_seeds: int = 8          # multi-branch candidates per voxel (return_seeds)
-    ik_seeds: int = 30           # IK seeds per solve
-    # IK batch size. This is the knob that bounds PEAK GPU memory during the grid solve --
-    # lower it (128 / 64) if a scene still OOMs after the solver-release fix, since it caps
-    # the allocation without coarsening the grid or losing any fidelity.
-    chunk: int = 256
-    occ_shape: str = "mesh"      # true tapering collision mesh (vs "extruded")
-    # Which actors the clearance field measures against. "all" = every mesh in
-    # env.collision_list except the target and pad, so table CLUTTER is an obstacle too and the
-    # seed routes around it -- required for the seed to do anything on a scene with no occluder.
-    # "occluders" restores the curated-ring-only behaviour. See clearance_metric_3d.--obstacles.
-    obstacles: str = "all"
-    free_only: bool = False      # keep the OBSTACLE/BEYOND split off the FREE labels
 
 
 @dataclass

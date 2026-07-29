@@ -61,6 +61,7 @@ from lib.labeling import (
     BEYOND, FREE, LABEL_NAMES, OBSTACLE, geometric_envelope, label_volume,
     load_reach_envelope,
 )
+from lib.metric_config import SeedMetricConfig
 from lib.obstacles import (
     _load_collision_mesh, obstacle_centers, occluder_clearance,
     occluder_clearance_3d, occluder_footprint_polys, occluder_footprints_3d,
@@ -422,23 +423,23 @@ def main():
     ap.add_argument("--arm", choices=["left", "right", "auto"], default="auto",
                     help="grasping arm to compute the metric for; 'auto' probes both arms' grasp "
                          "reachability and picks a reachable one (nearest arm-base breaks ties)")
-    ap.add_argument("--zmin", type=float, default=0.78, help="stack floor (m); ~grasp height (table ~0.74)")
-    ap.add_argument("--zmax", type=float, default=1.4, help="stack ceiling (m); above the occluder top")
-    ap.add_argument("--zres", type=float, default=0.03, help="vertical slice spacing (m); K = (zmax-zmin)/zres")
+    ap.add_argument("--zmin", type=float, default=None, help="stack floor (m); ~grasp height (table ~0.74)")
+    ap.add_argument("--zmax", type=float, default=None, help="stack ceiling (m); above the occluder top")
+    ap.add_argument("--zres", type=float, default=None, help="vertical slice spacing (m); K = (zmax-zmin)/zres")
     ap.add_argument("--topdown", action="store_true", help="use a top-down quat instead of the side grasp")
-    ap.add_argument("--xmin", type=float, default=-0.6)
-    ap.add_argument("--xmax", type=float, default=0.6)
-    ap.add_argument("--ymin", type=float, default=-0.35)
-    ap.add_argument("--ymax", type=float, default=0.35)
-    ap.add_argument("--res", type=float, default=0.01, help="grid resolution (m)")
-    ap.add_argument("--occ-shape", choices=["mesh", "extruded"], default="mesh",
+    ap.add_argument("--xmin", type=float, default=None)
+    ap.add_argument("--xmax", type=float, default=None)
+    ap.add_argument("--ymin", type=float, default=None)
+    ap.add_argument("--ymax", type=float, default=None)
+    ap.add_argument("--res", type=float, default=None, help="grid resolution (m)")
+    ap.add_argument("--occ-shape", choices=["mesh", "extruded"], default=None,
                     help="geometry the occluder-clearance field (and the figures) use. 'mesh' re-cuts "
                          "the TRUE posed collision mesh at every z, so the bottle tapers and the neck "
                          "is thin -- faithful to what curobo collides against. 'extruded' is the older "
                          "solid: the widest footprint held constant to the cap, which invents up to "
                          "~4cm of phantom obstacle around the neck. CHANGING THIS CHANGES eps*; pass "
                          "'extruded' to reproduce pre-2026-07-24 numbers.")
-    ap.add_argument("--obstacles", choices=["all", "occluders"], default="all",
+    ap.add_argument("--obstacles", choices=["all", "occluders"], default=None,
                     help="which actors the clearance field measures against. 'all' = every mesh in "
                          "env.collision_list (the registry curobo's update_world uses) except the "
                          "target and the pad, so procedural table CLUTTER counts as an obstacle "
@@ -447,11 +448,11 @@ def main():
                          "pre-2026-07-27 behaviour. CHANGING THIS CHANGES eps* AND WHAT IT MEANS: "
                          "under 'all' eps* is clearance to the nearest scene obstacle, not to the "
                          "occluder, so values are not comparable across the two.")
-    ap.add_argument("--gate-tau", type=float, default=0.35,
+    ap.add_argument("--gate-tau", type=float, default=None,
                     help="joint-space gate (rad): union adjacent FREE voxels only if the max per-joint "
                          "warm-config jump is <= tau. Set from the phase-0/2 histogram gap (~0.2-0.35). "
                          "Only active with --warm-start; without it the DSU runs ungated.")
-    ap.add_argument("--seed-snap", type=float, default=0.10,
+    ap.add_argument("--seed-snap", type=float, default=None,
                     help="max distance to snap a DSU seed (grasp/pad) to the nearest FREE cell (m)")
     ap.add_argument("--boxed-in-radius", type=float, default=0.05,
                     help="bottleneck within this distance of the target counts as 'boxed-in' (m)")
@@ -462,12 +463,12 @@ def main():
                     help="Phase-0 test: also compute a continuity-propagated branch field (multi-seed "
                          "IK + BFS nearest-branch) and compare its joint-jump distribution to the raw "
                          "best-cost field. Tail collapse => branch-hopping noise; survives => real seams")
-    ap.add_argument("--warm-seeds", type=int, default=8,
+    ap.add_argument("--warm-seeds", type=int, default=None,
                     help="return_seeds K for the multi-branch solve (candidate branches offered per cell)")
-    ap.add_argument("--ik-seeds", type=int, default=30,
+    ap.add_argument("--ik-seeds", type=int, default=None,
                     help="curobo num_seeds per pose (Tier-1 speedup; default 100 is overkill). Lower = "
                          "faster but may miss a few hard-but-reachable poses; raise (~60) for a final run.")
-    ap.add_argument("--free-only", action="store_true",
+    ap.add_argument("--free-only", action="store_true", default=None,
                     help="skip the collision-OFF sweep (Tier-4 speedup): ~halves label_volume IK. Loses "
                          "only the OBSTACLE/BEYOND split in the figures; the metric is unaffected. Every "
                          "run reports the projected --free-only time whether or not this is set.")
@@ -482,11 +483,15 @@ def main():
                          "run's grid) or 'sphere' (Tier 1, the grid-independent max-reach ball).")
     ap.add_argument("--reach-cache-dir", default=str(RESULTS_DIR / "_reach_cache"),
                     help="where reach_envelope.py stored the per-arm envelope artifact (stable across runs)")
-    ap.add_argument("--chunk", type=int, default=256,
+    ap.add_argument("--chunk", type=int, default=None,
                     help="IK poses per batch; lower if you hit CUDA OOM (planners already use ~9GB)")
     ap.add_argument("--out-dir", default=str(RESULTS_DIR),
                     help="results location; each run lands in its own <out-dir>/<timestamp>/ subfolder")
-    run(ap.parse_args())
+    args = ap.parse_args()
+    metric_config = SeedMetricConfig.from_args(args)
+    for field, value in vars(metric_config).items():
+        setattr(args, field, value)
+    run(args)
 
 
 if __name__ == "__main__":
