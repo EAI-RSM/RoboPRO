@@ -60,6 +60,20 @@ context (torch + jax co-resident) and it spun 169k identical errors forever.
 **`GPU_SPEC` MUST be `0:0`** (single 16 GB card). The VLA occluder rollout driver must bypass
 `play_once`; do not repair the expert gate as part of that validation path.
 
+**No-expert occluder driver added 2026-07-30.** `script/bench_script/vla_rollout.py` drives pi05
+directly, writes timestamped `records.jsonl` / per-episode logs / success-fail videos /
+`timings.json`, and continues after an episode exception. `policy/pi05/vla_occluder_rollout.sh`
+starts the JAX server and client on `GPU_SPEC=0:0`. The policy cfg opts out of constructing the two
+unused CuRobo planners via `build_planner=False`; every existing config leaves the default on.
+`XLA_PYTHON_CLIENT_MEM_FRACTION=0.45` is **too small** (checkpoint restore OOM allocating 2.25 GiB);
+**0.55 loads and returns finite `[50,14]`**, and is the launcher setting.
+
+Two validation-video gotchas are intentional/minimal: the custom occluder task's target is
+`001_bottle` while the required `put_mouse_on_pad` instruction bank says "mouse" (a semantic OOD
+mismatch), and `Bench_base_task.take_action` records the first available demo/countertop/head
+camera, so office videos use `demo_camera` even though pi05 observes `countertop_camera`. Do not
+silently "fix" either while validating basic end-to-end execution.
+
 **How the custom metric connects.** The occluder/clearance work is OFFLINE scene analysis with no
 policy in the loop, so: using clearance/visibility as a **stratifier** of VLA success is trivial
 (run the VLA over seeds, join each to its precomputed eps*/bucket, plot success-vs-bucket — no
