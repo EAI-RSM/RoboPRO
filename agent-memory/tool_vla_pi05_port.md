@@ -68,6 +68,13 @@ unused CuRobo planners via `build_planner=False`; every existing config leaves t
 `XLA_PYTHON_CLIENT_MEM_FRACTION=0.45` is **too small** (checkpoint restore OOM allocating 2.25 GiB);
 **0.55 loads and returns finite `[50,14]`**, and is the launcher setting.
 
+The first user-run SAPIEN smoke reached the loaded model server but every scene failed during
+initial gripper opening: `together_open_gripper` calls `Robot.plan_grippers`, even though that
+"planner" method is only a 200-step `np.linspace`. Planner-free mode must retain that interpolation
+locally; otherwise `left_planner=None` raises before actors/cameras/policy execution. Fixed in
+`e4a2624`. The same fix makes non-`UnStableError` scene-build exceptions fatal after one attempt,
+instead of cycling through the 70-seed instability allowance.
+
 Two validation-video gotchas are intentional/minimal: the custom occluder task's target is
 `001_bottle` while the required `put_mouse_on_pad` instruction bank says "mouse" (a semantic OOD
 mismatch), and `Bench_base_task.take_action` records the first available demo/countertop/head
