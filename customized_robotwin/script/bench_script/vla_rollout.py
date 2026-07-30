@@ -38,6 +38,7 @@ from lib.run_io import Timings, _Tee, _prune_empty_topdirs
 from lib.scene_build import build_cfg, dr_measure
 from lib.scene_constants import OCC_PAD_MIN_DIST, PAD_XY, TABLE_XLIM, TABLE_YLIM
 from task.occluder_task import make_occluder_task
+from envs.utils.create_actor import UnStableError
 
 robotwin_root = Path(os.environ["ROBOTWIN_ROOT"])
 policy_root = robotwin_root / "policy"
@@ -260,11 +261,17 @@ def run(args: argparse.Namespace) -> None:
                                         )
                                         env.setup_demo(**cfg)
                                     setup_ok = True
-                                except Exception as exc:
+                                except UnStableError as exc:
                                     print(
-                                        f"[seed {seed}] build failed/unstable "
+                                        f"[seed {seed}] scene unstable "
                                         f"({type(exc).__name__}: {exc}); drawing another seed"
                                     )
+                                except Exception as exc:
+                                    print(
+                                        f"[seed {seed}] fatal scene-build error "
+                                        f"({type(exc).__name__}: {exc})"
+                                    )
+                                    raise
 
                                 if setup_ok and show:
                                     pad_distance = _pad_distance(env, radii, count, angle0)

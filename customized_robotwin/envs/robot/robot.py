@@ -368,6 +368,8 @@ class Robot:
         return sapien.Pose(gripper_pose_pos, gripper_pose_quat)
 
     def left_plan_grippers(self, now_val, target_val):
+        if not self.build_planner:
+            return self._linear_gripper_plan(now_val, target_val)
         if self.communication_flag:
             self.left_conn.send({"cmd": "plan_grippers", "now_val": now_val, "target_val": target_val})
             return self.left_conn.recv()
@@ -375,11 +377,23 @@ class Robot:
             return self.left_planner.plan_grippers(now_val, target_val)
 
     def right_plan_grippers(self, now_val, target_val):
+        if not self.build_planner:
+            return self._linear_gripper_plan(now_val, target_val)
         if self.communication_flag:
             self.right_conn.send({"cmd": "plan_grippers", "now_val": now_val, "target_val": target_val})
             return self.right_conn.recv()
         else:
             return self.right_planner.plan_grippers(now_val, target_val)
+
+    @staticmethod
+    def _linear_gripper_plan(now_val, target_val):
+        """Planner-free equivalent of CuroboPlanner.plan_grippers()."""
+        num_step = 200
+        return {
+            "num_step": num_step,
+            "per_step": (target_val - now_val) / num_step,
+            "result": np.linspace(now_val, target_val, num_step),
+        }
 
     def left_plan_multi_path(
         self,
