@@ -73,6 +73,9 @@ benchmark/collision_test/
 benchmark/bench_script/collision_test/
 presentation_material/
 
+# Local experiment workspaces. Reproducible source may be explicitly tracked.
+experiments/
+
 tmp/
 usecase_roadmap.tex
 related_works.tex

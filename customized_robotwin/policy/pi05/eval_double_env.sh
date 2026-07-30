@@ -27,7 +27,19 @@ fi
 echo -e "\033[33mserver gpu: ${server_gpu}, client gpu: ${client_gpu}\033[0m"
 export CUDA_VISIBLE_DEVICES=${client_gpu}
 
-cd ../..  # → customized_robotwin/
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROBOTWIN_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
+cd "${ROBOTWIN_ROOT}"
+
+if [[ -z "${CLIENT_PYTHON:-}" ]]; then
+    CLIENT_PYTHON="$(command -v python3 || true)"
+fi
+if [[ -z "${CLIENT_PYTHON}" || ! -x "${CLIENT_PYTHON}" ]]; then
+    echo "[error] simulator client Python is unavailable: ${CLIENT_PYTHON:-<unset>}" >&2
+    echo "Set CLIENT_PYTHON to the RoboTwin environment's Python executable." >&2
+    exit 1
+fi
+echo -e "\033[33mclient python: ${CLIENT_PYTHON}\033[0m"
 
 # Find an available port
 FREE_PORT=$(python3 - << 'EOF'
@@ -41,12 +53,17 @@ echo -e "\033[33mUsing socket port: ${FREE_PORT}\033[0m"
 
 # --- Server (pi05 uv venv) ---
 echo -e "\033[32m[server] Activating pi05 .venv\033[0m"
-PI05_VENV="$(pwd)/policy/pi05/.venv"
+PI05_VENV="${SCRIPT_DIR}/.venv"
+if [[ ! -x "${PI05_VENV}/bin/python" ]]; then
+    echo "[error] pi05 virtual environment not found: ${PI05_VENV}/bin/python" >&2
+    echo "Create it from ${SCRIPT_DIR} with: uv sync" >&2
+    exit 1
+fi
 (
     # Don't `source venv/bin/activate`: conda is already active and `python`
     # would still resolve to the conda env's python (no jax). Use the venv's
     # python directly instead.
-    cd "$(pwd)"
+    cd "${ROBOTWIN_ROOT}"
     # Inline `VAR=value cmd` prefixes proved unreliable inside `( ... ) &`
     # subshells when slurm pre-sets CUDA_VISIBLE_DEVICES — JAX bound to the
     # parent's first visible GPU instead of ours. Use explicit exports.
@@ -78,7 +95,7 @@ trap "echo -e '\033[31m[cleanup] Killing server PID=${SERVER_PID}\033[0m'; kill 
 # --- Client (RoboTwin conda env, current process) ---
 echo -e "\033[34m[client] Starting eval_policy_client on port ${FREE_PORT}\033[0m"
 PYTHONWARNINGS=ignore::UserWarning \
-python script/eval_policy_client.py \
+"${CLIENT_PYTHON}" script/eval_policy_client.py \
     --port ${FREE_PORT} \
     --config policy/${policy_name}/deploy_policy.yml \
     --overrides \
@@ -89,6 +106,10 @@ python script/eval_policy_client.py \
     --checkpoint_id ${checkpoint_id} \
     --ckpt_setting ${model_name} \
     --seed ${seed} \
-    --policy_name ${policy_name}
+    --policy_name ${policy_name} \
+    --test_num "${TEST_NUM:-100}" \
+    --graph_input_condition "${GRAPH_INPUT_CONDITION:-visual_only}" \
+    --graph_token_budget "${GRAPH_TOKEN_BUDGET:-120}" \
+    --graph_default_camera "${GRAPH_DEFAULT_CAMERA:-countertop_camera}"
 
 echo -e "\033[33m[main] Client finished\033[0m"

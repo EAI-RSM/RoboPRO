@@ -16,3 +16,8 @@ pi0_step: 50
 collect_num: 100
 collect_fixed_seed: false
 action_noise_var: 0.001
+
+# Graph-conditioned POC (visual_only preserves the existing policy input)
+graph_input_condition: visual_only
+graph_token_budget: 120
+graph_default_camera: countertop_camera

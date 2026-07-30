@@ -1,0 +1,20 @@
+protocol: graph_conditioned_pi05_poc_v1
+condition: visual_retrieved_graph
+policy_family: pi_0.5
+policy_adapter: existing_rule_based_compatible
+inputs:
+  images: [countertop_camera, left_camera, right_camera]
+  robot_state: true
+  instruction: true
+  retrieved_graph: true
+graph:
+  max_hops: 1
+  token_budget: 120
+  default_camera: countertop_camera
+  seed_roles: [target, left_effector, right_effector]
+  include_action_history: false
+  include_invalid: false
+  include_inverse_relations: false
+evaluation:
+  paired_seeds: true
+  metrics: [success, hard_success, collision, collision_count, collision_category]

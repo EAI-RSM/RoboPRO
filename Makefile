@@ -119,7 +119,11 @@ CHECKPOINT_ID ?= 30000
 CKPT_SETTING ?= $(TRAIN_CONFIG_NAME)_$(MODEL_NAME)_$(CHECKPOINT_ID)
 INSTRUCTION_TYPE ?= seen
 TEST_NUM ?= 1
+EVAL_START_SEED ?=
 PORT ?= 5555
+GRAPH_INPUT_CONDITION ?= visual_only
+GRAPH_TOKEN_BUDGET ?= 120
+GRAPH_DEFAULT_CAMERA ?= countertop_camera
 
 # pi05 rollout collection flags
 COLLECT_NUM ?= 100
@@ -429,13 +433,16 @@ eval-client:
 			--policy_name "$(POLICY_NAME)" \
 			--seed "$(SEED)" \
 			--instruction_type "$(INSTRUCTION_TYPE)" \
-			--test_num "$(TEST_NUM)")
+			--test_num "$(TEST_NUM)" \
+			--graph_input_condition "$(GRAPH_INPUT_CONDITION)" \
+			--graph_token_budget "$(GRAPH_TOKEN_BUDGET)" \
+			--graph_default_camera "$(GRAPH_DEFAULT_CAMERA)")
 
 eval-pi05-single:
 	$(call RUN_IN_CUSTOMIZED,bash policy/pi05/eval.sh "$(TASK_NAME)" "$(TASK_CONFIG)" "$(TRAIN_CONFIG_NAME)" "$(MODEL_NAME)" "$(CHECKPOINT_ID)" "$(CKPT_SETTING)" "$(SEED)" "$(GPU_ID)")
 
 eval-pi05-double:
-	$(call RUN_IN_CUSTOMIZED,bash policy/pi05/eval_double_env.sh "$(TASK_NAME)" "$(TASK_CONFIG)" "$(TRAIN_CONFIG_NAME)" "$(MODEL_NAME)" "$(CHECKPOINT_ID)" "$(SEED)" "$(GPU_SPEC)")
+	$(call RUN_IN_CUSTOMIZED,EVAL_START_SEED="$(EVAL_START_SEED)" CLIENT_PYTHON="$(PYTHON)" TEST_NUM="$(TEST_NUM)" GRAPH_INPUT_CONDITION="$(GRAPH_INPUT_CONDITION)" GRAPH_TOKEN_BUDGET="$(GRAPH_TOKEN_BUDGET)" GRAPH_DEFAULT_CAMERA="$(GRAPH_DEFAULT_CAMERA)" bash policy/pi05/eval_double_env.sh "$(TASK_NAME)" "$(TASK_CONFIG)" "$(TRAIN_CONFIG_NAME)" "$(MODEL_NAME)" "$(CHECKPOINT_ID)" "$(SEED)" "$(GPU_SPEC)")
 
 collect-rollout-pi05:
 	$(call RUN_IN_CUSTOMIZED,\

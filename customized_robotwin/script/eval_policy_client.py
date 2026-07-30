@@ -309,6 +309,13 @@ def main(usr_args):
     args['task_name'] = task_name
     args["task_config"] = task_config
     args["ckpt_setting"] = ckpt_setting
+    args["graph_input_condition"] = usr_args.get(
+        "graph_input_condition", "visual_only"
+    )
+    args["graph_token_budget"] = int(usr_args.get("graph_token_budget", 120))
+    args["graph_default_camera"] = usr_args.get(
+        "graph_default_camera", "countertop_camera"
+    )
 
     embodiment_type = args.get("embodiment")
     embodiment_config_path = os.path.join(CONFIGS_PATH, "_embodiment_config.yml")
@@ -387,9 +394,14 @@ def main(usr_args):
 
     seed = usr_args["seed"]
 
-    st_seed = 100000 * (1 + seed)
+    start_seed_override = os.environ.get("EVAL_START_SEED", "").strip()
+    st_seed = (
+        int(start_seed_override)
+        if start_seed_override
+        else 100000 * (1 + seed)
+    )
     suc_nums = []
-    test_num = int(os.environ.get("EVAL_TEST_NUM", 100))
+    test_num = int(usr_args.get("test_num", os.environ.get("EVAL_TEST_NUM", 100)))
     topk = 1
 
     # model = get_model(usr_args)
@@ -454,6 +466,10 @@ def eval_policy(task_name,
 
     policy_name = args["policy_name"]
     eval_func = eval_function_decorator(policy_name, "eval", conda_env=policy_conda_env)
+    policy_module = importlib.import_module(policy_name)
+    configure_func = getattr(policy_module, "configure", None)
+    if callable(configure_func):
+        configure_func(args)
 
     now_seed = st_seed
     task_total_reward = 0
@@ -588,6 +604,7 @@ def eval_policy(task_name,
         # is skipped from episode 2 onward and the server raises
         # "Prompt is required" on the first get_action.
         model.reset_model()
+        TASK_ENV._graph_conditioning_stats = []
         while TASK_ENV.take_action_cnt < TASK_ENV.step_lim:
             observation = TASK_ENV.get_obs()
             eval_func(TASK_ENV, model, observation)
@@ -605,11 +622,35 @@ def eval_policy(task_name,
             print("\033[91mFail!\033[0m")
 
         if episode_log_path is not None:
+            graph_stats = getattr(TASK_ENV, "_graph_conditioning_stats", [])
             record = {
                 "episode": TASK_ENV.test_num,
                 "seed": now_seed,
                 "success": bool(succ),
+                "graph_input_condition": args.get("graph_input_condition", "visual_only"),
             }
+            if graph_stats:
+                record["graph_conditioning"] = {
+                    "inference_count": len(graph_stats),
+                    "mean_retrieved_facts": float(np.mean([
+                        item["retrieved"] for item in graph_stats
+                    ])),
+                    "mean_selected_facts": float(np.mean([
+                        item["selected"] for item in graph_stats
+                    ])),
+                    "mean_dropped_facts": float(np.mean([
+                        item["dropped"] for item in graph_stats
+                    ])),
+                    "max_graph_tokens": int(max(
+                        item["graph_tokens"] for item in graph_stats
+                    )),
+                    "max_full_prompt_tokens_estimate": int(max(
+                        item["full_prompt_tokens_estimate"] for item in graph_stats
+                    )),
+                    "destination_seed_available": bool(any(
+                        item["destination_seed_available"] for item in graph_stats
+                    )),
+                }
             if collision_metrics_active:
                 col = TASK_ENV.get_collision_metrics()
                 record["collision"] = bool(col["is_collision"])
