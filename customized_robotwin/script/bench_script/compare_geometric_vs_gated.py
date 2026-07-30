@@ -29,8 +29,8 @@ from setup_paths import setup_paths
 setup_paths()
 
 from lib.geometric_metric import geometric_eps
-from lib.ik_grid import _build_ik_solver, grasp_orientation
-from lib.labeling import BEYOND, FREE, LABEL_NAMES, OBSTACLE
+from lib.ik_grid import _build_ik_solver, build_grid, grasp_orientation
+from lib.labeling import BEYOND, FREE, LABEL_NAMES, OBSTACLE, load_reach_envelope
 from lib.metric_config import SeedMetricConfig
 from lib.obstacles import occluder_footprints_3d, occluder_slice_polys
 from lib.plotting import _line_axis, _scene_anchor_markers
@@ -44,6 +44,7 @@ from task.occluder_task import make_occluder_task
 
 RESULTS_DIR = CLEARANCE_RESULTS_DIR.parent / "geometric_vs_gated"
 FALSE_KEEP_RESULTS_DIR = CLEARANCE_RESULTS_DIR.parent / "reach_envelope_validation"
+STAGE1_REACH_CACHE_DIR = CLEARANCE_RESULTS_DIR / "_reach_cache_geometric_stage1"
 
 
 def _json_eps(value, merged):
@@ -474,6 +475,11 @@ def run(args):
         args.arm, args.reach_mode, cfg,
     )
     print(f"[stage1] false-keep mask: {false_keep['path']}")
+    xs, ys, zs, XX, YY = build_grid(cfg)
+    load_reach_envelope(
+        args.reach_cache_dir, args.arm, xs, ys, zs, XX, YY, mode=args.reach_mode
+    )
+    print(f"[stage1] reach cache: {args.reach_cache_dir}")
 
     config = {
         "seeds": [int(seed) for seed in args.seeds],
@@ -585,7 +591,7 @@ def main():
     parser.add_argument("--occluder-angle0", type=float, default=0.0)
     parser.add_argument("--reach-mode", choices=["occupancy", "sphere"], default="occupancy")
     parser.add_argument(
-        "--reach-cache-dir", default=str(CLEARANCE_RESULTS_DIR / "_reach_cache")
+        "--reach-cache-dir", default=str(STAGE1_REACH_CACHE_DIR)
     )
     parser.add_argument("--false-keep-mask")
     parser.add_argument(
