@@ -4,7 +4,6 @@ import time
 from pathlib import Path
 
 import numpy as np
-import torch
 
 from .ik_grid import _build_ik_solver_no_world, _solve_grid, _solve_grid_q
 
@@ -139,6 +138,7 @@ def label_volume(env, planner, ik_on, arm_tag, XX, YY, zs, grasp_q, chunk, num_s
               + (f"  WARN {anomaly} ON&~OFF kept FREE" if anomaly else "")
               + f"  {time.perf_counter() - t_s:.2f}s")
     if ik_off is not None:
+        import torch
         del ik_off
         torch.cuda.empty_cache()
     if qfield is None:                                        # every voxel pruned -> radius too small / grid off

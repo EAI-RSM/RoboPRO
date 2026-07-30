@@ -1,7 +1,6 @@
 """Frame transforms and batched IK-grid solvers."""
 
 import numpy as np
-import torch
 import transforms3d as t3d
 
 
@@ -47,6 +46,7 @@ def _solve_grid(robot, planner, ik, arm_tag, gp_world, chunk=256):
     """gp_world: (N,7) world gripper poses -> (N,) bool reachable+collision-free.
     Solved in chunks: batched IK spawns many seeds per pose, so the whole grid at once
     is a multi-GB allocation -> chunk to cap peak memory (safe since use_cuda_graph=False)."""
+    import torch
     from curobo.types.math import Pose as CuroboPose
     ta = planner.motion_gen.tensor_args
     N = len(gp_world)
@@ -108,6 +108,7 @@ def _solve_grid_q(robot, planner, ik, arm_tag, gp_world, chunk=256, num_seeds=No
     num_seeds (None = solver default 100) caps the per-pose seed optimisation (Tier-1 speedup).
 
     Returns (success (N,) bool, q (N, dof) float32; rows where success is False are NaN)."""
+    import torch
     from curobo.types.math import Pose as CuroboPose
     ta = planner.motion_gen.tensor_args
     N = len(gp_world)
@@ -145,6 +146,7 @@ def _solve_grid_q_multi(robot, planner, ik, arm_tag, gp_world, chunk=256, return
     the menu the warm-start propagation chooses among to enforce branch continuity.
 
     Returns (cand_q (N, K, dof) float32, NaN where that candidate did not converge; cand_ok (N, K) bool)."""
+    import torch
     from curobo.types.math import Pose as CuroboPose
     ta = planner.motion_gen.tensor_args
     N = len(gp_world)
