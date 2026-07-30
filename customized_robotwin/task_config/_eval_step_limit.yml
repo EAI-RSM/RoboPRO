@@ -37,6 +37,7 @@ move_pillbottle_pad: 400
 place_shoe: 500
 press_stapler: 400
 put_bottles_dustbin: 1700
+put_mouse_on_pad: 600
 put_object_cabinet: 700
 rotate_qrcode: 400
 scan_object: 500

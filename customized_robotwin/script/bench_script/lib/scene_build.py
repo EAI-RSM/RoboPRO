@@ -11,15 +11,26 @@ bench_root = Path(os.environ["BENCH_ROOT"])
 robotwin_root = Path(os.environ["ROBOTWIN_ROOT"])
 
 
-def build_cfg(task_name, base_config, seed, dr_overrides, rollout=False, ep_num=0, save_path=None):
+def build_cfg(task_name, base_config, seed, dr_overrides, rollout=False, ep_num=0,
+              save_path=None, mode=None):
     """Build a setup_demo cfg.
 
+    mode=None preserves the legacy ``rollout`` switch exactly:
     rollout=False (default): a fast t=0 measurement build -- no planning, no saved
     data, single-camera render (measurement_only).
     rollout=True: an expert curobo rollout build -- need_plan=True + save_data=True
     so play_once() plans/executes and frames are captured for merge_pkl_to_hdf5_video()
     (writes <save_path>/video/episode{ep_num}.mp4). Full render (not measurement_only).
+    mode="policy": a no-expert VLA build -- eval loop/video enabled, no curobo calls
+    and no dataset capture. ``save_path`` is the episode video directory.
     """
+    if mode is None:
+        mode = "expert" if rollout else "measure"
+    elif rollout:
+        raise ValueError("pass either rollout=True or mode=..., not both")
+    if mode not in {"measure", "expert", "policy"}:
+        raise ValueError(f"unknown build mode: {mode!r}")
+
     if os.getenv("ROBOTWIN_BENCH_TASK") == "bench":
         config_path = bench_root / "bench_task_config" / f"{base_config}.yml"
     else:
@@ -34,17 +45,25 @@ def build_cfg(task_name, base_config, seed, dr_overrides, rollout=False, ep_num=
     cfg["render_freq"] = 0
     cfg["now_ep_num"] = int(ep_num)
     cfg["seed"] = int(seed)
-    if rollout:
+    if mode == "expert":
         cfg["need_plan"] = True        # expert curobo plans + executes the task
         cfg["save_data"] = True        # capture frames so a video can be written
         cfg["measurement_only"] = False
         cfg.setdefault("save_freq", 15)
         if save_path is not None:
             cfg["save_path"] = str(save_path)
-    else:
+    elif mode == "measure":
         cfg["need_plan"] = False       # no planning/rollout for a t=0 measurement
         cfg["save_data"] = False
         cfg["measurement_only"] = True  # t=0 measurement: render only the measured camera
+    else:
+        cfg["eval_mode"] = True
+        cfg["build_planner"] = False
+        cfg["need_plan"] = False
+        cfg["save_data"] = False
+        cfg["measurement_only"] = False
+        if save_path is not None:
+            cfg["eval_video_save_dir"] = str(save_path)
 
     cfg.setdefault("domain_randomization", {})
     cfg["domain_randomization"].update(dr_overrides)

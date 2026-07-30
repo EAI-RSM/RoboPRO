@@ -29,6 +29,10 @@ class Robot:
 
         self.left_js = None
         self.right_js = None
+        # Policy rollouts execute joint targets directly and do not use motion
+        # planning. Keep planner construction on by default for every existing
+        # caller; the no-expert VLA driver opts out to leave GPU room for JAX.
+        self.build_planner = kwargs.get("build_planner", True)
 
         left_embodiment_args = kwargs["left_embodiment_config"]
         right_embodiment_args = kwargs["right_embodiment_config"]
@@ -125,6 +129,13 @@ class Robot:
 
     def reset(self, scene, need_topp=False, **kwargs):
         self._init_robot_(scene, need_topp, **kwargs)
+
+        if not self.build_planner:
+            self.communication_flag = False
+            self.left_planner = None
+            self.right_planner = None
+            self.init_joints()
+            return
 
         if self.communication_flag:
             if hasattr(self, "left_conn") and self.left_conn:
@@ -263,6 +274,11 @@ class Robot:
         abs_right_curobo_yml_path = os.path.join(CONFIGS.ROOT_PATH, self.right_curobo_yml_path)
 
         self.communication_flag = (abs_left_curobo_yml_path != abs_right_curobo_yml_path)
+        if not self.build_planner:
+            self.communication_flag = False
+            self.left_planner = None
+            self.right_planner = None
+            return
 
         if self.is_dual_arm:
             abs_left_curobo_yml_path = abs_left_curobo_yml_path.replace("curobo.yml", "curobo_left.yml")
@@ -326,6 +342,8 @@ class Robot:
             )
 
     def update_world_pcd(self, world_pcd):
+        if not self.build_planner:
+            return
         try:
             self.left_planner.update_point_cloud(world_pcd, resolution=0.02)
             self.right_planner.update_point_cloud(world_pcd, resolution=0.02)
@@ -333,6 +351,8 @@ class Robot:
             print("Update world pointcloud wrong!")
     
     def update_world(self, collision_dict):
+        if not self.build_planner:
+            return
         self.left_planner.update_world(collision_dict, arms_tag="left")
         self.right_planner.update_world(collision_dict, arms_tag="right")
 
