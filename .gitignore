@@ -73,6 +73,9 @@ benchmark/collision_test/
 benchmark/bench_script/collision_test/
 presentation_material/
 
+# External policy implementation and local model artifacts.
+/customized_robotwin/policy/pi05/
+
 # Local experiment workspaces. Reproducible source may be explicitly tracked.
 experiments/
 
