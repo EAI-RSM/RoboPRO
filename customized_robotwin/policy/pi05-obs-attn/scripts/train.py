@@ -24,6 +24,7 @@ import openpi.training.data_loader as _data_loader
 import openpi.training.optimizer as _optimizer
 import openpi.training.sharding as sharding
 import openpi.training.utils as training_utils
+import openpi.training.viz_logging as _viz_logging
 import openpi.training.weight_loaders as _weight_loaders
 
 
@@ -253,8 +254,14 @@ def main(config: _config.TrainConfig):
         keep_period=config.keep_period,
         overwrite=config.overwrite,
         resume=config.resume,
+        max_to_keep=config.max_to_keep,
     )
     init_wandb(config, resuming=resuming, enabled=config.wandb_enabled)
+
+    data_config = config.data.create(config.assets_dirs, config.model)
+    # Aloha-specific action decoding knobs for EE Cartesian viz (defaults match LeRobotAlohaDataConfig).
+    adapt_to_pi = getattr(config.data, "adapt_to_pi", True)
+    use_delta = getattr(config.data, "use_delta_joint_actions", True)
 
     data_loader = _data_loader.create_data_loader(
         config,
@@ -300,6 +307,25 @@ def main(config: _config.TrainConfig):
             pbar.write(f"Step {step}: {info_str}")
             wandb.log(reduced_info, step=step)
             infos = []
+
+        if config.wandb_enabled and config.viz_interval > 0 and step % config.viz_interval == 0:
+            try:
+                viz_params = train_state.ema_params if train_state.ema_params is not None else train_state.params
+                viz_model = nnx.merge(train_state.model_def, viz_params)
+                _viz_logging.log_train_visualizations(
+                    viz_model,
+                    batch,
+                    rng=jax.random.fold_in(train_rng, step),
+                    step=step,
+                    num_samples=config.viz_num_samples,
+                    adapt_to_pi=adapt_to_pi,
+                    use_delta=use_delta,
+                    norm_stats=data_config.norm_stats,
+                    use_quantiles=data_config.use_quantile_norm,
+                )
+            except Exception:
+                logging.exception("Train visualization failed at step %s; continuing training", step)
+
         batch = next(data_iter)
 
         if (step % config.save_interval == 0 and step > start_step) or step == config.num_train_steps - 1:

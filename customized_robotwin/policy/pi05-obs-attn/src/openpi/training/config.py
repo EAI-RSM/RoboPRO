@@ -507,6 +507,14 @@ class TrainConfig:
     save_interval: int = 1000
     # If set, any existing checkpoints matching step % keep_period == 0 will not be deleted.
     keep_period: int | None = 5000
+    # Max rolling checkpoints to retain. None keeps all saves (plus keep_period milestones
+    # when set). Finite values enable sparse retention, e.g. --max-to-keep=5.
+    max_to_keep: int | None = None
+
+    # How often (in steps) to log W&B attention / EE trajectory images.
+    viz_interval: int = 500
+    # Number of batch samples to visualize per viz_interval.
+    viz_num_samples: int = 2
 
     # If true, will overwrite the checkpoint directory if it already exists.
     overwrite: bool = False
@@ -594,15 +602,15 @@ _CONFIGS = [
             pi05=True,
             obstacle_attention=pi0_config.ObstacleAttentionConfig(
                 enabled=True,
-                supervised_layers=(0, 1, 12, 17),
+                supervised_layers=(0, 1, 16, 17),
                 heatmap_sigma=20.0,
-                reverse_kl=False,
+                reverse_kl=True,
                 target_attn=True,
                 dest_attn=True,
             ),
         ),
         data=LeRobotAlohaDataConfig(
-            repo_id="local/robopro_expert",
+            repo_id="local/office_drawer_shelf",
             repack_transforms=_transforms.Group(inputs=[
                 _transforms.RepackTransform({
                     "images": {
