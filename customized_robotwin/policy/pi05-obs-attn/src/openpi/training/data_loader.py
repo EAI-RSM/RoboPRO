@@ -143,6 +143,11 @@ def create_torch_dataset(
         delta_timestamps={
             key: [t / dataset_meta.fps for t in range(action_horizon)] for key in data_config.action_sequence_keys
         },
+        # Force the pyav decode backend: lerobot defaults to torchcodec when it is
+        # importable, but torchcodec dynamically links system FFmpeg (libav*.so),
+        # which is not installed here. pyav decodes via the self-contained `av`
+        # wheel (bundled FFmpeg), so it needs no system libraries.
+        video_backend="pyav",
     )
 
     if data_config.prompt_from_task:

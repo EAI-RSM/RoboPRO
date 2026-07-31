@@ -736,12 +736,36 @@ def create_empty_grounding_dataset(
     )
 
 
-def _find_grounding_episodes(raw_dir: Path) -> list[str]:
-    """Find <task>/<config>/data/episodeN.hdf5 files under raw_dir."""
+def _find_grounding_episodes(
+    raw_dir: Path,
+    domains: list[str] | None = None,
+    tasks: list[str] | None = None,
+    configs: list[str] | None = None,
+) -> list[str]:
+    """Find <task>/<config>/data/episodeN.hdf5 files under raw_dir.
+
+    Optional domain/task/config filters mirror
+    ``precompute_beta_weights.py::_iter_config_dirs`` so the converter and the beta
+    precompute select the identical episode set. Path parts of the config dir
+    (relative to raw_dir) may be ``<domain>/<task>/<config>`` or the flatter
+    ``<task>/<config>``; a ``None`` filter means no restriction on that level.
+    """
     files = []
     for root, _, filenames in os.walk(raw_dir):
         if os.path.basename(root) != "data":
             continue
+        cfg_dir = os.path.dirname(root)  # .../<config>
+        parts = Path(os.path.relpath(cfg_dir, raw_dir)).parts
+        if configs is not None and (not parts or parts[-1] not in configs):
+            continue
+        if tasks is not None:
+            task_name = parts[-2] if len(parts) >= 2 else None
+            if task_name not in tasks:
+                continue
+        if domains is not None:
+            domain_name = parts[0] if len(parts) >= 3 else None
+            if domain_name not in domains:
+                continue
         for fn in fnmatch.filter(filenames, "episode*.hdf5"):
             files.append(os.path.join(root, fn))
     return sorted(files)
@@ -773,13 +797,21 @@ def _read_instruction(cfg_dir: str, ep_idx: int, desc_type: str = "seen") -> str
 
 
 def _ensure_beta_weights(
-    raw_dir: Path, beta_subdir: str, exclude_target: bool, beta_root: str | None = None
+    raw_dir: Path,
+    beta_subdir: str,
+    exclude_target: bool,
+    beta_root: str | None = None,
+    domains: list[str] | None = None,
+    tasks: list[str] | None = None,
+    configs: list[str] | None = None,
+    overwrite: bool = False,
 ) -> None:
     """Run in-repo FK precompute so the per-episode beta caches exist.
 
     With ``beta_root`` set, ``raw_dir`` is treated as read-only and caches are
     written under ``<beta_root>/<domain>/<task>/<config>/<beta_subdir>/``; without
     it they land next to the HDF5s in ``<config>/<beta_subdir>/``.
+    ``overwrite`` forces recomputation of caches that already exist.
     """
     scripts_dir = Path(__file__).resolve().parents[2] / "scripts"
     if str(scripts_dir) not in sys.path:
@@ -793,7 +825,10 @@ def _ensure_beta_weights(
         out_subdir=beta_subdir,
         beta_root=beta_root,
         exclude_target=exclude_target,
-        overwrite=False,
+        domains=domains,
+        tasks=tasks,
+        configs=configs,
+        overwrite=overwrite,
     )
 
 
@@ -802,6 +837,9 @@ def port_grounding(
     repo_id: str,
     *,
     episodes: list[int] | None = None,
+    domains: list[str] | None = None,
+    tasks: list[str] | None = None,
+    configs: list[str] | None = None,
     push_to_hub: bool = False,
     seg_exclude_names: tuple[str, ...] = DEFAULT_EXCLUDE_NAMES,
     mask_exclude_target: bool = True,
@@ -811,6 +849,7 @@ def port_grounding(
     beta_subdir: str = "beta_weights",
     beta_root: str | None = None,
     precompute_beta: bool = False,
+    recompute_beta: bool = False,
     attention_mask_mode: Literal["contact", "object"] = "contact",
     contact_radius_px: int = 8,
     max_contact_snap_px: float = 48.0,
@@ -836,19 +875,40 @@ def port_grounding(
     ``beta_root`` keeps ``raw_dir`` read-only: beta caches are written to and read
     from ``<beta_root>/<domain>/<task>/<config>/<beta_subdir>/`` (mirroring the raw
     layout) instead of next to the source HDF5s. Leave it None for legacy behavior.
+
+    ``domains`` / ``tasks`` / ``configs`` restrict which episodes are converted (and,
+    when ``precompute_beta`` is set, which beta caches are computed) by matching the
+    ``<domain>/<task>/<config>`` path components under ``raw_dir`` — same semantics as
+    ``precompute_beta_weights.py``. Each is a list of names or None (no restriction);
+    e.g. ``domains=["office"], tasks=["put_mouse_on_pad"]`` builds a single-task dataset.
     """
     if (HF_LEROBOT_HOME / repo_id).exists():
         shutil.rmtree(HF_LEROBOT_HOME / repo_id)
 
-    hdf5_files = _find_grounding_episodes(raw_dir)
+    hdf5_files = _find_grounding_episodes(raw_dir, domains=domains, tasks=tasks, configs=configs)
     if not hdf5_files:
+        selectors = ", ".join(
+            f"{name}={value}"
+            for name, value in (("domains", domains), ("tasks", tasks), ("configs", configs))
+            if value is not None
+        )
         raise ValueError(
-            f"No **/data/episode*.hdf5 found under {raw_dir}. "
-            "Expected mzxuan/robopro_expert layout: <domain>/<task>/<config>/data/."
+            f"No **/data/episode*.hdf5 found under {raw_dir}"
+            + (f" matching {selectors}" if selectors else "")
+            + ". Expected mzxuan/robopro_expert layout: <domain>/<task>/<config>/data/."
         )
 
-    if precompute_beta:
-        _ensure_beta_weights(raw_dir, beta_subdir, exclude_target=mask_exclude_target, beta_root=beta_root)
+    if precompute_beta or recompute_beta:
+        _ensure_beta_weights(
+            raw_dir,
+            beta_subdir,
+            exclude_target=mask_exclude_target,
+            beta_root=beta_root,
+            domains=domains,
+            tasks=tasks,
+            configs=configs,
+            overwrite=recompute_beta,
+        )
 
     dataset = create_empty_grounding_dataset(repo_id, dataset_config=dataset_config)
 

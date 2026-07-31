@@ -386,7 +386,7 @@ class Module(nn.Module):
         block_cls = nn.remat(
             Block,
             prevent_cse=False,
-            static_argnums=(5, 6),  # deterministic, return_attn (0-indexed excluding self)
+            static_argnums=(6, 7),  # deterministic, return_attn (0-indexed excluding self)
             policy=jax.checkpoint_policies.nothing_saveable,
         )
         self.layers = nn.scan(
