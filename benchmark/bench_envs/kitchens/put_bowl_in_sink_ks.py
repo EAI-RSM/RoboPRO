@@ -23,12 +23,42 @@ class put_bowl_in_sink_ks(KitchenS_base_task):
         return {self.target_obj.get_name()}
 
     def load_actors(self):
+        # Keep the entire bowl footprint clear of the sink. The old fixed
+        # x-range [0.05, 0.30] has no valid point when the sink is at x=0.10:
+        # the sink prohibition ends at x=0.26 and the bowl uses 8 cm footprint
+        # padding, so its centre must be x>0.34. The sampler consequently
+        # exhausted all attempts and returned a forbidden last sample; many
+        # bowls fell into the sink before the demonstration began.
+        obj_padding = 0.08
+        sink_p = self.sink.get_pose().p
+        sink_geom = self.kitchens_info["sink_geom"]
+        sink_pad = 0.03  # must match _load_sink's prohibited-area padding
+        clearance = sink_geom["hole_hx"] + sink_pad + obj_padding + 0.01
+        counter_left = self.kitchens_info["table_lims"][0] + self.table_xy_bias[0]
+        counter_right = self.kitchens_info["table_lims"][2] + self.table_xy_bias[0]
+
+        # Stay on the positive-x/right-arm half. Prefer the side of the sink
+        # with a usable interval; scene 1 uses the right interval, scenes 0/2
+        # use the left one. Cap the right edge at the proven bowl-grasp workspace.
+        right_xlim = [float(sink_p[0]) + clearance,
+                      min(0.48 + self.table_xy_bias[0], counter_right - obj_padding)]
+        left_xlim = [max(0.05 + self.table_xy_bias[0], counter_left + obj_padding),
+                     float(sink_p[0]) - clearance]
+        if right_xlim[1] - right_xlim[0] >= 0.03:
+            spawn_xlim = right_xlim
+        elif left_xlim[1] - left_xlim[0] >= 0.03:
+            spawn_xlim = left_xlim
+        else:
+            raise RuntimeError(
+                f"No sink-clear bowl spawn interval: sink_x={float(sink_p[0]):.3f}, "
+                f"left={left_xlim}, right={right_xlim}"
+            )
         rand_pos = self.rand_pose_on_counter(
-            xlim=[0.05, 0.30],
-            ylim=[-0.20, 0.00],
+            xlim=spawn_xlim,
+            ylim=[-0.20, -0.14],
             qpos=[0.5, 0.5, 0.5, 0.5],
             rotate_rand=False,
-            obj_padding=0.08,
+            obj_padding=obj_padding,
         )
 
         self.bowl_id = 3
@@ -45,7 +75,7 @@ class put_bowl_in_sink_ks(KitchenS_base_task):
 
     def play_once(self):
         arm_tag = ArmTag("right")
-
+        self._target_start_p = np.asarray(self.target_obj.get_pose().p, dtype=float).copy()
         self.grasp_actor_from_table(
             self.target_obj, arm_tag=arm_tag, pre_grasp_dis=0.10,
         )
@@ -80,9 +110,12 @@ class put_bowl_in_sink_ks(KitchenS_base_task):
         sink_p = self.sink.get_pose().p
         sg = self.kitchens_info["sink_geom"]
         tp = self.target_obj.get_pose().p
+        start_p = getattr(self, "_target_start_p", None)
+        moved = (start_p is not None
+                 and np.linalg.norm(np.asarray(tp, dtype=float) - start_p) > 0.10)
         in_xy = (abs(tp[0] - sink_p[0]) < sg["hole_hx"]
                  and abs(tp[1] - sink_p[1]) < sg["hole_hy"])
         below_rim = tp[2] < sink_p[2] + 0.02
-        return (in_xy and below_rim
+        return (moved and in_xy and below_rim
                 and self.robot.is_left_gripper_open()
                 and self.robot.is_right_gripper_open())
