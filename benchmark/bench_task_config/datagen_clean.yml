@@ -73,7 +73,7 @@ data_type:
                            # lets you recompute collision/displacement offline.
 pcd_down_sample_num: 1024
 pcd_crop: true
-save_path: ./data/dataset
+save_path: /shared_work2/mehrdad/data/dataset
 clear_cache_freq: 1
 collect_data: true
 eval_video_log: true
