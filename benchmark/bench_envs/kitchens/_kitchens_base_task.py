@@ -287,8 +287,8 @@ class KitchenS_base_task(Bench_base_task):
         attempts=80,
     ):
         """Sample a pose in ``xlim × ylim`` that avoids every box already in
-        ``self.prohibited_area["table"]``. Falls back to the last sample if no
-        clear pose is found within ``attempts`` tries.
+        ``self.prohibited_area["table"]``. If the requested range has no clear
+        pose, fail the seed instead of silently returning a prohibited pose.
 
         ``obj_padding`` is the half-extent used to treat the sampled point as
         a footprint (so the footprint, not just the center, must clear the
@@ -320,12 +320,12 @@ class KitchenS_base_task(Bench_base_task):
                     break
             if not blocked:
                 return pose
-        print_c(
-            f"[KitchenS] rand_pose_on_counter exhausted {attempts} attempts; "
-            f"using last sample at ({pose.p[0]:.3f}, {pose.p[1]:.3f})",
-            "YELLOW",
+        raise RuntimeError(
+            f"[KitchenS] rand_pose_on_counter found no valid pose after {attempts} "
+            f"attempts in xlim={list(xlim)}, ylim={list(ylim)}, "
+            f"obj_padding={obj_padding}; refusing prohibited fallback at "
+            f"({pose.p[0]:.3f}, {pose.p[1]:.3f})"
         )
-        return pose
 
     # ------------------------------------------------------------------
     # Static scene construction
