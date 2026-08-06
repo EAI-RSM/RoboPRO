@@ -22,6 +22,7 @@ import argparse
 import pdb
 
 from generate_episode_instructions import *
+from script.eval_seeds import resolve_eval_seeds, resolve_test_num, resolve_instruction_bank
 
 
 import sys
@@ -389,8 +390,16 @@ def main(usr_args):
 
     st_seed = 100000 * (1 + seed)
     suc_nums = []
-    test_num = int(os.environ.get("EVAL_TEST_NUM", 100))
+    seed_list = resolve_eval_seeds(task_name, task_config, usr_args)
+    test_num = resolve_test_num(usr_args, seed_list, default=100)
     topk = 1
+
+    if seed_list is not None:
+        print(f"\033[96mUsing {len(seed_list)} precollected eval seeds "
+              f"(evaluating first {test_num})\033[0m")
+    else:
+        print(f"\033[96mNo eval seed file; scanning from st_seed={st_seed} "
+              f"(test_num={test_num})\033[0m")
 
     # model = get_model(usr_args)
     # Mirror config-derived attributes that deploy_policy reads directly.
@@ -398,16 +407,19 @@ def main(usr_args):
     if "pi0_step" in usr_args:
         model_mirrored["pi0_step"] = usr_args["pi0_step"]
     model = ModelClient(port=port, **model_mirrored)
-    st_seed, suc_num = eval_policy(task_name,
-                                   TASK_ENV,
-                                   args,
-                                   model,
-                                   st_seed,
-                                   test_num=test_num,
-                                   video_size=video_size,
-                                   instruction_type=instruction_type,
-                                   policy_conda_env=policy_conda_env,
-                                   episode_log_path=episode_log_path)
+    st_seed, suc_num, used_seeds = eval_policy(
+        task_name,
+        TASK_ENV,
+        args,
+        model,
+        st_seed,
+        test_num=test_num,
+        video_size=video_size,
+        instruction_type=instruction_type,
+        policy_conda_env=policy_conda_env,
+        episode_log_path=episode_log_path,
+        seed_list=seed_list,
+    )
     suc_nums.append(suc_num)
 
     topk_success_rate = sorted(suc_nums, reverse=True)[:topk]
@@ -416,6 +428,7 @@ def main(usr_args):
     with open(file_path, "w") as file:
         file.write(f"Timestamp: {current_time}\n\n")
         file.write(f"Instruction Type: {instruction_type}\n\n")
+        file.write(f"Eval seeds: {' '.join(map(str, used_seeds))}\n\n")
         # file.write(str(task_reward) + '\n')
         file.write("\n".join(map(str, np.array(suc_nums) / test_num)))
 
@@ -432,11 +445,13 @@ def eval_policy(task_name,
                 video_size=None,
                 instruction_type=None,
                 policy_conda_env=None,
-                episode_log_path=None):
+                episode_log_path=None,
+                seed_list=None):
     print(f"\033[34mTask Name: {args['task_name']}\033[0m")
     print(f"\033[34mPolicy Name: {args['policy_name']}\033[0m")
 
-    expert_check = True
+    # Precollected seeds were already expert-validated; skip live expert_check.
+    expert_check = seed_list is None
     TASK_ENV.suc = 0
     TASK_ENV.test_num = 0
 
@@ -451,6 +466,7 @@ def eval_policy(task_name,
     now_id = 0
     succ_seed = 0
     suc_test_seed_list = []
+    seed_idx = 0
 
     policy_name = args["policy_name"]
     eval_func = eval_function_decorator(policy_name, "eval", conda_env=policy_conda_env)
@@ -462,6 +478,12 @@ def eval_policy(task_name,
     args["eval_mode"] = True
 
     while succ_seed < test_num:
+        if seed_list is not None:
+            if seed_idx >= len(seed_list):
+                break
+            now_seed = seed_list[seed_idx]
+            seed_idx += 1
+
         render_freq = args["render_freq"]
         args["render_freq"] = 0
 
@@ -473,6 +495,8 @@ def eval_policy(task_name,
                     # Bench tasks don't `return self.info` from play_once;
                     # use the env's info dict directly.
                     episode_info = getattr(TASK_ENV, "info", {"info": {}})
+                    if "info" not in episode_info:
+                        episode_info = {"info": episode_info}
                 TASK_ENV.close_env()
             except UnStableError as e:
                 print(" -------------")
@@ -492,6 +516,8 @@ def eval_policy(task_name,
                 args["render_freq"] = render_freq
                 print("error occurs !")
                 continue
+        else:
+            episode_info = {"info": {}}
 
         if (not expert_check) or (TASK_ENV.plan_success and TASK_ENV.check_success()):
             succ_seed += 1
@@ -532,7 +558,7 @@ def eval_policy(task_name,
 
         lang_perturb = args.get("domain_randomization", {}).get("language_perturbation", {})
         if lang_perturb.get("enabled", False) and lang_perturb.get("instruction_bank"):
-            bank_path = lang_perturb["instruction_bank"]
+            bank_path = resolve_instruction_bank(lang_perturb["instruction_bank"])
             if os.path.exists(bank_path):
                 with open(bank_path, "r") as f_bank:
                     bank = json.load(f_bank)
@@ -636,9 +662,10 @@ def eval_policy(task_name,
             f"Success rate: \033[96m{TASK_ENV.suc}/{TASK_ENV.test_num}\033[0m => \033[95m{round(TASK_ENV.suc/TASK_ENV.test_num*100, 1)}%\033[0m, current seed: \033[90m{now_seed}\033[0m\n"
         )
         # TASK_ENV._take_picture()
-        now_seed += 1
+        if seed_list is None:
+            now_seed += 1
 
-    return now_seed, TASK_ENV.suc
+    return now_seed, TASK_ENV.suc, suc_test_seed_list
 
 
 def parse_args_and_config():
