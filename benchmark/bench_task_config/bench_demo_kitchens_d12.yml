@@ -18,7 +18,7 @@ domain_randomization:
   obstacle_density: 12
 
   language_perturbation:
-    enabled: true
+    enabled: false
     instruction_bank: benchmark/bench_task_config/instruction_bank.json
 camera:
   head_camera_type: D435
