@@ -993,9 +993,17 @@ class Base_Task(gym.Env):
 
         object_ids = []
         pose_world = []
+        aabb_lower = []
+        aabb_upper = []
+        has_aabb = []
         is_present = []
         is_target = []
         is_furniture = []
+
+        def _append_no_aabb():
+            aabb_lower.append(np.zeros(3, dtype=np.float32))
+            aabb_upper.append(np.zeros(3, dtype=np.float32))
+            has_aabb.append(False)
 
         for entry in object_catalog:
             object_id = int(entry["object_id"])
@@ -1007,6 +1015,9 @@ class Base_Task(gym.Env):
             if structural_pose is not None:
                 is_present.append(True)
                 pose_world.append(structural_pose)
+                # End effectors / robot root have no collision geometry of
+                # their own to derive a bounding box from.
+                _append_no_aabb()
                 continue
 
             entity = actor_by_id.get(object_id)
@@ -1014,12 +1025,14 @@ class Base_Task(gym.Env):
             if entity is None:
                 is_present.append(False)
                 pose_world.append(np.zeros(7, dtype=np.float32))
+                _append_no_aabb()
                 continue
 
             pose = self._get_benchmark_entity_pose(entity)
             if pose is None:
                 is_present.append(False)
                 pose_world.append(np.zeros(7, dtype=np.float32))
+                _append_no_aabb()
                 continue
             pose_world.append(
                 np.array(
@@ -1037,9 +1050,23 @@ class Base_Task(gym.Env):
             )
             is_present.append(True)
 
+            # Reuses the same world-frame AABB helper already called every
+            # frame for visibility/destination inference, so this adds no
+            # new physics queries beyond one extra call per catalog entry.
+            try:
+                lower, upper = self._get_benchmark_entity_aabb(entity)
+                aabb_lower.append(np.asarray(lower, dtype=np.float32))
+                aabb_upper.append(np.asarray(upper, dtype=np.float32))
+                has_aabb.append(True)
+            except Exception:
+                _append_no_aabb()
+
         return {
             "object_ids": np.array(object_ids, dtype=np.int64),
             "pose_world": np.stack(pose_world, axis=0) if pose_world else np.zeros((0, 7), dtype=np.float32),
+            "aabb_lower": np.stack(aabb_lower, axis=0) if aabb_lower else np.zeros((0, 3), dtype=np.float32),
+            "aabb_upper": np.stack(aabb_upper, axis=0) if aabb_upper else np.zeros((0, 3), dtype=np.float32),
+            "has_aabb": np.array(has_aabb, dtype=np.bool_),
             "is_present": np.array(is_present, dtype=np.bool_),
             "is_target": np.array(is_target, dtype=np.bool_),
             "is_furniture": np.array(is_furniture, dtype=np.bool_),

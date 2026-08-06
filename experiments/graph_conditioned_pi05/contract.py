@@ -67,6 +67,27 @@ class GraphFact:
 
 
 @dataclass(frozen=True)
+class GraphNode:
+    """A retrieved graph participant, declared once with grounding attributes.
+
+    `position` is the node's world-frame 3D center, rounded to 1 decimal
+    place. `bbox_size` is the node's axis-aligned world-frame extent
+    (upper - lower corner, rounded to 1 decimal place); it is None for node
+    kinds where no collision geometry is available (e.g. end effectors).
+    Declaring these lets the model distinguish two same-name objects (e.g.
+    two "bowl" instances from a cluttered-table distractor draw) by where
+    they actually are, instead of only by an opaque catalog ID it was never
+    trained to ground visually.
+    """
+
+    object_id: int
+    label: str
+    kind: str
+    position: tuple[float, float, float]
+    bbox_size: tuple[float, float, float] | None = None
+
+
+@dataclass(frozen=True)
 class RetrievalContract:
     graph_token_budget: int = 120
     max_hops: int = 1

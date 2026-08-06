@@ -9,7 +9,9 @@ This isolated experiment compares two policy-input conditions while preserving t
 
 Both conditions must use the same episode/task split, seeds, pi0.5 checkpoint, images, state, instruction, action chunking, and evaluation settings. The only treatment difference is the graph text. Report the repository's existing success, hard-success, collision, and collision count/category metrics.
 
-Retrieval is one-hop from target objects and robot effectors. It includes only true relations whose evidence-validity mask is true, uses `countertop_camera` for camera-conditioned facts, excludes redundant inverse edges by default, and serializes facts in a fixed priority order under a 120-token graph budget.
+Retrieval is one-hop from target objects and robot effectors. It includes only true relations whose evidence-validity mask is true, uses `countertop_camera` for camera-conditioned facts, and excludes redundant inverse edges by default.
+
+Every retrieved node (target/distractor objects, robot end effectors) is declared once with a world-frame 3D position and, for objects with collision geometry, an axis-aligned bounding-box size — both rounded to 1 decimal place. Without this, two same-name objects (e.g. two "bowl" distractors placed by the cluttered-table domain randomization) are only distinguishable by an opaque catalog ID the checkpoint never saw during fine-tuning, so the model has no way to ground which node in the text corresponds to which pixel region. Node and fact selection under the 120-token graph budget is a priority-weighted 0/1 knapsack, not a first-fit walk: ranks are spaced so a single higher-priority item always outvalues any combination of lower-priority ones, which is what makes "maximize information under a fixed priority order" well-defined rather than accidentally letting several cheap facts crowd out one expensive, important fact (or, within one priority tier, an iteration-order artifact silently packing fewer same-tier facts than the budget actually allows). The same packer (`graph_serializer.pack_items`) runs both offline (this validator, with an approximate tokenizer) and live (the model server, with the real checkpoint tokenizer), so there is one selection algorithm, not two independently maintained ones.
 
 Expert action nodes, action outcomes, and future annotations are prohibited policy inputs. Current pi0.5 rollouts do not create equivalent online high-level action nodes, so action history is disabled in both conditions. Exported action nodes may be used only for offline analysis or labels after rollout.
 
@@ -31,7 +33,7 @@ The validator checks schema and frame alignment, repeats retrieval to detect non
 
 ## Phase 3 live pi0.5 adapter
 
-The dual-environment evaluator now retrieves from each live observation immediately before an action-chunk inference. `visual_only` keeps the original instruction path. `visual_retrieved_graph` sends ordered fact strings to the model server, which fits them with the checkpoint's PaliGemma SentencePiece tokenizer. The policy implementation, images, state, action chunking, and existing evaluation metrics are unchanged.
+The dual-environment evaluator now retrieves from each live observation immediately before an action-chunk inference. `visual_only` keeps the original instruction path. `visual_retrieved_graph` renders ordered nodes and facts as natural-language sentences and sends them to the model server, which packs whole sentences with the checkpoint's PaliGemma SentencePiece tokenizer. For example, `reachable_by(obj_1,obj_2)` becomes `obj_1 is reachable by obj_2.`, and a node is declared as `bowl#23 is at (0.3, -0.1, 0.8) with bounding-box size (0.1, 0.1, 0.2).`. The resulting scene description (a `Nodes:` section followed by a `Scene graph:` section) is appended to the task instruction. The policy implementation, images, state, action chunking, and existing evaluation metrics are unchanged.
 
 Run paired conditions with the same task, seed, checkpoint, and `TEST_NUM`:
 
@@ -57,7 +59,7 @@ make eval-pi05-double \
   GRAPH_DEFAULT_CAMERA=countertop_camera
 ```
 
-Each `_episodes.jsonl` record retains success/collision metrics and adds the condition plus graph inference counts, selected/dropped fact averages, tokenizer-measured graph tokens, and destination-seed availability.
+Each `_episodes.jsonl` record retains success/collision metrics and adds the condition plus graph inference counts, selected/dropped node and fact averages, tokenizer-measured graph tokens, and destination-seed availability.
 
 Destination IDs are read only from `TASK_ENV.get_role_names()`; expert action nodes are never consulted. Tasks that do not expose `destination_id` fall back to target-and-effector seeds and record `destination_seed_available: false`.
 

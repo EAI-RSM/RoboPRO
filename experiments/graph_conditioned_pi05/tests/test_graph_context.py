@@ -5,9 +5,15 @@ import numpy as np
 from contextlib import contextmanager
 from tempfile import TemporaryDirectory
 
-from experiments.graph_conditioned_pi05.contract import InputCondition, RetrievalContract
+from experiments.graph_conditioned_pi05.contract import GraphNode, InputCondition, RetrievalContract
 from experiments.graph_conditioned_pi05.graph_retriever import GraphFact, HDF5GraphRetriever
-from experiments.graph_conditioned_pi05.graph_serializer import serialize_facts
+from experiments.graph_conditioned_pi05.graph_serializer import (
+    NaturalLanguageGraphRenderer,
+    format_fact,
+    format_node,
+    serialize_facts,
+    serialize_graph,
+)
 from experiments.graph_conditioned_pi05.live_adapter import LiveGraphRetriever, prepare_instruction
 from experiments.graph_conditioned_pi05.validate_alignment import FRAME_ALIGNED_PATHS, validate_episode
 
@@ -103,10 +109,52 @@ def test_serialization_priority_and_budget():
         GraphFact(0, "held_by", "a", "left_arm"),
     ]
     full = serialize_facts(facts, 100)
-    assert full.text.index("held_by") < full.text.index("near")
-    small = serialize_facts(facts, 12)
-    assert small.token_count <= 12
+    assert full.text.index("is held by") < full.text.index("is near")
+    small = serialize_facts(facts, 11)
+    assert small.token_count <= 11
     assert small.dropped_fact_count > 0
+
+
+def test_packing_maximizes_same_tier_information_over_alphabetical_first_fit():
+    # Regression test: within a single priority tier, a first-fit walk in
+    # (relation, source, destination) order -- not size order -- can lock in
+    # one long fact that happens to sort first alphabetically, leaving no
+    # room for several shorter same-priority facts that would together carry
+    # more information. `aaaa...` sorts before `ba`/`ca`/`da`, so the old
+    # first-fit algorithm picked {long, ba} (2 facts) at this exact budget;
+    # the knapsack packer picks {ba, ca, da} (3 facts) instead.
+    long_fact = GraphFact(9, "near", "aaaa bbbb cccc dddd eeee", "target")
+    short_facts = [GraphFact(9, "near", letter, "target") for letter in ("ba", "ca", "da")]
+    result = serialize_facts([long_fact, *short_facts], token_budget=15)
+    assert set(result.selected_facts) == set(short_facts)
+    assert long_fact not in result.selected_facts
+
+
+def test_serialize_graph_includes_nodes_with_grounding_attributes():
+    bowl_a = GraphNode(object_id=23, label="bowl#23", kind="actor", position=(0.1, 0.2, 0.3), bbox_size=(0.2, 0.1, 0.1))
+    bowl_b = GraphNode(object_id=41, label="bowl#41", kind="actor", position=(0.5, -0.1, 0.3), bbox_size=(0.2, 0.1, 0.1))
+    fact = GraphFact(0, "near", "bowl#23", "bowl#41")
+    result = serialize_graph([bowl_a, bowl_b], [fact], token_budget=80)
+    assert bowl_a in result.selected_nodes and bowl_b in result.selected_nodes
+    assert format_node(bowl_a) in result.text
+    assert format_node(bowl_b) in result.text
+    assert result.text.index("Nodes:") < result.text.index("Scene graph:")
+
+    left_ee = GraphNode(object_id=-2, label="left_ee", kind="end_effector", position=(0.2, -0.1, 0.9))
+    assert format_node(left_ee) == "left_ee is at (0.2, -0.1, 0.9)."
+
+
+def test_natural_language_graph_renderer():
+    renderer = NaturalLanguageGraphRenderer()
+    assert renderer.render_fact(
+        GraphFact(1, "reachable_by", "obj_1", "obj_2")
+    ) == "obj_1 is reachable by obj_2."
+    assert renderer.render_fact(
+        GraphFact(2, "blocks", "obstacle", "target", "left_ee,right_ee")
+    ) == "obstacle blocks target for left_ee and right_ee."
+    assert format_fact(
+        GraphFact(3, "occludes", "cup", "can", "countertop_camera")
+    ) == "cup occludes can from countertop_camera."
 
 
 def test_alignment_mismatch_fails(tmp_path):
@@ -145,15 +193,44 @@ def _live_inputs(root):
             state[name] = dataset[0]
         else:
             state[name] = dataset[()]
-    return catalog, state
+    object_state = {
+        "object_ids": np.array([10, 20, -2, -3], dtype=np.int64),
+        "pose_world": np.array(
+            [
+                [0.1, 0.2, 0.3, 1, 0, 0, 0],
+                [0.4, 0.5, 0.6, 1, 0, 0, 0],
+                [0.7, 0.0, 0.5, 1, 0, 0, 0],
+                [0.9, 0.0, 0.5, 1, 0, 0, 0],
+            ],
+            dtype=np.float32,
+        ),
+        "is_present": np.array([True, True, True, True]),
+        "aabb_lower": np.array(
+            [[0.0, 0.1, 0.2], [0.3, 0.4, 0.5], [0.0, 0.0, 0.0], [0.0, 0.0, 0.0]],
+            dtype=np.float32,
+        ),
+        "aabb_upper": np.array(
+            [[0.2, 0.3, 0.4], [0.5, 0.6, 0.7], [0.0, 0.0, 0.0], [0.0, 0.0, 0.0]],
+            dtype=np.float32,
+        ),
+        "has_aabb": np.array([True, True, False, False]),
+    }
+    return catalog, state, object_state
 
 
 def test_live_retrieval_matches_hdf5(tmp_path):
     with _graph_file(tmp_path / "graph.hdf5") as root:
         expected = HDF5GraphRetriever(root).retrieve(0, [20])
-        catalog, state = _live_inputs(root)
-        actual = LiveGraphRetriever(catalog, state).retrieve([20])
-    assert actual == expected
+        catalog, state, object_state = _live_inputs(root)
+        actual_nodes, actual_facts = LiveGraphRetriever(catalog, state, object_state).retrieve([20])
+    assert actual_facts == expected
+    node_ids = {node.object_id for node in actual_nodes}
+    assert {10, 20} <= node_ids  # target + box, both seeds referenced by facts
+    target_node = next(node for node in actual_nodes if node.object_id == 10)
+    assert target_node.position == (0.1, 0.2, 0.3)
+    assert target_node.bbox_size == (0.2, 0.2, 0.2)
+    left_ee_node = next((node for node in actual_nodes if node.object_id == -2), None)
+    assert left_ee_node is not None and left_ee_node.bbox_size is None
 
 
 def test_prepare_instruction_preserves_visual_only_and_fits_graph(tmp_path):
@@ -176,17 +253,20 @@ def test_prepare_instruction_preserves_visual_only_and_fits_graph(tmp_path):
 
         def fit_graph_prompt(self, payload):
             self.calls.append(payload)
+            fact_texts = [item["text"] for item in payload["items"] if item["section"] == "fact"]
+            node_texts = [item["text"] for item in payload["items"] if item["section"] == "node"]
             return {
-                "instruction": payload["instruction"] + "\nScene graph: " + payload["fact_texts"][0],
+                "instruction": payload["instruction"] + "\nScene graph: " + fact_texts[0],
+                "selected_node_count": len(node_texts),
                 "selected_fact_count": 1,
                 "graph_token_count": 9,
                 "full_prompt_token_count_estimate": 40,
             }
 
     with _graph_file(tmp_path / "graph.hdf5") as root:
-        catalog, state = _live_inputs(root)
+        catalog, state, object_state = _live_inputs(root)
     observation = {
-        "benchmark_support": {"relation_state": state},
+        "benchmark_support": {"relation_state": state, "object_state": object_state},
         "joint_action": {"vector": np.zeros(14, dtype=np.float32)},
     }
     task, model = Task(catalog), Model()
@@ -203,9 +283,17 @@ def test_prepare_instruction_preserves_visual_only_and_fits_graph(tmp_path):
         RetrievalContract(),
     )
     assert graph.selected_fact_count == 1
+    assert graph.selected_node_count > 0
     assert graph.destination_seed_available
     assert len(model.calls) == 1
-    assert all("action" not in fact for fact in model.calls[0]["fact_texts"])
+    items = model.calls[0]["items"]
+    assert all("action" not in item["text"] for item in items)
+    assert all(item["text"].endswith(".") for item in items)
+    fact_texts = [item["text"] for item in items if item["section"] == "fact"]
+    node_texts = [item["text"] for item in items if item["section"] == "node"]
+    assert any(" is reachable by " in text for text in fact_texts)
+    assert node_texts  # nodes (target/box/effectors) are declared with grounding attributes
+    assert any(" is at (" in text for text in node_texts)
 
 def main():
     test_contract_rejects_leakage_and_invalid_facts()
@@ -214,13 +302,16 @@ def main():
     with TemporaryDirectory() as directory:
         test_explicit_seed_and_unknown_seed(Path(directory))
     test_serialization_priority_and_budget()
+    test_packing_maximizes_same_tier_information_over_alphabetical_first_fit()
+    test_serialize_graph_includes_nodes_with_grounding_attributes()
+    test_natural_language_graph_renderer()
     with TemporaryDirectory() as directory:
         test_live_retrieval_matches_hdf5(Path(directory))
     with TemporaryDirectory() as directory:
         test_prepare_instruction_preserves_visual_only_and_fits_graph(Path(directory))
     with TemporaryDirectory() as directory:
         test_alignment_mismatch_fails(Path(directory))
-    print("7 graph-context tests passed")
+    print("10 graph-context tests passed")
 
 
 if __name__ == "__main__":
