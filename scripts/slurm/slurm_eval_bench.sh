@@ -1,58 +1,44 @@
-#!/bin/bash
-#SBATCH --partition=h100
+#!/usr/bin/env bash
+#SBATCH --job-name=pi05-eval
+#SBATCH --partition=gb10
 #SBATCH --gres=gpu:1
-#SBATCH --qos=high
-#SBATCH --time=3-00:00:00
+#SBATCH --time=03:00:00
 #SBATCH --mem=64G
 #SBATCH --cpus-per-task=8
-# NOTE: set --chdir and --output to your local checkout, e.g.
-#   #SBATCH --chdir=/path/to/RoboPRO/customized_robotwin
-#   #SBATCH --output=/path/to/RoboPRO/logs/%x_%j.out
+#SBATCH --output=logs/%x_%j.out
 
-# Args: <task_name> <task_config> <train_config> <model_name> <ckpt_id> <seed> <test_num>
-TASK_NAME="${1:?Usage: sbatch slurm_eval_bench.sh <task> <config> <train_config> <model_name> <ckpt_id> <seed> <test_num>}"
-TASK_CONFIG="${2:?}"
-TRAIN_CONFIG="${3:?}"
-MODEL_NAME="${4:?}"
-CKPT_ID="${5:?}"
+# Backward-compatible entry point. Direct execution submits from the master
+# node; sbatch execution delegates runtime work to the GB10 Docker image.
+
+set -euo pipefail
+
+ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
+
+if [[ -z "${SLURM_JOB_ID:-}" ]]; then
+  exec "$ROOT_DIR/scripts/slurm/submit_pi05_eval.sh" "$@"
+fi
+
+TASK_NAME="${1:-put_sauce_can_in_basket}"
+TASK_CONFIG="${2:-relation_validation_d14}"
+TRAIN_CONFIG="${3:-pi05_aloha_full_base}"
+MODEL_NAME="${4:-pi05_base}"
+CKPT_ID="${5:-0}"
 SEED="${6:-0}"
-TEST_NUM="${7:-10}"
+TEST_NUM="${7:-1}"
+GRAPH_INPUT_CONDITION="${8:-visual_only}"
+EVAL_START_SEED="${9:-4}"
 
-echo "Task: $TASK_NAME"
-echo "Config: $TASK_CONFIG"
-echo "Train Config: $TRAIN_CONFIG"
-echo "Model: $MODEL_NAME"
-echo "Checkpoint: $CKPT_ID"
-echo "Seed: $SEED"
-echo "Test Num: $TEST_NUM"
-echo "GPU: $CUDA_VISIBLE_DEVICES"
-echo ""
+export PROJECT_ROOT="${PROJECT_ROOT:-$ROOT_DIR}"
 
-# Environment setup
-source set_env.sh
-export ROBOTWIN_BENCH_TASK="bench"
-export XLA_PYTHON_CLIENT_MEM_FRACTION=0.4
-export PYTHONUNBUFFERED=1
-
-# Use pi05 conda env (has openpi + sapien + curobo)
-PYTHON="${PI05_PYTHON:-$(command -v python)}"
-# To pin a specific conda env: export PI05_PYTHON=/path/to/miniconda3/envs/pi05/bin/python
-
-# Add pi05 source to PYTHONPATH so openpi is importable
-export PYTHONPATH="$ROBOTWIN_ROOT/policy/pi05/src:$PYTHONPATH"
-
-$PYTHON script/eval_policy.py \
-    --config policy/pi05/deploy_policy.yml \
-    --overrides \
-    --task_name "$TASK_NAME" \
-    --task_config "$TASK_CONFIG" \
-    --train_config_name "$TRAIN_CONFIG" \
-    --model_name "$MODEL_NAME" \
-    --checkpoint_id "$CKPT_ID" \
-    --policy_name pi05 \
-    --instruction_type seen \
-    --seed "$SEED" \
-    --ckpt_setting "${TRAIN_CONFIG}_${MODEL_NAME}_${CKPT_ID}" \
-    --test_num "$TEST_NUM"
-
-echo "Eval done, exit code: $?"
+exec "$ROOT_DIR/scripts/slurm/slurm_docker_gb10.sh" \
+  make eval-pi05-double \
+  "TASK_NAME=$TASK_NAME" \
+  "TASK_CONFIG=$TASK_CONFIG" \
+  "TRAIN_CONFIG_NAME=$TRAIN_CONFIG" \
+  "MODEL_NAME=$MODEL_NAME" \
+  "CHECKPOINT_ID=$CKPT_ID" \
+  "SEED=$SEED" \
+  "EVAL_START_SEED=$EVAL_START_SEED" \
+  "TEST_NUM=$TEST_NUM" \
+  "GRAPH_INPUT_CONDITION=$GRAPH_INPUT_CONDITION" \
+  GPU_SPEC=0

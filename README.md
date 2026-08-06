@@ -61,6 +61,17 @@ cd ..
 
 > ⚠️ **SAPIEN version matters:** the benchmark is pinned to `sapien==3.0.0b1`. A different SAPIEN version can change physics and rendering behavior, which shifts evaluation results — success rates from mismatched versions are not comparable. Verify with `python -c "import sapien; print(sapien.__version__)"` before collecting data or running evals.
 
+#### GB10 / ARM64 Docker workflow
+
+The ARM64 environment uses Python 3.12 and NVIDIA's GB10-compatible PyTorch image; do not install the generic PyPI Torch wheel on GB10. Build and validate the repository image with:
+
+```bash
+IMAGE=robopro:gb10 bash scripts/docker/build_gb10.sh
+IMAGE=robopro:gb10 bash scripts/docker/smoke_gb10.sh
+```
+
+For SLURM, submit `scripts/slurm/slurm_docker_gb10.sh`; it passes only the GPU allocated by SLURM into Docker. See [the complete GB10 guide](docs/setup_sapien_aarch64.md) for image distribution across compute nodes, interactive use, version caveats, and troubleshooting.
+
 `script/_install.sh` also clones CuRobo v0.7.8 into `envs/curobo/` and pip-installs it editable, then re-pins `warp-lang==1.12.0` and `setuptools==69.5.1`. If you keep `scipy==1.10.1` from `requirements.txt`, `scikit-image` will print a version-conflict warning — harmless.
 
 #### Option B. uv workflow

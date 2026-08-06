@@ -1,0 +1,89 @@
+# syntax=docker/dockerfile:1.7
+ARG BASE_IMAGE=nvcr.io/nvidia/pytorch:25.11-py3
+
+FROM ${BASE_IMAGE} AS wheel-builder
+ARG DEBIAN_FRONTEND=noninteractive
+ENV PIP_CONSTRAINT=
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    binutils \
+    build-essential \
+    cmake \
+    curl \
+    git \
+    libassimp-dev \
+    libboost-filesystem-dev \
+    libboost-system-dev \
+    libeigen3-dev \
+    libfcl-dev \
+    libhdf5-openmpi-dev \
+    libompl-dev \
+    liborocos-kdl-dev \
+    liburdfdom-dev \
+    ninja-build \
+    patchelf \
+    python3-clang-18 \
+    unzip \
+ && rm -rf /var/lib/apt/lists/*
+RUN python -m pip install --no-cache-dir \
+    'numpy<2' \
+    build \
+    'clang==18.1.8' \
+    'pin==2.7.0' \
+    setuptools \
+    'setuptools-git-versioning<2' \
+    wheel
+
+COPY docker/gb10/build_mplib.sh /usr/local/bin/build-mplib-arm64
+COPY docker/gb10/repair_sapien_wheel.sh /usr/local/bin/repair-sapien-wheel
+RUN chmod +x /usr/local/bin/build-mplib-arm64 /usr/local/bin/repair-sapien-wheel \
+ && CMAKE_BUILD_PARALLEL_LEVEL=4 build-mplib-arm64 /wheelhouse
+
+ARG SAPIEN_NIGHTLY_URL=https://github.com/haosulab/SAPIEN/releases/download/nightly/sapien-3.0.0.dev20260601%2B6a50b78b-cp312-cp312-linux_aarch64.whl
+ARG SAPIEN_STABLE_URL=https://github.com/haosulab/SAPIEN/releases/download/3.0.3/sapien-3.0.3-cp312-cp312-linux_aarch64.whl
+RUN curl -fL --retry 5 "$SAPIEN_NIGHTLY_URL" \
+      -o '/tmp/sapien-3.0.0.dev20260601+6a50b78b-cp312-cp312-linux_aarch64.whl' \
+ && curl -fL --retry 5 "$SAPIEN_STABLE_URL" \
+      -o /tmp/sapien-3.0.3-cp312-cp312-linux_aarch64.whl \
+ && repair-sapien-wheel '/tmp/sapien-3.0.0.dev20260601+6a50b78b-cp312-cp312-linux_aarch64.whl' /tmp/sapien-3.0.3-cp312-cp312-linux_aarch64.whl /wheelhouse
+
+FROM ${BASE_IMAGE} AS runtime
+ARG DEBIAN_FRONTEND=noninteractive
+ARG INSTALL_CUROBO=1
+ENV PIP_CONSTRAINT= \
+    PYTHONNOUSERSITE=1 \
+    NVIDIA_DRIVER_CAPABILITIES=graphics,utility,compute
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    curl \
+    ffmpeg \
+    git \
+    libccd2 \
+    libegl1 \
+    libompl16 \
+    liborocos-kdl1.5 \
+    liburdfdom-model4.0 \
+    libvulkan1 \
+    libxext6 \
+ && rm -rf /var/lib/apt/lists/*
+
+COPY --from=wheel-builder /opt/fcl-cmeel /opt/fcl-cmeel
+COPY --from=wheel-builder /wheelhouse /opt/robopro/wheels
+COPY pyproject.toml /tmp/pyproject.toml
+RUN python -m pip install --no-cache-dir uv \
+ && uv pip compile /tmp/pyproject.toml --output-file /tmp/requirements-arm64.txt \
+ && uv pip install --system --break-system-packages --no-cache -r /tmp/requirements-arm64.txt \
+ && python -m pip install --no-cache-dir \
+      'numpy<2' \
+      'pin==2.7.0' \
+      /opt/robopro/wheels/sapien-*.whl \
+      /opt/robopro/wheels/mplib-0.2.1-cp312-cp312-linux_aarch64.whl
+
+ENV LD_LIBRARY_PATH=/opt/hpcx/ucx/lib:/opt/hpcx/ucc/lib:/opt/fcl-cmeel/lib:${LD_LIBRARY_PATH}
+WORKDIR /workspace/RoboPRO
+COPY . /workspace/RoboPRO
+RUN cd customized_robotwin \
+ && SKIP_BASE_DEPS=1 SKIP_CUROBO=1 bash script/_install.sh \
+ && if [ "$INSTALL_CUROBO" = "1" ]; then \
+      SKIP_BASE_DEPS=1 bash script/_install.sh; \
+    fi
+
+CMD ["bash"]

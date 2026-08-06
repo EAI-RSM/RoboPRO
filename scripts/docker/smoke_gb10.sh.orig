@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+IMAGE="${IMAGE:-robopro:gb10}"
+gpu_args=(--gpus all)
+if [[ -n "${CUDA_VISIBLE_DEVICES:-}" ]]; then
+  gpu_args=(--gpus "device=${CUDA_VISIBLE_DEVICES}")
+fi
+
+docker run --rm \
+  "${gpu_args[@]}" \
+  --ipc=host \
+  --ulimit memlock=-1 \
+  --ulimit stack=67108864 \
+  --env NVIDIA_DRIVER_CAPABILITIES=graphics,utility,compute \
+  "$IMAGE" \
+  python -c "import platform, torch, sapien, mplib; scene = sapien.Scene(); pose = mplib.Pose(); tensor = torch.ones(1, device='cuda'); print(platform.machine(), torch.cuda.get_device_name(0), sapien.__version__, mplib.__version__, type(scene).__name__, pose, tensor.device)"

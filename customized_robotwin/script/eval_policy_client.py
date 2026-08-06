@@ -163,8 +163,13 @@ class ModelClient:
 
     def _connect(self):
         attempts = 0
-        max_attempts = 1000
-        retry_delay = 5
+        max_attempts = int(os.environ.get("MODEL_SERVER_CONNECT_ATTEMPTS", "12"))
+        retry_delay = float(os.environ.get("MODEL_SERVER_RETRY_DELAY", "5"))
+        if max_attempts < 1 or retry_delay < 0:
+            raise ValueError(
+                "MODEL_SERVER_CONNECT_ATTEMPTS must be >= 1 and "
+                "MODEL_SERVER_RETRY_DELAY must be >= 0"
+            )
         
         while attempts < max_attempts:
             try:
@@ -283,7 +288,15 @@ class ModelClient:
 
 
 def main(usr_args):
-    current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    current_time = datetime.now().strftime("%Y-%m-%d-%H-%M-%S")
+    run_tag = os.getenv("EVAL_RUN_TAG", "").strip()
+    if run_tag:
+        allowed = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_.-"
+        if any(character not in allowed for character in run_tag):
+            raise ValueError(
+                "EVAL_RUN_TAG may contain only letters, digits, '_', '-', and '.'"
+            )
+        current_time = f"{current_time}-{run_tag}"
     task_name = usr_args["task_name"]
     task_config = usr_args["task_config"]
     ckpt_setting = usr_args["ckpt_setting"]

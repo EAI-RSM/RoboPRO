@@ -5,7 +5,11 @@ import json
 
 import os
 import pickle
-import open3d as o3d
+
+try:
+    import open3d as o3d
+except ImportError:
+    o3d = None
 
 
 def ensure_dir(file_path):
@@ -34,11 +38,21 @@ def save_pkl(save_path, dic_file):
 
 def save_pcd(save_path, pcd_arr, color=False):
     ensure_dir(save_path)
-    point_cloud = o3d.geometry.PointCloud()
     point_arr = pcd_arr[:, :3]
+    colors_arr = pcd_arr[:, -3:] if color else None
+
+    if o3d is None:
+        import trimesh
+
+        point_cloud = trimesh.points.PointCloud(
+            vertices=point_arr, colors=colors_arr
+        )
+        point_cloud.export(save_path)
+        return
+
+    point_cloud = o3d.geometry.PointCloud()
     point_cloud.points = o3d.utility.Vector3dVector(point_arr)
     if color:
-        colors_arr = pcd_arr[:, -3:]
         point_cloud.colors = o3d.utility.Vector3dVector(colors_arr)
 
     o3d.io.write_point_cloud(save_path, point_cloud)
