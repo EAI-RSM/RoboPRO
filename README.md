@@ -188,8 +188,6 @@ The script spawns a `policy_model_server.py` in the pi05 venv and an `eval_polic
 
 **Eval seeds.** When `BENCH_ROOT` is set and `benchmark/eval_seeds/<task>/<task_config>.txt` exists, eval loads that fixed seed list (skips live expert scanning). Override with `--eval_seed_file /path/to.txt`, or fall back to scanning other seeds with `--use_eval_seeds false`. Cap episodes with `--test_num N` (capped by the file length). Precollect seeds via `python script/precollect_eval_seeds.py <task> <task_config>` (also used by `scripts/slurm/slurm_precollect_then_eval.sh`).
 
-> **Note.** Precollected seeds are already expert-validated, so the live expert-check is skipped and each episode's instruction is drawn from `instruction_bank.json` (resolved via `BENCH_ROOT`, since eval runs from `customized_robotwin/`). Verified end-to-end with the `robopro_jax_30000` base on `put_milktea_on_shelf` and `put_milktea_next_to_laptop`, clean (`bench_demo_office_clean`) and clutter (`bench_demo_office_d10`).
-
 **Direct Python invocation** (bypassing the shell wrappers):
 
 ```bash
