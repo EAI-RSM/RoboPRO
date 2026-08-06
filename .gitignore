@@ -71,6 +71,7 @@ benchmark_data/*
 !benchmark_data/.gitkeep
 benchmark/collision_test/
 benchmark/bench_script/collision_test/
+benchmark/test_output/
 presentation_material/
 
 # Validation outputs (generated, not tracked)
