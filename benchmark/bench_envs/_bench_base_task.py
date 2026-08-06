@@ -41,6 +41,11 @@ class Bench_base_task(Base_Task):
     Base task for all benchmark tasks. Mimics robotwin base task, with some functionality changes
     """
     FURNITURE_NAMES = {"table", "wall", "ground"}
+    # Camera used for eval videos, first match wins. countertop_camera is the
+    # elevated overhead view added per-scene by add_extra_cameras(); the rest are
+    # fallbacks for scenes/embodiments that don't define it. All are D435, which
+    # matches the video_size the eval client derives from head_camera_type.
+    EVAL_VIDEO_CAMERAS = ("countertop_camera", "demo_camera", "head_camera")
     # Gripper links excluded from robot-to-furniture/static collision metrics (expected contact during manipulation)
     GRIPPER_LINK_NAMES = {"fr_link7", "fr_link8", "fl_link7", "fl_link8"}
     # Collision force threshold (N): ignore contacts with avg force below this.
@@ -1771,7 +1776,7 @@ class Bench_base_task(Base_Task):
         eval_video_freq = 1  # fixed
         if (self.eval_video_path is not None and self.take_action_cnt % eval_video_freq == 0):
             obs = self.now_obs.get("observation", {})
-            for _cam in ("demo_camera", "countertop_camera", "head_camera"):
+            for _cam in self.EVAL_VIDEO_CAMERAS:
                 if _cam in obs:
                     self.eval_video_ffmpeg.stdin.write(obs[_cam]["rgb"].tobytes())
                     break
@@ -1978,7 +1983,13 @@ class Bench_base_task(Base_Task):
                 if _rec:
                     self._take_picture()  # final frame at task success
                 if (self.eval_video_path is not None):
-                    self.eval_video_ffmpeg.stdin.write(self.now_obs["observation"]["head_camera"]["rgb"].tobytes())
+                    # Same camera preference as the per-step frames, otherwise
+                    # the success frame jumps to a different viewpoint.
+                    _obs = self.now_obs.get("observation", {})
+                    for _cam in self.EVAL_VIDEO_CAMERAS:
+                        if _cam in _obs:
+                            self.eval_video_ffmpeg.stdin.write(_obs[_cam]["rgb"].tobytes())
+                            break
                 return
 
         self._update_render()

@@ -183,8 +183,9 @@ class chain_bowl_rack_apple_sink_ks(KitchenS_base_task):
         b1 = self.bowl1.get_pose().p
         ap = self.apple.get_pose().p
 
-        bowl_on_rack = (abs(b1[0] - rack_p[0]) < 0.15
-                        and abs(b1[1] - rack_p[1]) < 0.20)
+        bowl_on_rack = (abs(b1[0] - rack_p[0]) < 0.12
+                        and abs(b1[1] - rack_p[1]) < 0.10          # tightened toward true rack extent
+                        and b1[2] > rack_p[2] - 0.08)              # elevated onto rack, not counter beside it
         apple_in_sink = (abs(ap[0] - sink_p[0]) < sg["hole_hx"]
                          and abs(ap[1] - sink_p[1]) < sg["hole_hy"]
                          and ap[2] < sink_p[2] + 0.02)

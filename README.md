@@ -202,6 +202,8 @@ bash policy/pi05/eval_double_env.sh put_mouse_on_pad bench_demo_office_clean my_
 
 The script spawns a `policy_model_server.py` in the pi05 venv and an `eval_policy_client.py` in the RoboTwin conda env, communicating over a free socket port.
 
+**Eval seeds.** When `BENCH_ROOT` is set and `benchmark/eval_seeds/<task>/<task_config>.txt` exists, eval loads that fixed seed list (skips live expert scanning). Override with `--eval_seed_file /path/to.txt`, or fall back to scanning other seeds with `--use_eval_seeds false`. Cap episodes with `--test_num N` (capped by the file length). Precollect seeds via `python script/precollect_eval_seeds.py <task> <task_config>` (also used by `scripts/slurm/slurm_precollect_then_eval.sh`).
+
 **Direct Python invocation** (bypassing the shell wrappers):
 
 ```bash

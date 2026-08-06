@@ -36,6 +36,7 @@ from copy import deepcopy
 from pathlib import Path
 
 import numpy as np
+import sapien.core as sapien
 import torch
 import transforms3d as t3d
 from curobo.types.state import JointState
@@ -396,6 +397,148 @@ OCC_PAD_CLEARANCE = 0.05
 _PAD_HALF = 0.06               # pad half-size (create_box half_size xy)
 _OCC_HALF = 0.06               # milk-box base half-extent (~0.11 x 0.122 footprint)
 OCC_PAD_MIN_DIST = _PAD_HALF + _OCC_HALF + OCC_PAD_CLEARANCE
+# Placement retries (target/occluder pose resampling) are pure geometry -- no actor or
+# physics work -- so retrying hundreds of times inside load_actors before ever creating
+# an actor is essentially free next to the mesh/physics/curobo cost load_actors already
+# pays regardless. Simulated against TARGET_XLIM/TARGET_YLIM/PAD_XY (500 seeds/range,
+# cap=200): OCC_DISTANCE_CM=15,20 / 10,15 / 30,40 all converge in a handful of attempts
+# with zero residual failures; 20,30 is a genuinely harder band (~2% single-draw success
+# rate -- that gap size collides with the fixed pad across much of the target's spawn
+# area) and still had 3.8% residual failures at cap=200. Bumped to 500 as cheap insurance
+# (~(1-0.021)**500 ~= 0.002% projected residual, not re-simulated). Any seed that still
+# fails after the cap falls through to the existing occluder_pad_clearance_ok check in
+# run(), which rejects/skips it exactly as before -- just far more rarely.
+_MAX_PLACEMENT_ATTEMPTS = 500
+
+# --- yaw-aware edge-to-edge geometry (OCC_DISTANCE_CM is a true surface gap, not a
+# center-to-center offset -- these turn each object's mesh AABB + yaw into a footprint
+# rectangle and solve for the center-to-center placement that yields the requested gap).
+_MODEL_DATA_CACHE = {}
+
+
+def _yaw_from_quat(q):
+    """World-frame yaw (about Z) of a pose quaternion. Every actor here is first stood
+    upright by a fixed base qpos (local mesh Y -> world Z) and then optionally yawed, so
+    the local mesh X axis always ends up rotated purely within the world XY plane --
+    reading it off the rotation matrix sidesteps having to invert that qpos algebra."""
+    R = t3d.quaternions.quat2mat(q)
+    return float(np.arctan2(R[1, 0], R[0, 0]))
+
+
+def _footprint_half_extents(extents, scale):
+    """(half-x, half-y) world footprint of an object's mesh AABB at yaw=0 (local mesh
+    X/Z -> world X/Y once stood upright; local Y is height -> world Z)."""
+    return float(extents[0] * scale[0] / 2.0), float(extents[2] * scale[2] / 2.0)
+
+
+def _model_footprint_half_extents(modelname, model_id, scale_override=None):
+    """Footprint half-extents for modelname/model_id, read straight from its
+    model_data{id}.json -- mirrors create_actor's own scale resolution (explicit
+    scale_override wins, else the model's own "scale", else [1,1,1]) without needing
+    the actor to already exist, so target/occluder placement can be resolved by a
+    pre-creation retry loop before any (expensive) actor/mesh work happens."""
+    key = (modelname, model_id)
+    model_data = _MODEL_DATA_CACHE.get(key)
+    if model_data is None:
+        path = Path(os.environ["BENCH_ROOT"]) / "assets" / "objects" / modelname / f"model_data{model_id}.json"
+        with open(path) as f:
+            model_data = json.load(f)
+        _MODEL_DATA_CACHE[key] = model_data
+    scale = scale_override if scale_override is not None else model_data.get("scale", [1.0, 1.0, 1.0])
+    if isinstance(scale, (int, float)):
+        scale = [scale, scale, scale]
+    return _footprint_half_extents(model_data["extents"], scale)
+
+
+def _occluder_footprint_half_extents():
+    """Milk-box (model_id=2) footprint half-extents; scale is always [1,1,1]."""
+    return _model_footprint_half_extents("038_milk-box", 2, [1.0, 1.0, 1.0])
+
+
+def _rect_corners(center_xy, yaw, half_x, half_y):
+    """World-space corners (in order, so consecutive pairs are edges) of a yaw-rotated
+    rectangle footprint centered at center_xy."""
+    c, s = np.cos(yaw), np.sin(yaw)
+    local = np.array([[half_x, half_y], [half_x, -half_y], [-half_x, -half_y], [-half_x, half_y]])
+    rot = local @ np.array([[c, -s], [s, c]]).T
+    return rot + np.asarray(center_xy, dtype=float)
+
+
+def _closest_pt_seg_seg(p1, q1, p2, q2):
+    """Distance between closest points on 2D segments p1-q1 and p2-q2 (Ericson,
+    Real-Time Collision Detection 5.1.9 -- handles degenerate/parallel cases)."""
+    d1, d2, r = q1 - p1, q2 - p2, p1 - p2
+    a, e, f = d1 @ d1, d2 @ d2, d2 @ r
+    eps = 1e-12
+    if a <= eps and e <= eps:
+        return float(np.linalg.norm(p1 - p2))
+    if a <= eps:
+        s, t = 0.0, np.clip(f / e, 0.0, 1.0)
+    else:
+        c = d1 @ r
+        if e <= eps:
+            t, s = 0.0, np.clip(-c / a, 0.0, 1.0)
+        else:
+            b = d1 @ d2
+            denom = a * e - b * b
+            s = np.clip((b * f - c * e) / denom, 0.0, 1.0) if denom > eps else 0.0
+            t = (b * s + f) / e
+            if t < 0.0:
+                t, s = 0.0, np.clip(-c / a, 0.0, 1.0)
+            elif t > 1.0:
+                t, s = 1.0, np.clip((b - c) / a, 0.0, 1.0)
+    return float(np.linalg.norm((p1 + s * d1) - (p2 + t * d2)))
+
+
+def _rects_overlap(poly_a, poly_b):
+    """Separating-axis test for two convex quadrilaterals."""
+    for poly in (poly_a, poly_b):
+        for i in range(len(poly)):
+            edge = poly[(i + 1) % len(poly)] - poly[i]
+            axis = np.array([-edge[1], edge[0]])
+            norm = np.linalg.norm(axis)
+            if norm < 1e-12:
+                continue
+            axis = axis / norm
+            proj_a, proj_b = poly_a @ axis, poly_b @ axis
+            if proj_a.max() < proj_b.min() - 1e-9 or proj_b.max() < proj_a.min() - 1e-9:
+                return False
+    return True
+
+
+def _min_rect_distance(center_a, yaw_a, half_a, center_b, yaw_b, half_b):
+    """True minimum distance between two yaw-rotated rectangle footprints (0 if they
+    overlap) -- exact for convex quadrilaterals, not an axis-aligned approximation."""
+    poly_a = _rect_corners(center_a, yaw_a, *half_a)
+    poly_b = _rect_corners(center_b, yaw_b, *half_b)
+    if _rects_overlap(poly_a, poly_b):
+        return 0.0
+    best = float("inf")
+    for i in range(4):
+        for j in range(4):
+            best = min(best, _closest_pt_seg_seg(poly_a[i], poly_a[(i + 1) % 4],
+                                                 poly_b[j], poly_b[(j + 1) % 4]))
+    return best
+
+
+def _solve_center_offset_for_gap(target_center, target_yaw, target_half, occ_yaw, occ_half,
+                                 desired_gap, direction=np.array([0.0, -1.0])):
+    """Bisect the center-to-center distance D (along `direction` from target_center) at
+    which the true edge-to-edge distance between the target and occluder footprints
+    equals `desired_gap`. Distance between two disjoint convex shapes translated apart
+    grows monotonically with the separation, so bisection converges regardless of yaw."""
+    diag_a = float(np.hypot(*target_half))
+    diag_b = float(np.hypot(*occ_half))
+    lo, hi = 0.0, desired_gap + diag_a + diag_b + 0.05
+    for _ in range(60):
+        mid = (lo + hi) / 2.0
+        occ_center = np.asarray(target_center, dtype=float) + mid * direction
+        gap = _min_rect_distance(target_center, target_yaw, target_half, occ_center, occ_yaw, occ_half)
+        if gap < desired_gap:
+            lo = mid
+        else:
+            hi = mid
+    return (lo + hi) / 2.0
 
 
 def dr_measure(clutter_density):
@@ -423,7 +566,9 @@ def make_occluder_task():
         # pickup_reachability_map.py to reach the picked-up state, then probe IK.
         PICKUP_ONLY = False
         spawn_occluder = False
-        occluder_offset = 0.2         # metres in front (-y) of the target
+        occluder_offset = 0.2         # desired EDGE-TO-EDGE gap (metres, -y of the target);
+                                       # load_actors solves the actual center-to-center
+                                       # placement that yields this true surface distance
         target_model = TARGET_MODEL
         target_id = TARGET_ID
         target_xlim = TARGET_XLIM
@@ -431,9 +576,52 @@ def make_occluder_task():
         fixed_pad_xy = PAD_XY
 
         def load_actors(self):
-            # target: random within the upper-third band (varies per seed -> distribution)
+            # target: random within the upper-third band (varies per seed -> distribution).
+            # When an occluder is being spawned, target/occluder placement is resolved
+            # BEFORE any actor is created (pure geometry -- no mesh/physics cost) by
+            # retrying the random draw up to _MAX_PLACEMENT_ATTEMPTS times until the
+            # occluder clears the destination pad, instead of building the whole scene
+            # and only then discovering (and discarding) a pad conflict. Re-yawing the
+            # occluder alone isn't enough to escape most conflicts (it only shifts the
+            # projected footprint by a few cm); target position dominates whether the
+            # occluder lands near the pad, so it's resampled too on each retry.
             target_pose = rand_pose(xlim=list(self.target_xlim), ylim=list(self.target_ylim),
                                     qpos=[0.5, 0.5, 0.5, 0.5], rotate_rand=True, rotate_lim=[0, 3.14, 0])
+
+            self.occluder_pad_clearance_ok = True
+            occ_yaw = occ_half = target_half = dist = probe_pose = None
+            if self.spawn_occluder:
+                target_scale_override = self.item_info["scales"].get(self.target_model, {}).get(
+                    f"{self.target_id}", None)
+                target_half = _model_footprint_half_extents(
+                    self.target_model, self.target_id, target_scale_override)
+                occ_half = _occluder_footprint_half_extents()
+
+                placement_ok = False
+                for attempt in range(_MAX_PLACEMENT_ATTEMPTS):
+                    tx, ty = float(target_pose.p[0]), float(target_pose.p[1])
+                    target_yaw = _yaw_from_quat(target_pose.q)
+                    # sample the occluder's yaw/z the normal way; x/y are placeholders,
+                    # overwritten below once the yaw-aware offset is solved for.
+                    probe_pose = rand_pose(xlim=[0.0], ylim=[0.0], qpos=OCCLUDER_QPOS,
+                                           rotate_rand=True, rotate_lim=[0, 3.14, 0])
+                    occ_yaw = _yaw_from_quat(probe_pose.q)
+                    dist = _solve_center_offset_for_gap((tx, ty), target_yaw, target_half,
+                                                        occ_yaw, occ_half, self.occluder_offset)
+                    oy = ty - dist
+                    pad_dist = float(np.hypot(tx - self.fixed_pad_xy[0], oy - self.fixed_pad_xy[1]))
+                    if pad_dist >= OCC_PAD_MIN_DIST:
+                        placement_ok = True
+                        break
+                    # Only resample if another attempt will actually consume the new
+                    # draw -- on the last attempt, redrawing target_pose here would
+                    # leave it inconsistent with the (dist, probe_pose) computed above
+                    # for the failed check, since nothing re-validates this final draw.
+                    if attempt < _MAX_PLACEMENT_ATTEMPTS - 1:
+                        target_pose = rand_pose(xlim=list(self.target_xlim), ylim=list(self.target_ylim),
+                                                qpos=[0.5, 0.5, 0.5, 0.5], rotate_rand=True, rotate_lim=[0, 3.14, 0])
+                self.occluder_pad_clearance_ok = placement_ok
+
             # scale from the task yaml if present, else None -> model's own scale
             self.target_obj = create_actor(
                 scene=self, pose=target_pose, modelname=self.target_model, convex=True,
@@ -453,12 +641,17 @@ def make_occluder_task():
             self.des_obj_pose = self.des_obj.get_pose().p.tolist() + [0, 0, 0, 1]
             self.des_obj_pose[2] += 0.02
 
-            # occluder: one tall milk-box, deterministically at mouse-x, just in front (-y)
+            # occluder: one tall milk-box, deterministically at mouse-x, just in front (-y),
+            # at the (target/occluder pose, gap-solved) placement resolved above.
+            # self.occluder_offset is the desired EDGE-TO-EDGE gap (meters); it is NOT the
+            # center-to-center distance -- that's solved for below (via _solve_center_
+            # offset_for_gap) so the requested gap holds regardless of either object's
+            # yaw or footprint size.
             if self.spawn_occluder:
-                mp = self.target_obj.get_pose().p
-                ox, oy = float(mp[0]), float(mp[1]) - self.occluder_offset
-                occ_pose = rand_pose(xlim=[ox], ylim=[oy], qpos=OCCLUDER_QPOS,
-                                     rotate_rand=True, rotate_lim=[0, 3.14, 0])  # random yaw
+                tx, ty = float(target_pose.p[0]), float(target_pose.p[1])
+                ox, oy = tx, ty - dist
+                occ_pose = sapien.Pose([ox, oy, float(probe_pose.p[2])], probe_pose.q)
+
                 self.occluder = create_actor(
                     scene=self, pose=occ_pose, modelname="038_milk-box", convex=True,
                     model_id=2, scale=[1.0, 1.0, 1.0],
@@ -2404,21 +2597,25 @@ def run(args):
             # per-build coin flip: drop the occluder with prob no_occluder_prob
             show = bool(np.random.default_rng(int(seed) * 1000 + int(round(off * 100))).random()
                         >= args.no_occluder_prob)
-            # Reject scenes where the occluder (at target_x, target_y - off) would land
-            # too close to / on the destination pad, blocking the target's placement.
-            if show:
-                occ_xy = np.array([clean_pose[0], clean_pose[1] - off])
-                pad_dist = float(np.linalg.norm(occ_xy - np.array(PAD_XY)))
-                if pad_dist < OCC_PAD_MIN_DIST:
-                    print(f"[seed {seed}] occluder@off={off} is {pad_dist:.3f}m from pad "
-                          f"(< {OCC_PAD_MIN_DIST:.3f}m); rejecting this build.")
-                    continue
+            # Pad-clearance rejection can't be pre-estimated from `off` any more -- `off`
+            # is now an edge-to-edge gap, and the actual center-to-center placement (and
+            # thus the occluder's real xy) depends on both objects' yaw, only known once
+            # load_actors actually builds the scene. So this is checked for real (via
+            # env.occluder_pad_clearance_ok, set in load_actors) right after the first
+            # build below, and the whole seed is rejected there instead of pre-build.
             env.spawn_occluder = show
             env.occluder_offset = off
+            pad_reject = False
             for cd in clutter_densities:
                 try:
                     env.setup_demo(**build_cfg("put_mouse_on_pad", args.base_config, seed,
                                                dr_measure(cd)))
+                    if show and not env.occluder_pad_clearance_ok:
+                        print(f"[seed {seed}] occluder@off={off} lands too close to the pad "
+                              f"(< {OCC_PAD_MIN_DIST:.3f}m); rejecting this build.")
+                        pad_reject = True
+                        safe_close()
+                        break
                     target = _resolve_target(env)
                     pose_ok = bool(np.allclose(np.array(target.actor.get_pose().p), clean_pose, atol=1e-4))
                     res = env.measure_target_visibility(target, camera_name=CAMERA, denominator=full_px)
@@ -2478,6 +2675,8 @@ def run(args):
                     ep_counter += 1
                 fout.write(json.dumps(rec) + "\n")
                 fout.flush()
+            if pad_reject:
+                continue
             print(f"[{si+1}/{len(seeds)}] seed {seed}: off={off:.3f}m full_px={full_px} done")
 
     safe_close()
@@ -2490,8 +2689,10 @@ def main():
     ap.add_argument("--seed-start", type=int, default=0)
     ap.add_argument("--num-seeds", type=int, default=50)
     ap.add_argument("--occluding-object-distance", default="20,20",
-                    help="occluder distance range 'lo,hi' in CM in front of the target; each "
-                         "seed independently draws a random offset uniformly from [lo, hi] "
+                    help="occluder EDGE-TO-EDGE gap range 'lo,hi' in CM in front of the "
+                         "target (true closest-surface distance between the two objects' "
+                         "yaw-rotated footprints, not center-to-center); each seed "
+                         "independently draws a random gap uniformly from [lo, hi] "
                          "(pass e.g. 20,20 for a single fixed distance)")
     ap.add_argument("--clutter-densities", default="0",
                     help="table clutter density/densities to sweep in the measurement scene, "
@@ -2518,8 +2719,8 @@ def main():
 
     if not args.plot_only:
         run(args)
-    group_label = {"occ_distance_range_cm": "occluder distance range (cm)",
-                   "offset": "occluder offset (m)",
+    group_label = {"occ_distance_range_cm": "occluder edge-to-edge gap range (cm)",
+                   "offset": "occluder edge-to-edge gap (m)",
                    "clutter_density": "table clutter density"}[args.group_by]
     out_dir = effective_out_dir(args)
     analyze_kwargs = dict(group_key=args.group_by, group_label=group_label,

@@ -131,7 +131,7 @@ COLLECT_START_SEED ?=
 COLLECT_BRANCH_NUM ?= 0
 COLLECT_BRANCH_LOOKBACK ?= 5,10,15
 COLLECT_BRANCH_NOISE_STEPS ?= 1
-ACTION_NOISE_VAR ?= 0.005
+ACTION_NOISE_VAR ?= 0.0
 COLLECT_FIXED_SEED ?= 0
 
 # Occluder / reachability analysis flags (issue #35)
@@ -139,6 +139,8 @@ OFFSET ?= 0.2
 OCC_DISTANCE_CM ?= 20,20
 OCC_SEED_START ?= 0
 OCC_NUM_SEEDS ?= 50
+# Per-seed probability of dropping the occluder entirely (0 = always spawn it, 1 = never).
+NO_OCCLUDER_PROB ?= 0.2
 SAVE_IMAGES ?= 0
 REACH_SEED ?= 1
 REACH_Z ?= 0.90
@@ -193,7 +195,7 @@ help:
 	'' \
 	'Occluder / reachability analysis (issue #35):' \
 	'  make occluder-visibility      Occluder visibility sweep (+rollout with ROLLOUT=1).' \
-	'    Vars: OCC_DISTANCE_CM=20,20 OCC_SEED_START=0 OCC_NUM_SEEDS=50 SAVE_IMAGES=0|1 ROLLOUT=0|1 CUROBO_TRAJOPT_SEEDS=16 CUROBO_MAX_ATTEMPTS=24' \
+	'    Vars: OCC_DISTANCE_CM=20,20 OCC_SEED_START=0 OCC_NUM_SEEDS=50 NO_OCCLUDER_PROB=0.2 SAVE_IMAGES=0|1 ROLLOUT=0|1 CUROBO_TRAJOPT_SEEDS=16 CUROBO_MAX_ATTEMPTS=24' \
 	'      CUROBO_FINETUNE_ATTEMPTS= CUROBO_FINETUNE_DT_SCALE= (empty = CuRobo default 5 / 0.85)' \
 	'      CUROBO_ATTACH_SPHERE_RADIUS=0.001 LOCAL_WAYPOINT_ATTEMPTS=5 ATTACHED_TRAJECTORY_SLOWDOWN=2 WAYPOINT_SHRINK_MIN_DISTANCE=0.05 OUT_DIR= (timestamp a validation run, e.g. results/2026-07-07-10-10-12)' \
 	'  make analyze-occluder-rollout Summarize saved rollout success/failure modes.' \
@@ -543,7 +545,7 @@ occluder-visibility:
 		export ATTACHED_TRAJECTORY_SLOWDOWN="$(ATTACHED_TRAJECTORY_SLOWDOWN)"; \
 		export WAYPOINT_SHRINK_MIN_DISTANCE="$(WAYPOINT_SHRINK_MIN_DISTANCE)"; \
 		export PYTORCH_CUDA_ALLOC_CONF="expandable_segments:True"; \
-		cmd='$(PYTHON) script/bench_script/analyze_occluder_visibility.py --base-config "$(TASK_CONFIG)" --seed-start "$(OCC_SEED_START)" --num-seeds "$(OCC_NUM_SEEDS)" --occluding-object-distance "$(OCC_DISTANCE_CM)"'; \
+		cmd='$(PYTHON) script/bench_script/analyze_occluder_visibility.py --base-config "$(TASK_CONFIG)" --seed-start "$(OCC_SEED_START)" --num-seeds "$(OCC_NUM_SEEDS)" --occluding-object-distance "$(OCC_DISTANCE_CM)" --no-occluder-prob "$(NO_OCCLUDER_PROB)"'; \
 		if [[ "$(ROLLOUT)" == "1" ]]; then cmd+=" --rollout"; fi; \
 		if [[ "$(SAVE_IMAGES)" == "1" ]]; then cmd+=" --save-images"; fi; \
 		if [[ -n "$(OUT_DIR)" ]]; then cmd+=" --out-dir \"$(OUT_DIR)\""; fi; \

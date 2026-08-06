@@ -107,8 +107,9 @@ class move_cups_into_box(Study_base_task):
 
     def check_success(self):
         box_bb = get_actor_boundingbox(self.box.actor)
-        obj_poses = np.stack([op[-1].get_pose().p[:2] for op in self.target_objects], axis=0)
-        return (np.all((box_bb[0][:2] <= obj_poses)  & 
-                       (obj_poses <= box_bb[1][:2]))
+        obj_poses = np.stack([op[-1].get_pose().p for op in self.target_objects], axis=0)  # full XYZ
+        xy_in = np.all((box_bb[0][:2] <= obj_poses[:, :2]) & (obj_poses[:, :2] <= box_bb[1][:2]), axis=1)
+        below_rim = obj_poses[:, 2] < box_bb[1][2]     # each cup below the box rim, not balanced on the wall
+        return (bool(np.all(xy_in & below_rim))
                 and self.robot.is_left_gripper_open()
                 and self.robot.is_right_gripper_open())
