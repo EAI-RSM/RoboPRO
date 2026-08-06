@@ -25,7 +25,7 @@ import argparse
 import pdb
 
 from generate_episode_instructions import *
-from script.eval_seeds import resolve_eval_seeds, resolve_test_num
+from script.eval_seeds import resolve_eval_seeds, resolve_test_num, resolve_expert_check, resolve_instruction_bank
 
 current_file_path = os.path.abspath(__file__)
 parent_directory = os.path.dirname(current_file_path)
@@ -183,6 +183,7 @@ def main(usr_args):
     suc_nums = []
     seed_list = resolve_eval_seeds(task_name, task_config, usr_args)
     test_num = resolve_test_num(usr_args, seed_list, default=1)
+    expert_check = resolve_expert_check(usr_args, default=True)
     topk = 1
 
     if seed_list is not None:
@@ -203,6 +204,7 @@ def main(usr_args):
         video_size=video_size,
         instruction_type=instruction_type,
         seed_list=seed_list,
+        expert_check=expert_check,
     )
     suc_nums.append(suc_num)
 
@@ -228,12 +230,14 @@ def eval_policy(task_name,
                 test_num=100,
                 video_size=None,
                 instruction_type=None,
-                seed_list=None):
+                seed_list=None,
+                expert_check=True):
     print(f"\033[34mTask Name: {args['task_name']}\033[0m")
     print(f"\033[34mPolicy Name: {args['policy_name']}\033[0m")
 
-    # Precollected seeds were already expert-validated; skip live expert_check.
-    expert_check = seed_list is None
+    # Honor the caller's expert_check setting, but always skip the live check for
+    # precollected seeds (already expert-validated).
+    expert_check = expert_check and (seed_list is None)
     TASK_ENV.suc = 0
     TASK_ENV.test_num = 0
 
@@ -309,7 +313,7 @@ def eval_policy(task_name,
         # Language perturbation: use instruction bank if enabled
         lang_perturb = args.get("domain_randomization", {}).get("language_perturbation", {})
         if lang_perturb.get("enabled", False) and lang_perturb.get("instruction_bank"):
-            bank_path = lang_perturb["instruction_bank"]
+            bank_path = resolve_instruction_bank(lang_perturb["instruction_bank"])
             if os.path.exists(bank_path):
                 with open(bank_path, "r") as f_bank:
                     bank = json.load(f_bank)

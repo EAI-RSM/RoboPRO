@@ -100,3 +100,16 @@ def resolve_instruction_bank(bank_path):
         if cand and os.path.exists(cand):
             return cand
     return bank_path
+
+
+def resolve_expert_check(usr_args, default=True):
+    """Whether to run the live expert pre-check per seed (scan mode only).
+
+    Precedence: `--expert_check <bool>` / `EXPERT_CHECK` env, else `default`.
+    Callers AND this with `seed_list is None`, since precollected seeds are
+    already expert-validated and never need a live check.
+    """
+    val = usr_args.get("expert_check", os.environ.get("EXPERT_CHECK"))
+    if val is None:
+        return default
+    return _truthy(val, default=default)
