@@ -82,14 +82,15 @@ def patchify_heatmap(
 def kl_div(
     P: at.Float[at.Array, "b n"],  # noqa: N803
     Q: at.Float[at.Array, "b n"],  # noqa: N803
-    eps: float = 1e-8,
+    eps: float = 1e-6,
     reverse: bool = False,
 ) -> at.Float[at.Array, ""]:
     """D_KL(P || Q) averaged over batch items with non-empty target (fp32).
 
-    Both distributions are eps-smoothed + renormalized to strictly positive so the
-    KL is finite in both directions (see SafeVLA notes). Items whose target has zero
-    mass before smoothing are excluded from the mean.
+    Both distributions are eps-smoothed, clamped, and renormalized to strictly
+    positive so the KL is finite in both directions. Items whose target has zero
+    mass before smoothing are excluded from the mean. Shared ``eps`` applies to
+    forward and reverse KL (larger than SafeVLA's 1e-8 for training stability).
     """
     P = P.astype(jnp.float32)
     Q = Q.astype(jnp.float32)
@@ -100,14 +101,22 @@ def kl_div(
     Q = Q + eps
     Q = Q / jnp.sum(Q, axis=-1, keepdims=True)
 
+    # Second pass: bound mass away from 0/1 so log-ratios stay within ~±log(1/eps).
+    P = jnp.clip(P, eps, 1.0)
+    P = P / jnp.sum(P, axis=-1, keepdims=True)
+    Q = jnp.clip(Q, eps, 1.0)
+    Q = Q / jnp.sum(Q, axis=-1, keepdims=True)
+
     target = P if not reverse else Q
     model_pred = Q if not reverse else P
-    # target * (log target - log model_pred), summed over tokens.
-    per_sample = jnp.sum(target * (jnp.log(target) - jnp.log(model_pred)), axis=-1)  # [B]
+    log_target = jnp.log(jnp.clip(target, eps, 1.0))
+    log_pred = jnp.log(jnp.clip(model_pred, eps, 1.0))
+    per_sample = jnp.sum(target * (log_target - log_pred), axis=-1)  # [B]
 
     valid_f = valid.astype(jnp.float32)
     denom = jnp.clip(jnp.sum(valid_f), a_min=1.0, a_max=None)
-    return jnp.sum(per_sample * valid_f) / denom
+    kl = jnp.sum(per_sample * valid_f) / denom
+    return jnp.nan_to_num(kl, nan=0.0, posinf=0.0, neginf=0.0)
 
 
 def compute_attn_loss(
@@ -116,6 +125,7 @@ def compute_attn_loss(
     supervised_layer_lr: list[float],
     reverse_kl: bool = False,
     prefix: str = "supervised",
+    eps: float = 1e-6,
 ) -> dict[str, jax.Array]:
     """Per-supervised-layer weighted KL between model attention and the GT heatmap.
 
@@ -125,8 +135,10 @@ def compute_attn_loss(
     loss_dict: dict[str, jax.Array] = {}
     for layer_idx in range(model_attns.shape[0]):
         attn = model_attns[layer_idx]  # [B, N]
-        attn = attn / jnp.clip(jnp.sum(attn, axis=-1, keepdims=True), a_min=1e-8, a_max=None)
-        kl_loss = kl_div(gt_attns, attn, reverse=reverse_kl)
+        attn = attn / jnp.clip(jnp.sum(attn, axis=-1, keepdims=True), a_min=eps, a_max=None)
+        attn = jnp.clip(attn, eps, 1.0)
+        attn = attn / jnp.sum(attn, axis=-1, keepdims=True)
+        kl_loss = kl_div(gt_attns, attn, eps=eps, reverse=reverse_kl)
         loss_dict[f"{prefix}_kl_loss_layer_{layer_idx}"] = supervised_layer_lr[layer_idx] * kl_loss
     return loss_dict
 
@@ -165,7 +177,7 @@ class AttnQueryHead(nnx.Module):
         )
         # Learnable query table [R, C], one query per role.
         key = rngs.params()
-        self.queries = nnx.Param(jax.random.normal(key, (num_roles, feat_dim)) * (feat_dim**-0.5))
+        self.queries = nnx.Param(jax.random.normal(key, (num_roles, feat_dim)))
 
     def __call__(self, attn: at.Float[at.Array, "s b n"]) -> at.Float[at.Array, "s b r n"]:
         s, b, n = attn.shape
@@ -175,7 +187,7 @@ class AttnQueryHead(nnx.Module):
         f = self.stem(x)  # [S*B, in_h, in_w, C]
         f = f.reshape(s * b, n, self.feat_dim)  # [S*B, N, C]
         q = self.queries.value  # [R, C]
-        logits = jnp.einsum("mnc,rc->mrn", f, q) * (self.feat_dim**-0.5)  # [S*B, R, N]
+        logits = jnp.einsum("mnc,rc->mrn", f, q)  # [S*B, R, N]
         probs = jax.nn.softmax(logits, axis=-1)
         return probs.reshape(s, b, self.num_roles, n)
 

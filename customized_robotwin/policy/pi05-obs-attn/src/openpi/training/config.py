@@ -603,10 +603,11 @@ _CONFIGS = [
             obstacle_attention=pi0_config.ObstacleAttentionConfig(
                 enabled=True,
                 supervised_layers=(0, 1, 16, 17),
+                supervised_layer_lr=(0.05, 0.05, 0.05, 0.05),
                 heatmap_sigma=20.0,
-                reverse_kl=True,
-                target_attn=True,
-                dest_attn=True,
+                reverse_kl=False,
+                target_attn=False,
+                dest_attn=False,
             ),
         ),
         data=LeRobotAlohaDataConfig(

@@ -28,7 +28,7 @@ class ObstacleAttentionConfig:
     enabled: bool = True
     # Indices (into the transformer depth) whose attention is supervised.
     supervised_layers: tuple[int, ...] = (17,)
-    # Per-supervised-layer loss weights (defaults to 0.001 each if None).
+    # Per-supervised-layer loss weights (defaults to 0.005 each if None; 5x original 0.001).
     supervised_layer_lr: tuple[float, ...] | None = None
     # Gaussian blur std (pixels) for the GT heatmap.
     heatmap_sigma: float = 20.0
@@ -87,7 +87,7 @@ class ObstacleAttentionConfig:
         n = len(self.supervised_layers)
         lr = override if override is not None else self.supervised_layer_lr
         if lr is None:
-            return [0.001] * n
+            return [0.005] * n
         if len(lr) != n:
             raise ValueError(f"layer_lr length {len(lr)} != num supervised layers {n}")
         return list(lr)
