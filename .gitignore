@@ -75,6 +75,8 @@ presentation_material/
 
 # External policy implementation and local model artifacts.
 /customized_robotwin/policy/pi05/
+/customized_robotwin/policy/robopro_jax_30000/
+/policy/
 
 # Local experiment workspaces. Reproducible source may be explicitly tracked.
 experiments/
@@ -92,3 +94,6 @@ docs/references/
 
 # Reference materials (paper LaTeX + external links, not tracked)
 references/
+
+# Node-local Docker image export used by Slurm compute nodes.
+/docker/gb10/robopro-gb10.tar
