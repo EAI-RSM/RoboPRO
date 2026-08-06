@@ -89,8 +89,10 @@ class put_spoon_in_dishrack_ks(KitchenS_base_task):
     def check_success(self):
         rack_p = self.dishrack_center  # true rack center, not the offset entity pose
         tp = self.target_obj.get_pose().p
-        eps_x, eps_y = 0.12, 0.15
+        eps_x, eps_y = 0.12, 0.10  # tightened Y toward the true rack half-extent (~0.08)
         return (abs(tp[0] - rack_p[0]) < eps_x
                 and abs(tp[1] - rack_p[1]) < eps_y
+                # elevated ONTO the rack, not resting on the counter beside it (rack_z ~0.89 vs table ~0.74)
+                and tp[2] > rack_p[2] - 0.08
                 and self.robot.is_left_gripper_open()
                 and self.robot.is_right_gripper_open())

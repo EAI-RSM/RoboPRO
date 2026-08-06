@@ -145,9 +145,10 @@ class move_seal_cup_next_to_box(Study_base_task):
         box_bb = get_actor_boundingbox(self.box.actor)
 
         seal_pose = self.target_obj.get_pose().p
-        cup_pose = self.target_obj_2.get_pose().p[:2]
+        cup_pose = self.target_obj_2.get_pose().p
 
-        cup_in_box = np.all((box_bb[0][:2] <= cup_pose)  &  (cup_pose <= box_bb[1][:2]))
+        cup_in_box = (np.all((box_bb[0][:2] <= cup_pose[:2])  &  (cup_pose[:2] <= box_bb[1][:2]))
+                      and cup_pose[2] < box_bb[1][2])   # below the box rim, not balanced on the wall
         seal_in_box = np.all((box_bb[0][:2] <= seal_pose[:2])  &  (seal_pose[:2] <= box_bb[1][:2]))
         dist_to_box = point_to_box_distance(seal_pose, box_bb[0], box_bb[1])
         return (cup_in_box and not seal_in_box and dist_to_box <= dist_thr 

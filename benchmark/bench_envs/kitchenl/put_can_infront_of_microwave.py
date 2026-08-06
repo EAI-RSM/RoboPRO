@@ -96,9 +96,12 @@ class put_can_infront_of_microwave(Kitchen_base_large):
         return self.info
 
     def check_success(self):
-        box_bb = get_actor_boundingbox_urdf(self.microwave_left)
-        return (box_bb[0][0]< self.target_obj.get_pose().p[0]< box_bb[1][0] 
-                and self.target_obj.get_pose().p[1] <  box_bb[0][1] 
+        # was: unbounded half-plane (X within microwave width, Y anywhere in front, no Z) -> trivially
+        # satisfiable and can pass at spawn. Ground on the intended 'in front' placement (des_obj_pose).
+        tp = self.target_obj.get_pose().p
+        dp = self.des_obj_pose
+        eps_xy = 0.10  # NOTE(author): placement tolerance around the target; tune as needed
+        return (abs(tp[0] - dp[0]) < eps_xy and abs(tp[1] - dp[1]) < eps_xy
                 and self.robot.is_left_gripper_open()
                 and self.robot.is_right_gripper_open())
 

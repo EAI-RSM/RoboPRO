@@ -105,7 +105,9 @@ class put_pen_in_box(Study_base_task):
 
     def check_success(self):
         box_bb = get_actor_boundingbox(self.box.actor)
-        return (np.all((box_bb[0][:2] <= self.target_obj.get_pose().p[:2])  & 
-                       (self.target_obj.get_pose().p[:2] <= box_bb[1][:2]))
+        p = self.target_obj.get_pose().p
+        return (np.all((box_bb[0][:2] <= p[:2]) & (p[:2] <= box_bb[1][:2]))
+                # below the box rim: rejects an object balanced on the wall/rim (XY-only used to pass it)
+                and p[2] < box_bb[1][2]
                 and self.robot.is_left_gripper_open()
                 and self.robot.is_right_gripper_open())
