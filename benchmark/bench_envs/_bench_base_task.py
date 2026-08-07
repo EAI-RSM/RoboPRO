@@ -365,15 +365,35 @@ class Bench_base_task(Base_Task):
         self.target_objects_info = seen
 
     def _maybe_apply_language_perturbation(self):
-        """If enabled, pick a random instruction from instruction_bank.json for
-        the current task_name and set it as the active instruction. Records the
-        result to self.info so collect_data.py persists it into scene_info.json.
+        """Set the episode's instruction from instruction_bank.json.
+
+        DEFAULT: ONE FIXED INSTRUCTION PER TASK (bank entry 0), no perturbation.
+
+        Set ROBOPRO_LANG_PERTURB=1 to restore the old behaviour of sampling a
+        random paraphrase. Off by default because the sampling was seeded from
+        the scene RNG, which made the instruction a deterministic function of the
+        scene seed -- so instruction and scene were perfectly confounded, and a
+        single task drew 8-17 distinct phrasings across an eval. Anything trained
+        on one phrasing per task (e.g. a Q-function) was then scored under
+        phrasings it had never seen, and no per-scene result could separate scene
+        difficulty from prompt wording.
+
+        Note the old `enabled: false` path did NOT give a fixed instruction -- it
+        returned None and let the caller fall back to
+        `np.random.choice(generated_descriptions)`, i.e. a different source of
+        randomness. Returning bank[0] here makes "no perturbation" actually mean
+        one instruction per task, since every caller prefers this return value.
         """
-        if not getattr(self, "language_perturbation_enabled", False):
+        import os as _os
+        fixed = _os.environ.get("ROBOPRO_LANG_PERTURB", "0") != "1"
+        # When fixed, ignore the config's enabled flag: we still want the bank's
+        # entry 0 so the task gets ONE deterministic instruction rather than the
+        # caller's random fallback.
+        if not fixed and not getattr(self, "language_perturbation_enabled", False):
             return None
         bank_path = getattr(self, "_instruction_bank_path", None)
         if not bank_path:
-            return None
+            bank_path = "benchmark/bench_task_config/instruction_bank.json"
         if not os.path.isabs(bank_path):
             # Try BENCH_ROOT (where bench_task_config lives) then ROBOTWIN_ROOT.
             for root in (os.environ.get("BENCH_ROOT"), os.environ.get("ROBOTWIN_ROOT"), "."):
@@ -403,15 +423,19 @@ class Bench_base_task(Base_Task):
         pool = bank.get(self.task_name, [])
         if not pool:
             return None
-        instruction = str(np.random.choice(pool))
+        # bank[0] is the canonical phrasing; np.random.choice draws from the scene
+        # RNG, which is what confounded instruction with scene seed.
+        instruction = str(pool[0]) if fixed else str(np.random.choice(pool))
         self.set_instruction(instruction=instruction)
         if not isinstance(getattr(self, "info", None), dict):
             self.info = {}
         self.info["language_perturbation"] = {
             "instruction": instruction,
             "bank": bank_path,
+            "perturbed": (not fixed),      # False => fixed bank[0], one per task
         }
-        print(f"[Language] {self.task_name} -> '{instruction[:60]}'")
+        print(f"[Language] {self.task_name} -> '{instruction[:60]}'"
+              f"{'' if fixed else '  (PERTURBED)'}")
         return instruction
 
     def get_cluttered_surfaces(self):

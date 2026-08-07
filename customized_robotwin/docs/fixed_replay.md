@@ -78,6 +78,30 @@ it explicit (both inert when unset, so every existing caller is unaffected):
 `crc32`, not `hash()` — `hash()` is salted per process and would not reproduce.
 Callers select the stream with `model.set_noise_episode(key)`.
 
+## Language: one fixed instruction per task (new default)
+
+`_maybe_apply_language_perturbation` now returns **`instruction_bank.json` entry 0**
+for the task — one deterministic instruction — instead of sampling a paraphrase.
+`ROBOPRO_LANG_PERTURB=1` restores the old sampling.
+
+Why the old behaviour was a trap:
+
+* The sample was drawn from the **scene RNG**, so the instruction was a
+  deterministic function of the scene seed. Verified across two independent
+  collections months apart: **38/38 scenes got identical instructions**. So
+  instruction and scene were *perfectly confounded* — no per-scene result could
+  separate scene difficulty from prompt wording, and a chi-square across
+  instructions was really measuring scene difficulty.
+* A single task drew **8–17 distinct phrasings** across one 25-episode eval.
+  Anything trained on one phrasing per task — a Q-function, say — was then scored
+  under phrasings it had never seen.
+* Setting `enabled: false` did **not** fix this. It returned `None` and let the
+  caller fall back to `np.random.choice(generated_descriptions)`: still random,
+  just from a different pool. Returning `bank[0]` makes "no perturbation" mean
+  what it says, since every caller prefers this return value.
+
+All 14 benchmark tasks have bank entries, so this is deterministic for each.
+
 ## Files
 
 | path | role |
