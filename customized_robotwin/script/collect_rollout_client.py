@@ -324,6 +324,15 @@ def collect_rollouts(TASK_ENV, args, model, usr_args, collect_num, instruction_t
                     TASK_ENV.step_lim = 1000
 
             model.reset_model()
+            # Opt in to controlled/recorded flow noise. No-op unless the model
+            # server was started with PI05_NOISE_SEED / PI05_NOISE_DIR. The key is
+            # scene-qualified so one long-lived server can cover many scenes
+            # without overwriting another scene's noise files.
+            try:
+                model.set_noise_episode(f"{run_dir.parent.name}_{run_dir.name}_ep{ep_idx:03d}")
+            except Exception as _e:
+                print(f"\033[33m[noise] set_noise_episode unavailable ({_e})\033[0m")
+
             while TASK_ENV.take_action_cnt < TASK_ENV.step_lim and not TASK_ENV.eval_success:
                 observation = TASK_ENV.get_obs()
                 eval_func(TASK_ENV, model, observation)

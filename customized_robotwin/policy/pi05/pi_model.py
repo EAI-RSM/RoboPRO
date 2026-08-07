@@ -78,9 +78,69 @@ class PI0:
             "prompt": self.instruction,
         }
 
+    # ------------------- controlled / recorded flow noise --------------------
+    # By default pi05 draws its flow-matching noise from Policy's internal jax
+    # key, so a rollout cannot be reproduced or paired with the noise that
+    # produced it. Setting PI05_NOISE_SEED makes the noise explicit: episode key
+    # K draws from np.random.default_rng(PI05_NOISE_SEED + crc32(K)), and with
+    # PI05_NOISE_DIR the noise plus the action chunk it produced are written to
+    # <dir>/<K>_noise.npz. Both are no-ops when the env vars are unset, so this
+    # is inert for every existing caller.
+    def set_noise_episode(self, ep_key):
+        """Begin a new episode's noise stream.
+
+        ep_key is an int index (-> "ep00007_noise.npz") or a scene-qualified
+        string such as "d14_seed1_ep003" (-> "<key>_noise.npz"), so one
+        long-lived model server can serve many scenes without collisions.
+        crc32 rather than hash(): hash() is salted per process and would not
+        reproduce across runs.
+        """
+        import zlib
+        is_int = isinstance(ep_key, (int, float)) or str(ep_key).lstrip("-").isdigit()
+        self._noise_key = f"ep{int(ep_key):05d}" if is_int else str(ep_key)
+        self._noise_buf = []
+        self._action_buf = []
+        base = os.environ.get("PI05_NOISE_SEED")
+        if base is None:
+            self._noise_rng = None
+            return "disabled"
+        off = int(ep_key) if is_int else zlib.crc32(str(ep_key).encode())
+        self._noise_seed = int(base) + int(off)
+        self._noise_rng = np.random.default_rng(self._noise_seed)
+        return self._noise_key
+
+    def _draw_noise(self):
+        if getattr(self, "_noise_rng", None) is None:
+            return None
+        m = self.policy._model
+        return self._noise_rng.standard_normal(
+            (m.action_horizon, m.action_dim)).astype(np.float32)
+
+    def _save_noise_record(self, noise, actions):
+        d = os.environ.get("PI05_NOISE_DIR")
+        if not d:
+            return
+        os.makedirs(d, exist_ok=True)
+        self._noise_buf.append(noise)
+        self._action_buf.append(np.asarray(actions, dtype=np.float32))
+        # rewritten after every inference (~6 KB each) so a crashed episode
+        # still leaves a usable file
+        np.savez_compressed(
+            os.path.join(d, f"{self._noise_key}_noise.npz"),
+            noise=np.stack(self._noise_buf),
+            actions=np.stack(self._action_buf),
+            ep_key=self._noise_key,
+            noise_seed=self._noise_seed,
+        )
+
     def get_action(self):
         assert self.observation_window is not None, "update observation_window first!"
-        return self.policy.infer(self.observation_window)["actions"]
+        noise = self._draw_noise()
+        if noise is None:                       # unchanged default path
+            return self.policy.infer(self.observation_window)["actions"]
+        result = self.policy.infer(self.observation_window, noise=noise)
+        self._save_noise_record(noise, result["actions"])
+        return result["actions"]
 
     def reset_obsrvationwindows(self):
         self.instruction = None
