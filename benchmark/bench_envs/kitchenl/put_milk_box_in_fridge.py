@@ -83,8 +83,7 @@ class put_milk_box_in_fridge(Kitchen_base_large):
         self.milk_box_spawn_local_x_range = (-0.22, 0.12)
         self.milk_box_spawn_local_y_range = (-0.32, -0.06)
 
-        kwargs["collision_cache"] = {"mesh": 100, "obb": 3}
-        super()._init_task_env_(**kwargs)
+        super().setup_demo(**kwargs)
 
         self._close_microwave_if_present()
         self.set_fridge_open()

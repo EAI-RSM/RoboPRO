@@ -70,8 +70,7 @@ class put_sauce_can_in_cabinet(Kitchen_base_large):
         if scs is not None:
             self.sauce_can_scale = float(scs)
 
-        kwargs["collision_cache"] = {"mesh": 100, "obb": 3}
-        super()._init_task_env_(**kwargs)
+        super().setup_demo(**kwargs)
         self._ensure_cabinet_open()
 
     def _sauce_can_quat_from_cfg(self) -> list[float]:
@@ -174,4 +173,3 @@ class put_sauce_can_in_cabinet(Kitchen_base_large):
     def check_success(self):
         return self._is_sauce_can_inside_cabinet() and self.robot.is_left_gripper_open() \
                 and self.robot.is_right_gripper_open()
-        

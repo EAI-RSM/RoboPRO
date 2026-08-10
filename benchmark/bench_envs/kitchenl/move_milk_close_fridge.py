@@ -67,8 +67,7 @@ class move_milk_close_fridge(Kitchen_base_large):
         return {self.milk_box.get_name()}  # rand_create_cluttered_actor("038_milk-box") → name = "038_milk-box"
 
     def setup_demo(self, is_test: bool = False, **kwargs):
-        kwargs["collision_cache"] = {"mesh": 100, "obb": 3}
-        super()._init_task_env_(**kwargs)
+        super().setup_demo(**kwargs)
         self.fridge_start_open_angle_deg = 90.0
         self.set_fridge_open_angle_deg(self.fridge_start_open_angle_deg, open_span_deg=90.0)
 

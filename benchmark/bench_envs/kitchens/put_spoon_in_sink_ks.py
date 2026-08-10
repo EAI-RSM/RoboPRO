@@ -10,9 +10,6 @@ class put_spoon_in_sink_ks(KitchenS_base_task):
     # side as the sink (sink.x is always >= +0.10) so grasp + carry stays
     # on the right arm and never crosses the midline.
 
-    def setup_demo(self, is_test=False, **kwargs):
-        kwargs["collision_cache"] = {"mesh": 100, "obb": 3}
-        super()._init_task_env_(**kwargs)
 
     def _get_target_object_names(self) -> set[str]:
         return {self.target_obj.get_name()}

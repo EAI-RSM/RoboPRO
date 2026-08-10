@@ -29,8 +29,7 @@ class put_can_infront_of_microwave(Kitchen_base_large):
 
     def setup_demo(self, is_test: bool = False, **kwargs):
         kwargs["include_collision"] = True
-        kwargs["collision_cache"] = {"mesh": 100, "obb": 3}
-        super()._init_task_env_(**kwargs)
+        super().setup_demo(**kwargs)
 
 
 

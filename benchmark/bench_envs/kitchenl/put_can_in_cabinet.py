@@ -44,8 +44,7 @@ class put_can_in_cabinet(Kitchen_base_large):
         if cs is not None:
             self.can_scale = float(cs)
 
-        kwargs["collision_cache"] = {"mesh": 100, "obb": 3}
-        super()._init_task_env_(**kwargs)
+        super().setup_demo(**kwargs)
 
         if getattr(self, "cabinet_closed_qpos", None) is None:
             self._init_cabinet_states()

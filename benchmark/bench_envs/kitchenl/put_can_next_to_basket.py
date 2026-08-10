@@ -41,8 +41,7 @@ class put_can_next_to_basket(Kitchen_base_large):
         kwargs["include_collision"] = True
         self.can_box_spawn_rot_deg = [0.45, 0.0, 90.0]
         kwargs["jitter_basket"] = False
-        kwargs["collision_cache"] = {"mesh": 100, "obb": 3}
-        super()._init_task_env_(**kwargs)
+        super().setup_demo(**kwargs)
 
 
     def load_actors(self):

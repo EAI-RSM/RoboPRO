@@ -19,9 +19,6 @@ class pick_apple_from_sink_ks(KitchenS_base_task):
     # To place TCP at desired z, set link_z = desired_tcp_z + 0.12.
     TCP_OFFSET = 0.12
 
-    def setup_demo(self, is_test=False, **kwargs):
-        kwargs["collision_cache"] = {"mesh": 100, "obb": 3}
-        super()._init_task_env_(**kwargs)
 
     def _get_target_object_names(self) -> set[str]:
         return {self.target_obj.get_name()}

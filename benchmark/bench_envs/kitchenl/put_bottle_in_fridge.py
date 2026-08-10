@@ -22,8 +22,7 @@ class put_bottle_in_fridge(Kitchen_base_large):
 
     def setup_demo(self, is_test: bool = False, **kwargs):
         kwargs["include_collision"] = False
-        kwargs["collision_cache"] = {"mesh": 100, "obb": 3}
-        super()._init_task_env_(**kwargs)
+        super().setup_demo(**kwargs)
         self.set_fridge_open()
 
     def load_actors(self):

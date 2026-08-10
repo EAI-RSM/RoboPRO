@@ -11,9 +11,8 @@ from bench_envs.utils.scene_gen_utils import print_c, place_actor
 class put_cup_in_box(Study_base_task):
 
     def setup_demo(self, is_test=False, **kwargs):
-        kwargs["collision_cache"] = {"mesh": 100, "obb": 3}
         kwargs["include_collison"] = True
-        super()._init_task_env_(**kwargs)
+        super().setup_demo(**kwargs)
 
     def load_actors(self):
         with open(os.path.join(os.environ["BENCH_ROOT"],'bench_task_config', 'task_objects.yml'), "r", encoding="utf-8") as f:

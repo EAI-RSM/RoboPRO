@@ -8,9 +8,6 @@ from transforms3d.euler import euler2quat
 
 class move_items_around(Office_base_task):
 
-    def setup_demo(self, is_test=False, **kwargs):
-        kwargs["collision_cache"] = {"mesh": 100, "obb": 3}
-        super()._init_task_env_(**kwargs)
     
     def _get_target_object_names(self) -> set[str]:
         return {self.target_obj_1.get_name(), self.target_obj_2.get_name(), self.target_obj_3.get_name(), self.des_obj_1.get_name(), self.des_obj_3.get_name()}

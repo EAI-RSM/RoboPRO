@@ -48,8 +48,7 @@ class put_can_close_cabinet(Kitchen_base_large):
         cs = kwargs.pop("can_scale", None)
         if cs is not None:
             self.can_scale = float(cs)
-        kwargs["collision_cache"] = {"mesh": 100, "obb": 3}
-        super()._init_task_env_(**kwargs)
+        super().setup_demo(**kwargs)
 
         # Capture the closed configuration before opening
         if hasattr(self, "cabinet") and self.cabinet is not None:

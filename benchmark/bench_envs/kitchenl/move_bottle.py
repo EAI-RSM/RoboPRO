@@ -14,9 +14,6 @@ class move_bottle(Kitchen_base_large):
     def _get_target_object_names(self) -> set[str]:
         return {self.target_obj.get_name()}  # place_actor("001_bottle") → name = "001_bottle"
 
-    def setup_demo(self, is_test=False, **kwargs):
-        kwargs["collision_cache"] = {"mesh": 100, "obb": 3}
-        super()._init_task_env_(**kwargs)
 
     def load_actors(self):
         with open(os.path.join(os.environ["BENCH_ROOT"],'bench_task_config', 'task_objects.yml'), "r", encoding="utf-8") as f:

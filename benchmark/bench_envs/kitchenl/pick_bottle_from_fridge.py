@@ -56,8 +56,7 @@ class pick_bottle_from_fridge(Kitchen_base_large):
         if bs is not None:
             self.bottle_scale = float(bs)
 
-        kwargs["collision_cache"] = {"mesh": 100, "obb": 3}
-        super()._init_task_env_(**kwargs)
+        super().setup_demo(**kwargs)
         self._close_microwave_if_present()
 
         self.set_fridge_open()

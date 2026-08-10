@@ -71,8 +71,7 @@ class pick_can_from_cabinet(Kitchen_base_large):
         if cs is not None:
             self.can_scale = float(cs)
 
-        kwargs["collision_cache"] = {"mesh": 100, "obb": 3}
-        super()._init_task_env_(**kwargs)
+        super().setup_demo(**kwargs)
 
         self._ensure_cabinet_open()
 
@@ -196,4 +195,3 @@ class pick_can_from_cabinet(Kitchen_base_large):
         return not self._is_can_inside_cabinet() and can_on_table \
                and self.robot.is_right_gripper_open() \
                and self.robot.is_left_gripper_open()
-

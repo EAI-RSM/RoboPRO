@@ -85,8 +85,7 @@ class pick_milk_box_from_fridge(Kitchen_base_large):
         if ms is not None:
             self.milk_box_scale = float(ms)
 
-        kwargs["collision_cache"] = {"mesh": 100, "obb": 3}
-        super()._init_task_env_(**kwargs)
+        super().setup_demo(**kwargs)
         self._close_microwave_if_present()
         self.set_fridge_open()
 
@@ -214,4 +213,3 @@ class pick_milk_box_from_fridge(Kitchen_base_large):
         return not self._is_milk_box_inside_fridge() and milk_box_on_table \
                and self.robot.is_right_gripper_open() \
                and self.robot.is_left_gripper_open()
-

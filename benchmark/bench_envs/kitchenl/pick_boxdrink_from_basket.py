@@ -79,8 +79,7 @@ class pick_boxdrink_from_basket(Kitchen_base_large):
         if mids is not None:
             self.boxdrink_model_ids = [int(x) for x in mids]
 
-        kwargs["collision_cache"] = {"mesh": 100, "obb": 3}
-        super()._init_task_env_(**kwargs)
+        super().setup_demo(**kwargs)
 
     def _is_boxdrink_inside_basket(self) -> bool:
         box_bb = get_actor_boundingbox(self.basket_right.actor)

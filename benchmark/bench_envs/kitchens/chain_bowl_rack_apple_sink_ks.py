@@ -15,9 +15,6 @@ class chain_bowl_rack_apple_sink_ks(KitchenS_base_task):
     TOP_DOWN_Q = [-0.5, 0.5, -0.5, -0.5]
     TCP_OFFSET = 0.12
 
-    def setup_demo(self, is_test=False, **kwargs):
-        kwargs["collision_cache"] = {"mesh": 100, "obb": 3}
-        super()._init_task_env_(**kwargs)
 
     def _get_target_object_names(self) -> set[str]:
         return {self.bowl1.get_name(), self.apple.get_name()}

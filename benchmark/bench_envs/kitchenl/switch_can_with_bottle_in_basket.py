@@ -71,8 +71,7 @@ class switch_can_with_bottle_in_basket(Kitchen_base_large):
         if mids is not None:
             self.can_model_ids = [int(x) for x in mids]
 
-        kwargs["collision_cache"] = {"mesh": 100, "obb": 3}
-        super()._init_task_env_(**kwargs)
+        super().setup_demo(**kwargs)
 
     def _can_quat_from_cfg(self) -> list[float]:
         roll_deg, pitch_deg, yaw_deg = self.can_spawn_rot_deg
@@ -221,5 +220,4 @@ class switch_can_with_bottle_in_basket(Kitchen_base_large):
         return not self._is_inside_basket(self.can) and can_on_table  and self._is_inside_basket(self.bottle)\
                and self.robot.is_right_gripper_open() \
                and self.robot.is_left_gripper_open()
-
 

@@ -72,8 +72,7 @@ class pick_sauce_can_from_cabinet(Kitchen_base_large):
         if scs is not None:
             self.sauce_can_scale = float(scs)
 
-        kwargs["collision_cache"] = {"mesh": 100, "obb": 3}
-        super()._init_task_env_(**kwargs)
+        super().setup_demo(**kwargs)
         self._ensure_cabinet_open()
 
     def _sauce_can_local_in_cabinet(self) -> np.ndarray | None:

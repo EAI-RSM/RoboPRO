@@ -52,8 +52,7 @@ class put_sauce_can_in_basket(Kitchen_base_large):
         if bs is not None:
             self.sauce_can_scale = float(bs)
 
-        kwargs["collision_cache"] = {"mesh": 100, "obb": 3}
-        super()._init_task_env_(**kwargs)
+        super().setup_demo(**kwargs)
 
     def _sauce_can_quat_from_cfg(self) -> list[float]:
         roll_deg, pitch_deg, yaw_deg = self.sauce_can_spawn_rot_deg
