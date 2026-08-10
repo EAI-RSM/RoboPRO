@@ -14,8 +14,9 @@ Branch: `codex/bench-script-refactor`.
 
 - Research checkpoint: `417fbb2` (`Checkpoint validated research work before cleanup`).
 - Corrected execution plan: `5af3033` (`Add verified codebase cleanup plan`).
-- The Phase 3 commit containing this status update completes the currently eligible cleanup work.
-- Expected post-commit worktree: no tracked or untracked cleanup changes. Generated
+- Phase 3 is `05532eb` (`Clean generated repository artifacts`).
+- The cleanup plan and this status note are now dirty only to record the user's campaign-gate
+  waiver before Phase 1 starts. Generated
   `graphify-out/` trees and the two visibility-validation PNGs remain on disk but are ignored.
 
 ## Cleanup execution
@@ -32,15 +33,15 @@ Completed:
   two generated visibility PNGs remain on disk but are no longer tracked; stale ignore entries were
   removed while both collision-test ignores were preserved.
 
-Pending and blocked:
+Current authorization and pending work:
 
-- Metric post-processing is still **601/3000**, with `processing_complete: false`, under
+- Metric post-processing stopped at **620/3000**, with `processing_complete: false`, under
   `scripts/validation/results/task_metric_vla_full/association_d6_d10_d15/20260731-182037/metric_postprocess/`.
-- Do not execute Phases 1, 2, 2.5, 2.6, or 4 until that receipt reaches 3000/3000. The campaign
-  binds both metric code and scene code; the current scene version still matches the manifest at
-  `d8e0abb0525aa86ec289a4911d52c92fc6dee4f0e988e1615b579fb89fcdc568`.
-- After 3000/3000: run Phase 1 (`benchmark/bench_envs`) first, then Phases 2, 2.5, 2.6, and 4 in
-  plan order. Do not interleave `bench_envs` and `bench_script` cleanup.
+- On 2026-08-10 the user explicitly waived that completion gate. Preserve the 620 existing metric
+  records on disk, but preserving in-place resumption is no longer required; a future run may
+  restart post-processing from episode 1.
+- Run Phase 1 (`benchmark/bench_envs`) first, then Phases 2, 2.5, 2.6, and 4 in plan order. Do not
+  interleave `bench_envs` and `bench_script` cleanup.
 - Section 5 remains findings only. Delete none of those candidates without a new explicit user
   decision for the specific file.
 
@@ -61,7 +62,8 @@ GPU gap:
 - `diag_kitchen_curobo.py --help` imports cuRobo before argparse and requires CUDA. The attempted
   check failed because no GPU was available, not because of a cleanup edit. The plan now places
   this command with the GPU-required Phase 1 gates.
-- No Phase 1 real-scene before/after gate has run yet because Phase 1 is campaign-blocked.
+- No Phase 1 real-scene before/after gate has run because this environment has no CUDA GPU. Use
+  the static dispatch regression and CPU suite here, and leave the GPU gate explicitly unverified.
 
 ## Active research state
 
@@ -78,6 +80,5 @@ GPU gap:
 
 ## Next action
 
-Resume metric post-processing in place without editing the bound source closure. When its receipt
-reaches 3000/3000, re-run the plan's prerequisite gate and begin Phase 1. Until then, no scheduled
-source-cleanup phase is eligible.
+Preserve the existing partial metric artifacts and execute Phase 1 now. Continue through Phases 2,
+2.5, 2.6, and 4 only after the preceding phase passes its available verification gates.

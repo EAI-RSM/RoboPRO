@@ -13,15 +13,16 @@
 > - **Update `agent-memory/status_current.md`** when phases land — rewrite, never append.
 >
 > **Decisions the user already made on 2026-08-10 — do not re-litigate:**
-> 1. The five hash-frozen files are out of scope until the campaign completes (C1 below).
+> 1. **Superseding decision:** the incomplete 620/3000 metric post-process no longer blocks
+>    cleanup. Preserve its data on disk, but in-place resumption is not required; a future
+>    post-process may restart from episode 1. C1 below remains as provenance, not a gate.
 > 2. `bench_envs` is cleaned first; `bench_script` waits for the research work to be committed (C2).
 > 3. In §1.3, delete only the inert methods; **keep** the unused `set_*`/`is_*` articulation API.
 >
-> **Where to start:** Phase 3 is the only phase not blocked by the active campaign, but it still
-> waits for the research work and this corrected plan to be committed so its commit and memory
-> update stay isolated (C2). The metric post-processing run is 601/3000 and hashes scene sources
-> that Phase 1 edits (C1), so all code-cleanup phases wait for completion. Do not stash the only
-> copy of uncommitted research work merely to make cleanup easier.
+> **Where to start:** the research checkpoint, corrected plan, and Phase 3 are committed. Begin
+> Phase 1, then continue through Phases 2, 2.5, 2.6, and 4 in order. Do not delete or rewrite the
+> existing 620 metric records; source changes may intentionally make that partial run
+> non-resumable under its original immutable configuration.
 >
 > **Commit granularity:** one commit per numbered sub-phase (1.1, 1.2, …), each independently
 > revertable. Before every commit, verify the staged path allowlist and `git diff --cached --check`.
@@ -65,10 +66,11 @@ required new indirection, it is listed under *Explicitly NOT doing* with the rea
 
 ## The two hard constraints
 
-### C1 — The live campaign freezes metric code *and scene code*. Do not touch either closure.
+### C1 — Historical campaign freeze, explicitly waived on 2026-08-10
 
 `scripts/validation/results/task_metric_vla_full/association_d6_d10_d15/20260731-182037/metric_postprocess`
-is at **601/3000** committed episodes, `processing_complete: false`, and is resumable. Resumption
+was at **620/3000** committed episodes when cleanup began, with `processing_complete: false`.
+Resumption
 validates `task_metric.py::_metric_code_version()`, which hashes:
 
 ```
@@ -80,9 +82,10 @@ lib/waypoints.py
 ```
 
 Editing any byte changes the immutable post-process configuration and prevents an in-place resume.
-The existing 601 committed metric records remain on disk, but the code would need to be restored
-byte-for-byte before the remaining 2399 can be computed in the same run. These five files are out
-of scope until `metric_postprocess/report_state.json` says `processing_complete: true`.
+The existing 620 committed metric records remain on disk, but the code would need to be restored
+byte-for-byte before the remaining 2380 can be computed in the same run. The user explicitly
+accepted losing that in-place resume path so cleanup can proceed. **Preserve the partial artifacts;
+do not delete or rewrite them.**
 
 There is a second binding that the original plan missed. `task_scene_code_version()` hashes:
 
@@ -100,10 +103,10 @@ only after scene setup and geometric computation. Editing any of these files bot
 and wastes one expensive metric before the mismatch is reported. The current tree matches the
 manifest (`d8e0abb…` for `bench_demo_study_clean`); preserve it.
 
-The exact five-file hash is not the entire behavioral dependency closure. While the campaign is
-incomplete, make no semantic edits to modules imported transitively by `task_metric.py`, even when
-they are not named by `_metric_code_version()`. This plan therefore defers all `bench_script`
-cleanup until 3000/3000 instead of trying to prove that each cleanup edit is behavior-neutral.
+The exact five-file hash is not the entire behavioral dependency closure. That was why the original
+execution deferred all `bench_script` cleanup. The 2026-08-10 waiver supersedes that deferral; the
+cleanup must still be behavior-preserving for current code, but need not preserve the partial run's
+recorded source hashes.
 
 The independent visualization audit is no longer pending. The final `metric_route_visuals_v4`
 run is complete at 50/50 episodes and 200 figures, and its three-file code hash matches the current
@@ -116,12 +119,10 @@ At review time the working tree held **2,876 added and 452 deleted lines across 
 plus 33 untracked status entries**. Four tracked `bench_envs` files were dirty and
 `benchmark/bench_envs/eval_video.py` was untracked. Treat every pre-existing change as user-owned.
 
-Sequence: **commit the research work and this plan first. Phase 3 may then run while the campaign
-continues. After 3000/3000, run Phase 1 (`bench_envs`) before any Phase 2 work.** Do not interleave
-`bench_envs` and `bench_script` cleanup. If the user explicitly asks for an early Phase 1 subset,
-it is limited to §1.1 on
-non-hash-bound clean files, §1.4, and §1.3 excluding `scene_gen_utils.py`; that subset does not
-satisfy the Phase 1 stopping condition and must not be called complete.
+Sequence: the research checkpoint, this plan, and Phase 3 are committed. **Run Phase 1
+(`bench_envs`) before any Phase 2 work.** Do not interleave `bench_envs` and `bench_script`
+cleanup. The campaign waiver allows the full Phase 1 scope, including the formerly hash-bound
+files.
 
 ---
 
@@ -251,11 +252,10 @@ deleting it re-exposes the parent — a real behaviour change for a 2-line gain.
 
 ---
 
-## Phase 2 — `bench_script` (~300 lines; only after C1 and C2 clear)
+## Phase 2 — `bench_script` (~300 lines; after Phase 1)
 
-Do not begin this phase merely because the research work was committed. Wait for the metric run to
-reach 3000/3000 as well; `_metric_code_version()` under-describes the true import closure, and a
-same-version campaign must not mix source trees.
+The user waived C1 and accepts that a future post-process may restart from episode 1. Preserve the
+existing partial artifacts, but do not delay this phase for the old source hashes.
 
 ### 2.1 Dead imports — 143 names across 20 files at review time
 
@@ -454,9 +454,10 @@ Phase 2.5 and 2.6 — it is the note future agents read first.
 
 ---
 
-## Phase 4 — formerly frozen cleanup, after 3000/3000
+## Phase 4 — formerly frozen cleanup, enabled by the campaign waiver
 
-Only after `metric_postprocess/report_state.json` shows `processing_complete: true`:
+The metric receipt may remain incomplete. Preserve it on disk, and verify the completed route-audit
+receipt before changing visualization code:
 
 - Dead imports in the five frozen files.
 - Revisit `visualize_task_metric_routes.py` / `metric_viz.py` / `lib/plotting.py`. The required
@@ -609,7 +610,8 @@ set -euo pipefail
 
 ### Prerequisite gates for Phases 1, 2, 2.5, 2.6, and 4
 
-Phase 3 does not need these. All code-cleanup phases do:
+The metric completion requirement was waived. Before the first source edit, verify that its existing
+partial data is still present and that the independent visualization audit is complete:
 
 ```bash
 "$ROBOPRO_PY" - <<'PY'
@@ -619,12 +621,15 @@ from pathlib import Path
 run = Path("scripts/validation/results/task_metric_vla_full/association_d6_d10_d15/20260731-182037")
 metric = json.loads((run / "metric_postprocess/report_state.json").read_text())
 visual = json.loads((run / "metric_route_visuals_v4/report_state.json").read_text())
-assert metric["processing_complete"] is True, metric
-assert metric["metrics_in_report"] == metric["target_metrics"] == 3000, metric
+assert metric["processing_complete"] is False, metric
+assert metric["target_metrics"] == 3000, metric
+assert 0 < metric["metrics_in_report"] < metric["target_metrics"], metric
 assert visual["processing_complete"] is True, visual
 assert visual["visualized_episodes"] == visual["target_episodes"] == 50, visual
 assert visual["figure_count"] == 200, visual
-print("campaign and visualization prerequisites passed")
+episodes = sorted((run / "metric_postprocess/episodes").glob("episode*.json"))
+assert len(episodes) == metric["metrics_in_report"], (len(episodes), metric)
+print("partial metric data preserved; visualization prerequisite passed")
 PY
 
 # Run before making the first cleanup edit. CLEANUP_PLAN.md itself may be dirty while reviewed;
@@ -634,8 +639,8 @@ dirty="$({ git status --porcelain -- benchmark/bench_envs customized_robotwin/sc
 test -z "$dirty" || { printf '%s\n' "$dirty"; exit 1; }
 ```
 
-Before the campaign completes, a cheap read-only preflight must continue to prove the current scene
-version matches the manifest:
+Before the first source edit, retain one last read-only proof that the pre-cleanup scene version
+matches the manifest. It is expected to change after cleanup and is not a post-cleanup gate:
 
 ```bash
 PYTHONPATH="$WORKSPACE_ROOT/customized_robotwin/script/bench_script" "$ROBOPRO_PY" - <<'PY'
