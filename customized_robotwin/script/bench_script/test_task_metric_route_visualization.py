@@ -8,7 +8,7 @@ import tempfile
 from pathlib import Path
 from types import SimpleNamespace
 
-import metric_viz
+from lib import metric_viz
 import visualize_task_metric_routes as viz
 from lib.geometric_metric import LegResult
 from lib.metric_buckets import load_bucket_spec

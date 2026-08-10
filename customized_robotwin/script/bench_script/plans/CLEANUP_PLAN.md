@@ -221,7 +221,7 @@ surface.
 18 `office/` files carry a commented-out 6-line `self.info["info"]` block, e.g.
 [put_mouse_on_pad.py:138-143](benchmark/bench_envs/office/put_mouse_on_pad.py#L138-L143).
 
-**The live version in 17 `study/`/`kitchenl/` files must stay** — the return value is consumed by
+**The live version in 41 task files must stay** — the return value is consumed by
 `collect_data.py:268` and `eval_policy.py:245`. Delete only the commented-out ones.
 
 ### 1.5 The `include_collison` typo — rename only

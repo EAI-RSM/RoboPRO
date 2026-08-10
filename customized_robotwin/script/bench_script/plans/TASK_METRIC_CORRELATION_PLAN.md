@@ -668,7 +668,7 @@ No test runner is configured. The bar, in order:
    in `lib/` resolves in `task/`. New `lib/` code must not break it. This check exists because a
    by-name refactor scan deleted a duck-typed method and voided a week of runs.
 3. `test_ring_config.py`, `test_obstacle_set.py` — must pass unchanged.
-4. `vla_rollout.py --help`, `clearance_metric_3d.py --help`, `seed_from_clearance.py --help` — proves
+4. `vla_rollout.py --help`, `clearance_metric_3d.py --help`, `python -m lib.seed_from_clearance --help` — proves
    nothing additive broke the existing callers.
 5. New focused tests: selected task-role adapter (§A2.1), `table_z_bias == 0` (§A2.3), canonical
    waypoint determinism/state transitions (§B), identical empty/holding metric treatment,

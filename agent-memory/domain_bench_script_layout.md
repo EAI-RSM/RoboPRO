@@ -32,9 +32,10 @@ file in the tree and an accepted exception), `planning_mixin.py`, `seeding_mixin
 these mixins**, not in `analyze_occluder_visibility.py`.
 
 **Also split out of `clearance_metric_3d.py` (−1730 L):** `lib/metric_diagnostics.py` and
-`metric_viz.py`. The 2026-08-10 cleanup also moved `reachability_view.py` and
-`carry_object_spheres.py` under `lib/`; their runnable forms are
-`python -m lib.reachability_view` and `python -m lib.carry_object_spheres`.
+`lib/metric_viz.py`. The 2026-08-10 cleanup also moved `reachability_view.py`,
+`carry_object_spheres.py`, and `seed_from_clearance.py` under `lib/`; the runnable forms are
+`python -m lib.reachability_view`, `python -m lib.carry_object_spheres`, and
+`python -m lib.seed_from_clearance`.
 
 **Internal execution/design documents live under `bench_script/plans/`.** Keep top-level
 `bench_script/` for runnable entry points, tests, and support files; do not move these plans into

@@ -9,7 +9,7 @@ from lib.metric_config import SeedMetricConfig
 from lib.planning_tuning import *  # noqa: F403
 from lib.run_io import CLEARANCE_RESULTS_DIR
 from lib.scene_constants import *  # noqa: F403
-import seed_from_clearance as sfc
+from lib import seed_from_clearance as sfc
 
 
 class SeedingMixin:

@@ -28,16 +28,16 @@ import time
 
 import numpy as np
 
-from lib.continuity import warm_start_branches_3d
-from lib.ik_grid import _solve_grid_q_multi, build_grid
-from lib.labeling import FREE, label_volume
-from lib.metric_config import SeedMetricConfig
-from lib.obstacles import obstacle_centers, occluder_clearance_3d, occluder_footprints_3d
-from lib.scene_constants import OCC_HALF_FOOTPRINT
-from lib.widest_path import (
+from .continuity import warm_start_branches_3d
+from .ik_grid import _solve_grid_q_multi, build_grid
+from .labeling import FREE, label_volume
+from .metric_config import SeedMetricConfig
+from .obstacles import obstacle_centers, occluder_clearance_3d, occluder_footprints_3d
+from .scene_constants import OCC_HALF_FOOTPRINT
+from .widest_path import (
     nearest_free_voxel, reconstruct_widest_path_3d, widest_path_eps_3d,
 )
-import metric_viz as cm
+from . import metric_viz as cm
 
 
 @dataclass
@@ -532,5 +532,5 @@ if __name__ == "__main__":
     if "--selftest" in sys.argv:
         _selftest()
     else:
-        print("seed_from_clearance.py: pass --selftest to run the CPU unit test for 2b "
+        print("python -m lib.seed_from_clearance: pass --selftest to run the CPU unit test for 2b "
               "(compute_route_configs (2a) needs a live scene and is exercised in Phase 3).")

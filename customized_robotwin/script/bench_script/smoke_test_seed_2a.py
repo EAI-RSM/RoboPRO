@@ -29,7 +29,7 @@ from types import SimpleNamespace
 import numpy as np
 
 import clearance_metric_3d as cm
-import seed_from_clearance as sfc
+from lib import seed_from_clearance as sfc
 
 
 def main():

@@ -31,7 +31,7 @@ cube with no tick near it and no ground plane under it.
 Fixed by `_true_aspect_3d(ax, lo, hi)` (explicit box + `set_box_aspect(hi-lo)` — still exactly
 1:1:1, so the eps* sphere stays a sphere and "just kisses the nearest obstacle" remains checkable)
 plus `_draw_ground_plane`. Both are **opt-in kwargs** on `_metric_path3d` defaulting to the old
-behaviour, so the other two callers — `clearance_metric_3d.py` and `seed_from_clearance.py` — are
+behaviour, so the other two callers — `clearance_metric_3d.py` and `lib/seed_from_clearance.py` — are
 untouched. `_equal_aspect_3d` itself was left alone.
 
 ## The route floats ~18 cm above the target — the drawing is right, the metric is not
@@ -51,7 +51,7 @@ quantity that is itself mis-specified — which is exactly why drawing them was 
 
 ## Config immutability: every code edit forces a fresh `--out-dir`
 
-`_visualization_code_version()` hashes `visualize_task_metric_routes.py` + `metric_viz.py` +
+`_visualization_code_version()` hashes `visualize_task_metric_routes.py` + `lib/metric_viz.py` +
 `lib/plotting.py` into `config_sha256`. `_load_or_create_config` compares that against the saved
 `config.json` and **raises** `route-visualization configuration differs from the immutable saved
 config`. Partially-rendered episodes under the old hash are **rejected, not skipped**

@@ -37,7 +37,7 @@ from lib.scene_build import build_cfg, dr_measure, get_env_class
 from lib.scene_provenance import task_scene_code_version, task_scene_identity
 from lib.task_roles import SUPPORTED_TASK, resolve_task_roles
 from lib.waypoints import canonical_legs, canonical_waypoints
-from seed_from_clearance import compute_route_configs
+from lib.seed_from_clearance import compute_route_configs
 from task_metric import DEFAULT_CHECKPOINT, REACH_CACHE_DIR, _default_instruction
 
 

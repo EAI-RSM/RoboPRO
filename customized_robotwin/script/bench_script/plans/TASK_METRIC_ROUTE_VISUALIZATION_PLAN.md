@@ -54,7 +54,7 @@ Therefore:
 3. Implement visualization as a separate command and a separate output tree. Never delete,
    overwrite, or reinterpret the authoritative rollout or metric episode records.
 
-`metric_viz.py` is not in the current metric-code hash, but avoid changing it while the job is
+`lib/metric_viz.py` is not in the current metric-code hash, but avoid changing it while the job is
 running anyway; land the complete visualization change after the run so the working state stays
 easy to reason about.
 

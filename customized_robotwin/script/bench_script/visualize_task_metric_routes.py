@@ -38,7 +38,7 @@ from lib.scene_provenance import fingerprint, hash_files, task_scene_code_versio
 from lib.task_roles import resolve_task_roles
 from lib.vla_reporting import read_episode_records
 from lib.waypoints import canonical_legs, canonical_waypoints
-from metric_viz import _metric_path3d
+from lib.metric_viz import _metric_path3d
 from task_metric import (
     _metric_record,
     _read_committed_metric_records,
@@ -384,7 +384,7 @@ def select_first(source_target_n, count):
 def _visualization_code_version():
     root = Path(__file__).resolve().parent
     return hash_files(
-        [Path(__file__), root / "metric_viz.py", root / "lib" / "plotting.py"]
+        [Path(__file__), root / "lib" / "metric_viz.py", root / "lib" / "plotting.py"]
     )
 
 

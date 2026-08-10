@@ -34,7 +34,7 @@ plus new callers, never an edit to the existing one.
 
 **Seeding is out of scope.** The seed builder needs per-voxel joint configs and the geometric path
 does not produce them. Do not attempt a route-only IK pass; do not touch
-`seed_from_clearance.py::build_seed` / `resample_route_to_seed` / `route_qs_to_seed_tensor`.
+`lib/seed_from_clearance.py::build_seed` / `resample_route_to_seed` / `route_qs_to_seed_tensor`.
 
 **Do not tighten or rebuild the reach envelope.** The current union-over-orientations artifact
 ships, is validated on the right arm, and costs nothing to use. Making it orientation-conditioned
@@ -109,7 +109,7 @@ Cost: one full IK sweep per arm, once, ever. Not per scene.
 
 ## 2. Stage 2 (CPU) — `lib/geometric_metric.py`
 
-New module. Mirrors `seed_from_clearance.py::compute_route_configs` with the IK stages removed.
+New module. Mirrors `lib/seed_from_clearance.py::compute_route_configs` with the IK stages removed.
 Everything it needs already exists in `lib/`.
 
 ```
@@ -469,7 +469,7 @@ No test runner is configured. The bar, in order:
    in `lib/` resolves in `task/`. New `lib/` code must not break it. This check exists because a
    by-name refactor scan deleted a duck-typed method and voided a week of runs.
 4. `test_ring_config.py`, `test_obstacle_set.py` — must pass unchanged.
-5. `clearance_metric_3d.py --help`, `seed_from_clearance.py --help`,
+5. `clearance_metric_3d.py --help`, `python -m lib.seed_from_clearance --help`,
    `analyze_occluder_visibility.py --help` — proves nothing additive broke the existing callers.
 6. **Byte-identical check on the gated path.** Run `compute_route_configs` on one fixed scene before
    and after the stage-2 commit; diff eps\* and the route. Must be identical.

@@ -23,7 +23,7 @@ not need the expert.** Do not call `play_once`. Do not "fix" the grasp problem t
 — that is a different, long-standing workstream and the user has directed it be left alone.
 
 **Do not modify the expert / seeding / clearance path.** No edits to `task/*_mixin.py`,
-`lib/widest_path.py`, `seed_from_clearance.py`, or anything the Phase 4 A/B run depends on. This
+`lib/widest_path.py`, `lib/seed_from_clearance.py`, or anything the Phase 4 A/B run depends on. This
 work must not move any already-collected number.
 
 **Dependency rule holds.** `lib/` imports nothing from a CLI script. New shared code goes in `lib/`.
@@ -180,7 +180,7 @@ No test runner is configured. The bar, in order:
 
 1. `python script/bench_script/vla_rollout.py --help` — exercises the full import chain, no GPU.
 2. `python script/bench_script/analyze_occluder_visibility.py --help` and
-   `python script/bench_script/seed_from_clearance.py --help` still work — proves the `build_cfg`
+   `cd script/bench_script && python -m lib.seed_from_clearance --help` still works — proves the `build_cfg`
    change in 2b did not break the existing callers.
 3. `python script/bench_script/test_ring_config.py` and `test_obstacle_set.py` — CPU, fast. Must pass
    unchanged; the ring one is what guarantees the scene is reproducible.

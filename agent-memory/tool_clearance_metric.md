@@ -13,7 +13,7 @@ A scene-difficulty metric — "how boxed-in is the target." `clearance_metric_3d
 [[domain_bench_script_layout]]. The 2D predecessor `clearance_metric.py` was **DELETED** (10 of its
 14 shared functions were byte-identical to the 3D file and nothing imported it), which also cleared
 the dead 2D scaffolding this note used to flag. Diagnostics and figures split into
-`metric_diagnostics.py` / `metric_viz.py`; all knobs now come from
+`lib/metric_diagnostics.py` / `lib/metric_viz.py`; all knobs now come from
 `lib/metric_config.py::SeedMetricConfig`.
 
 **What eps\* is.** Widest-path (Kruskal max-min) bottleneck clearance between the grasp cell and

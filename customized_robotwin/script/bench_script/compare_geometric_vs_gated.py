@@ -47,8 +47,8 @@ from lib.widest_path import (
     reconstruct_widest_path_3d,
     widest_path_eps_3d,
 )
-from metric_viz import LABEL_COLORS
-from seed_from_clearance import compute_route_configs
+from lib.metric_viz import LABEL_COLORS
+from lib.seed_from_clearance import compute_route_configs
 from task.occluder_task import make_occluder_task
 
 

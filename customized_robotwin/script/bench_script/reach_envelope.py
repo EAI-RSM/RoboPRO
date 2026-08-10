@@ -43,7 +43,7 @@ from lib.labeling import BEYOND, FREE, geometric_envelope
 from lib.metric_config import SeedMetricConfig
 from lib.run_io import CLEARANCE_RESULTS_DIR as RESULTS_DIR, Timings
 from lib.scene_build import DR_CLEAN, build_cfg
-from metric_viz import LABEL_COLORS
+from lib.metric_viz import LABEL_COLORS
 from task.occluder_task import make_occluder_task
 import matplotlib.pyplot as plt
 from matplotlib.colors import ListedColormap

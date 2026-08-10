@@ -116,7 +116,7 @@ The route→seed builder is the actual work of #5; everything else is plumbing.
 ### Phase 2 — route→seed builder (the meat)
 - [x] **2a.** Run the clearance metric for the candidate's arm **at that candidate's grasp
   orientation**; get the gated widest-path + per-voxel configs. **DONE** — new module
-  `seed_from_clearance.py`: `compute_route_configs(env, planner, arm, ik, grasp_q, start_xyz,
+  `lib/seed_from_clearance.py`: `compute_route_configs(env, planner, arm, ik, grasp_q, start_xyz,
   goal_xyz, cfg)` reuses `clearance_metric_3d` as a library, seeds the widest-path at
   **(current gripper → grasp)** (the approach, *not* grasp→pad), builds the mandatory warm branch
   field, and returns `RouteResult.route_qs` `(K, dof)` in curobo dof order (None + `reason` when a
@@ -125,7 +125,7 @@ The route→seed builder is the actual work of #5; everything else is plumbing.
 - [x] **2b.** Resample the route's per-voxel configs to `action_horizon` (28); weld tstep 0 to the
   real `start_q`, last tstep to curobo's goal (mod 2π). **DONE + VERIFIED** — pure
   `resample_route_to_seed()` (np.unwrap → shortest-path, arc-length resample, degenerate→None); CPU
-  self-test passes (`python seed_from_clearance.py --selftest`).
+  self-test passes (`python -m lib.seed_from_clearance --selftest`).
 - [x] **2c.** Shape to `(k, 1, action_horizon, dof)` CPU tensor in curobo dof order. **DONE + VERIFIED**
   — `route_qs_to_seed_tensor()` → `(1,1,28,6)` float32 CPU contiguous (matches 0a); top-level
   `build_seed(...)` ties 2a+2b+2c into one Phase-3 call returning `(seed_tensor|None, RouteResult)`.
@@ -190,7 +190,7 @@ two variables: waypoint→direct AND no-seed→seed).
   A/B/C = same rollout command with `APPROACH_MODE=off|direct|seed`, compare `rollout_success`.
 
 ### Route visuals for seeded rollouts
-- [x] `save_route_visuals(res, out_dir, ...)` in `seed_from_clearance.py` reuses the metric's OWN plots
+- [x] `save_route_visuals(res, out_dir, ...)` in `lib/seed_from_clearance.py` reuses the metric's OWN plots
   verbatim (`_metric_path3d` 3D climb-over route + `_viz_topdown` + `_viz_side_elevation`) — no new viz.
   `_get_approach_seed` calls it after a successful build (seed mode only). Folder layout: INSIDE the
   rollout's own output folder — `<out_dir>/seed_route_visuals/episode<N>_<arm>/` (env sets

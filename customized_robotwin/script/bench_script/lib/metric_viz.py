@@ -6,13 +6,13 @@ import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.colors import BoundaryNorm, ListedColormap
 
-from lib.labeling import BEYOND, FREE, LABEL_NAMES, OBSTACLE
-from lib.obstacles import occluder_slice_polys, surface_distance_to_occluders
-from lib.plotting import (
+from .labeling import BEYOND, FREE, LABEL_NAMES, OBSTACLE
+from .obstacles import occluder_slice_polys, surface_distance_to_occluders
+from .plotting import (
     _draw_eps_sphere, _draw_ground_plane, _draw_occluder_solids_3d, _equal_aspect_3d,
     _line_axis, _scene_anchor_markers, _true_aspect_3d,
 )
-from lib.scene_constants import OCC_HALF_FOOTPRINT
+from .scene_constants import OCC_HALF_FOOTPRINT
 
 LABEL_COLORS = {BEYOND: "#9e9e9e", OBSTACLE: "#d84315", FREE: "#2e7d32"}
 

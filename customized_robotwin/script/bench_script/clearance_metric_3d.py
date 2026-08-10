@@ -58,7 +58,7 @@ from lib.widest_path import nearest_free_voxel, reconstruct_widest_path_3d, wide
 
 from task.occluder_task import make_occluder_task
 from lib.metric_diagnostics import phase1_stack_report, phase2_vertical_report, phase3_clearance_report
-from metric_viz import _metric_path3d, feasibility, phase4_visuals
+from lib.metric_viz import _metric_path3d, feasibility, phase4_visuals
 def select_arm(env, args):
     """Resolve which arm the metric runs on and return (arm, planner, grasp_q, grasp_pose, ik),
     with the chosen arm's IK solver already built (so run() doesn't rebuild it).
