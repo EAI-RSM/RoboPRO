@@ -356,11 +356,11 @@ There is no test runner configured for `bench_script/`, so verification is manua
 1. **Import check.** Every remaining top-level script must still import. From `benchmark/` with the
    env sourced, run each script with `--help` — that exercises the full import chain and the argparse
    block without touching the GPU.
-2. **Unit tests.** `python bench_script/test_obstacle_set.py` and
-   `python bench_script/test_ring_config.py`. Both are CPU-only and fast. `test_ring_config` is the
+2. **Unit tests.** From `bench_script/`, `python -m checks.test_obstacle_set` and
+   `python -m checks.test_ring_config`. Both are CPU-only and fast. `test_ring_config` is the
    important one after any `occluder_ring.py` move: it asserts the formation is byte-identical per
    `(seed, offset-spec)`, which is what guarantees the measured scene equals the rolled-out scene.
-3. **Seed smoke test.** `python bench_script/smoke_test_seed_2a.py` after Stages 2–4. It needs a GPU
+3. **Seed smoke test.** `python -m checks.smoke_test_seed_2a` from `bench_script/` after Stages 2–4. It needs a GPU
    and a real scene, but it is the only check that the seed pipeline still produces a correctly
    shaped tensor.
 4. **No cycles.** After Stage 2, confirm nothing under `lib/` imports a top-level script:

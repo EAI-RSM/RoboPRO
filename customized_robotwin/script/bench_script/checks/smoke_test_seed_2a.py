@@ -15,9 +15,9 @@ COARSE grid by default (res 0.03 / zres 0.06) so this is a fast one-off, NOT the
 metric run. A NO-ROUTE result is diagnostic, not a crash: it tells us exactly which of 1-3 to fix
 before wiring Phase 3.
 
-USAGE (env sourced + ROBOTWIN_BENCH_TASK=bench):
-    python smoke_test_seed_2a.py --seed 1 --arm auto
-    python smoke_test_seed_2a.py --seed 1 --arm right --res 0.02 --zres 0.04   # finer, slower
+USAGE from bench_script/ (env sourced + ROBOTWIN_BENCH_TASK=bench):
+    python -m checks.smoke_test_seed_2a --seed 1 --arm auto
+    python -m checks.smoke_test_seed_2a --seed 1 --arm right --res 0.02 --zres 0.04
 """
 
 import argparse

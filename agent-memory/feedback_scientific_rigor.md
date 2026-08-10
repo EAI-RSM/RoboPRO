@@ -51,7 +51,8 @@ old thing and the only varied quantity is the one under test.
   BEFORE the outcome. `rollout_seed_stats` (per-episode `built` / `reason` / `leg`) is that channel
   here and is what caught this — the summarizer's `[SEED FIRING]` block prints it and even warns
   `!! the seed NEVER fired -- seed-vs-direct below measures nothing`. Read that block first, always.
-  `test_lib_env_api.py` now guards the specific regression class (duck-typed `env.<method>()` calls
+  `checks/test_lib_env_api.py` now guards the specific regression class (duck-typed
+  `env.<method>()` calls
   from `lib/` are invisible to a by-name dead-code scan of `task/`).
 - **Do not let a conclusion harden faster than the measurement behind it.** Three claims in
   `status_current.md` were plausible, recorded as settled, acted on, and WRONG — all on 2026-07-30,

@@ -12,9 +12,9 @@ from pathlib import Path
 
 import numpy as np
 
-SCRIPT_DIR = Path(__file__).resolve().parent
-if str(SCRIPT_DIR) not in sys.path:
-    sys.path.insert(0, str(SCRIPT_DIR))
+BENCH_SCRIPT_ROOT = Path(__file__).resolve().parent.parent
+if str(BENCH_SCRIPT_ROOT) not in sys.path:
+    sys.path.insert(0, str(BENCH_SCRIPT_ROOT))
 
 import vla_rollout as rollout
 

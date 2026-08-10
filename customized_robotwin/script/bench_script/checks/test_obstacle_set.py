@@ -11,7 +11,7 @@ Three things worth proving without a GPU or a live scene:
   3. _load_collision_mesh handles both forms the registry uses -- a single mesh file and a
      directory of convex parts (which must come back as their union).
 
-Run:  python test_obstacle_set.py
+Run from bench_script/:  python -m checks.test_obstacle_set
 """
 import os
 import sys

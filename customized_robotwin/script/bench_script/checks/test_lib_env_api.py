@@ -14,14 +14,14 @@ crashed, and the A/B kept producing numbers that measured nothing.
 
 This is a pure CPU/AST check -- no scene, no curobo, no GPU.
 
-Run:  python test_lib_env_api.py
+Run from bench_script/:  python -m checks.test_lib_env_api
 """
 
 import ast
 import sys
 from pathlib import Path
 
-HERE = Path(__file__).resolve().parent
+HERE = Path(__file__).resolve().parent.parent
 LIB = HERE / "lib"
 TASK = HERE / "task"
 # Methods the RoboTwin base task provides (envs/_base_task.py and the per-task envs), not

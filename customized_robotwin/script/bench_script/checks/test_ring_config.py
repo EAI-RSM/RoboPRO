@@ -8,7 +8,7 @@ build and the Pass-2 rollout build. If it ever differed, the scene that gets mea
 not be the scene that gets rolled out, and every visibility number would be attached to the
 wrong geometry -- silently.
 
-Run:  python test_ring_config.py
+Run from bench_script/:  python -m checks.test_ring_config
 """
 import sys
 

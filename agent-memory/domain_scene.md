@@ -57,7 +57,8 @@ the neck (z≈0.99)**, gone above z≈1.043. That is up to ~4 cm of phantom obst
 widest footprint, wider than a 0.03 gripper radius, exactly where a climb-over route passes.
 Use the true posed collision mesh per z (see [[tool_clearance_metric]] `--occ-shape mesh`).
 
-**Layout.** Ring construction now lives in `lib/occluder_ring.py`, and `test_ring_config.py`
+**Layout.** Ring construction now lives in `lib/occluder_ring.py`, and
+`checks/test_ring_config.py`
 asserts the formation is byte-identical per (seed, offset-spec) — that identity is what guarantees
 the measured scene equals the rolled-out scene, so run it after any change there.
 Occluders spawn as a **RING**, controlled by env attrs set BEFORE `setup_demo`:

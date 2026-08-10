@@ -182,7 +182,8 @@ No test runner is configured. The bar, in order:
 2. `python script/bench_script/analyze_occluder_visibility.py --help` and
    `cd script/bench_script && python -m lib.seed_from_clearance --help` still works — proves the `build_cfg`
    change in 2b did not break the existing callers.
-3. `python script/bench_script/test_ring_config.py` and `test_obstacle_set.py` — CPU, fast. Must pass
+3. From `script/bench_script/`, `python -m checks.test_ring_config` and
+   `python -m checks.test_obstacle_set` — CPU, fast. Must pass
    unchanged; the ring one is what guarantees the scene is reproducible.
 4. **`--num-seeds 1 --num-occluders 1`, GPU, end to end.** Success criteria: an `.mp4` exists, is
    non-empty, and plays; `records.jsonl` has one complete line; VRAM does not OOM.

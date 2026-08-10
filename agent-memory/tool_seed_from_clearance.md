@@ -39,7 +39,7 @@ once.)
 
 **Files.** New: `lib/seed_from_clearance.py` (`build_seed` / `compute_route_configs` /
 `resample_route_to_seed` / `route_qs_to_seed_tensor` / `save_route_visuals` / `sweep_gate_tau`),
-`smoke_test_seed_2a.py`, `carry_object_spheres.py`. Edited: VENDORED curobo
+`checks/smoke_test_seed_2a.py`, `lib/carry_object_spheres.py`. Edited: VENDORED curobo
 `envs/curobo/.../motion_gen.py` — the edit is applied in-tree AND mirrored as
 `bench_script/curobo_seed_traj.patch`, so it survives a curobo re-vendor; keep the two in sync.
 It adds `MotionGenPlanConfig.seed_traj` + injection in
