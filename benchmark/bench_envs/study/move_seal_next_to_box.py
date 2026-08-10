@@ -1,17 +1,12 @@
 # from envs._base_task import Base_Task
-import sapien
-import math
-import glob
 import yaml
 import os
 import numpy as np
 from envs._GLOBAL_CONFIGS import *
-from copy import deepcopy
 from bench_envs.study._study_base_task import Study_base_task
 from envs.utils import *
-from bench_envs.utils.scene_gen_utils import get_position_limits, get_actor_boundingbox, get_collison_with_objs
+from bench_envs.utils.scene_gen_utils import get_position_limits, get_actor_boundingbox
 from bench_envs.utils.scene_gen_utils import print_c, place_actor, point_to_box_distance
-from transforms3d.euler import euler2quat
 
 class move_seal_next_to_box(Study_base_task):
 
@@ -84,4 +79,3 @@ class move_seal_next_to_box(Study_base_task):
         return (dist_to_box < dist_thr
                 and self.robot.is_left_gripper_open()
                 and self.robot.is_right_gripper_open())
-

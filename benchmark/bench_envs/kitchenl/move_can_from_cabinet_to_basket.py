@@ -3,7 +3,7 @@ import os
 import yaml
 
 from bench_envs.kitchenl._kitchen_base_large import Kitchen_base_large
-from bench_envs.utils.scene_gen_utils import get_actor_boundingbox, get_random_place_pose,print_c
+from bench_envs.utils.scene_gen_utils import get_actor_boundingbox, get_random_place_pose
 from envs.utils import *
 import math
 import numpy as np
@@ -297,5 +297,4 @@ class move_can_from_cabinet_to_basket(Kitchen_base_large):
                and self.is_cabinet_closed(threshold=0.02) \
                and self.robot.is_right_gripper_open() \
                and self.robot.is_left_gripper_open()
-
 

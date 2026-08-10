@@ -5,10 +5,7 @@ import yaml
 from bench_envs.kitchenl._kitchen_base_large import Kitchen_base_large
 from bench_envs.utils.scene_gen_utils import get_actor_boundingbox, place_actor, point_to_box_distance, print_c
 from envs.utils import *
-import math
 import numpy as np
-import sapien
-import transforms3d as t3d
 
 
 class put_can_next_to_basket(Kitchen_base_large):
@@ -121,4 +118,3 @@ class put_can_next_to_basket(Kitchen_base_large):
         return (dist_to_box < dist_thr
                 and self.robot.is_left_gripper_open()
                 and self.robot.is_right_gripper_open())
-

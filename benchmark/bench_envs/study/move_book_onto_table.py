@@ -1,7 +1,4 @@
 # from envs._base_task import Base_Task
-import sapien
-import math
-import glob
 import yaml
 import os
 import numpy as np
@@ -110,4 +107,3 @@ class move_book_onto_table(Study_base_task):
         return (book_on_table 
                 and self.robot.is_left_gripper_open()
                 and self.robot.is_right_gripper_open())
-

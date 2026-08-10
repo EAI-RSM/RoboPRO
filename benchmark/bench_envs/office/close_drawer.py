@@ -2,12 +2,7 @@
 from bench_envs.office._office_base_task import Office_base_task
 from envs.utils import *
 from bench_envs.utils import *
-import sapien
-import math
 from envs._GLOBAL_CONFIGS import *
-from copy import deepcopy
-import glob
-from transforms3d.euler import euler2quat
 
 
 class close_drawer(Office_base_task):

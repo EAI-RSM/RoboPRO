@@ -1,37 +1,21 @@
 import os
-import re
 import sapien.core as sapien
-from sapien.render import clear_cache as sapien_clear_cache
-from sapien.utils.viewer import Viewer
 import numpy as np
-import gymnasium as gym
-import pdb
 import toppra as ta
 import json
-import transforms3d as t3d
 from transforms3d.euler import euler2quat
-from collections import OrderedDict
-import torch, random
+import torch
 
 from bench_envs._bench_base_task import Bench_base_task
 from envs.utils import *
 from bench_envs.utils import *
-import math
-from envs.robot import Robot
-from envs.camera import Camera
-from envs.utils.actor_utils import Actor, ArticulationActor
+from envs.utils.actor_utils import Actor
 
-from copy import deepcopy
-import subprocess
 from pathlib import Path
-import trimesh
-import imageio
-import glob
 
 
 from envs._GLOBAL_CONFIGS import *
 
-from typing import Optional, Literal
 
 current_file_path = os.path.abspath(__file__)
 parent_directory = os.path.dirname(current_file_path)

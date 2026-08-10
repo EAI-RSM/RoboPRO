@@ -7,8 +7,6 @@ from envs.utils import *
 import sapien
 import math
 from envs._GLOBAL_CONFIGS import *
-from copy import deepcopy
-import glob
 import numpy as np
 import transforms3d as t3d
 
@@ -153,4 +151,3 @@ class put_can_close_cabinet(Kitchen_base_large):
          return self.is_cabinet_closed(threshold=0.02) and self._is_can_inside_cabinet() and \
                 self.robot.is_left_gripper_open() \
                 and self.robot.is_right_gripper_open()
-
