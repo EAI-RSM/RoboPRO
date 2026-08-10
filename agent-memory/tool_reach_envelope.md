@@ -54,9 +54,9 @@ false-prune gate: right 0 reachable among 43,578 pruned cells (31.70% of grid), 
 (27.08%). The envelope is therefore a valid outer bound on both arms. It is loose at a fixed grasp
 orientation: right false-keeps = 39,051 / 93,878 kept (41.60%; 28.41% of the whole grid), left =
 38,299 / 100,230 (38.21%; 27.86%). The looseness is present across the height stack and rises at
-the top slices. This does not answer whether envelope-only geometric eps* preserves scene rank;
-the saved per-voxel `false_keep_mask.npz` artifacts exist specifically for the Stage 3 route
-cross-reference in `customized_robotwin/script/bench_script/plans/GEOMETRIC_EPS_VALIDATION_PLAN.md`.
+the top slices. The later envelope-only geometric eps* study was retired for construct-validity
+reasons; its former Stage 3 plan is recoverable from Git history at `3dc788a`. The saved per-voxel
+`false_keep_mask.npz` artifacts remain useful diagnostics.
 
 **Workflow gotchas:**
 - After changing ANY `--occ-*` / `--reach-*` / grid arg you MUST re-run the PRODUCER; the validator

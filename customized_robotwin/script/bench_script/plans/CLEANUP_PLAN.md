@@ -1,5 +1,10 @@
 # Codebase cleanup: reduce lines and moving parts, no functionality lost
 
+> **Historical record.** This first-pass plan was completed through `d7d001a` and superseded by
+> `PRUNE_PLAN.md`. References below to task-metric files and plans describe their pre-prune paths;
+> that implementation is now cold source under `research_archive/bench_script_task_metric_2026/`,
+> while its tests and execution plans are recoverable from Git history at `3dc788a`.
+
 > **For the executing agent.** Written by Claude Code on 2026-08-10, reviewed and corrected by
 > Codex on 2026-08-10, and approved in direction by the user. Counts describe the dirty tree at
 > review time; re-run the scans in *Verification* before trusting them.

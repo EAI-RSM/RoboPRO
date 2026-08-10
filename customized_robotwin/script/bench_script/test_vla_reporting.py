@@ -34,7 +34,6 @@ def _args(**overrides):
         "pi0_step": 50,
         "report_every": 10,
         "resume_dir": None,
-        "postprocess_metrics": False,
     }
     values.update(overrides)
     return Namespace(**values)
@@ -156,30 +155,11 @@ def test_atomic_records_resume_and_reports():
     print("  [3] atomic episode recovery, JSONL reconciliation, resume, reports PASS")
 
 
-def test_integrated_postprocess_command():
-    captured = []
-    original = rollout.subprocess.run
-    rollout.subprocess.run = lambda command, check: captured.append((command, check))
-    try:
-        with tempfile.TemporaryDirectory() as tmp:
-            rollout._run_metric_postprocess(
-                _args(postprocess_metrics=True), Path(tmp)
-            )
-    finally:
-        rollout.subprocess.run = original
-    command, check = captured[0]
-    assert check is True
-    assert Path(command[1]).name == "task_metric.py"
-    assert "--rollout-run" in command and "--report-every" in command
-    print("  [4] completed task run automatically starts metric postprocess     PASS")
-
-
 def main():
     print("VLA long-run durability/reporting -- CPU checks")
     test_round_robin_target()
     test_video_uses_hard_outcome_bucket()
     test_atomic_records_resume_and_reports()
-    test_integrated_postprocess_command()
     print("ALL PASS")
 
 

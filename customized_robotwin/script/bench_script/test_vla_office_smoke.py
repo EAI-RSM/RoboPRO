@@ -3,7 +3,9 @@
 
 from __future__ import annotations
 
+import os
 import sys
+import tempfile
 import types
 from argparse import Namespace
 from pathlib import Path
@@ -26,6 +28,8 @@ from bench_envs._bench_base_task import Bench_base_task
 from bench_envs.eval_video import select_eval_video_camera
 from bench_envs.study.put_cup_on_coaster import put_cup_on_coaster
 from lib.scene_build import DR_CLEAN, build_cfg
+from lib.task_roles import resolve_task_roles
+from lib.waypoints import canonical_waypoints
 
 
 def _fail(*_args, **_kwargs):
@@ -134,6 +138,87 @@ def test_stock_task_selection_and_outcome() -> None:
             pass
         else:
             raise AssertionError(f"accepted malformed collision metrics: {malformed!r}")
+
+
+class _TaskPose:
+    def __init__(self, p, q=(1.0, 0.0, 0.0, 0.0)):
+        self.p = np.asarray(p, dtype=float)
+        self.q = np.asarray(q, dtype=float)
+
+
+class _TaskActor:
+    def __init__(self, name, p, contact=None):
+        self._name = name
+        self._pose = _TaskPose(p)
+        self._contact = contact
+        self.scale = 1.0
+
+    def get_name(self):
+        return self._name
+
+    def get_pose(self):
+        return self._pose
+
+    def get_contact_point(self, index, ret):
+        assert index == 0 and ret == "matrix"
+        return self._contact.copy()
+
+
+class _TaskRobot:
+    def get_left_ee_pose(self):
+        return [-0.4, 0.0, 0.9, 1.0, 0.0, 0.0, 0.0]
+
+    def get_right_ee_pose(self):
+        return [0.4, 0.0, 0.9, 1.0, 0.0, 0.0, 0.0]
+
+
+def _task_api_env(root):
+    for name, model_id in (("021_cup", "2"), ("019_coaster", "0"), ("block", "3")):
+        path = root / "assets" / "objects" / name / "collision"
+        path.mkdir(parents=True, exist_ok=True)
+        (path / f"base{model_id}.glb").write_bytes(b"mesh")
+    contact = np.eye(4)
+    contact[:3, 3] = [0.2, -0.1, 0.9]
+    target = _TaskActor("021_cup", [0.2, -0.1, 0.82], contact)
+    destination = _TaskActor("019_coaster", [-0.2, 0.15, 0.82])
+    obstacle = _TaskActor("block", [0.0, 0.0, 0.85])
+    return Namespace(
+        target_obj=target,
+        target_name="021_cup",
+        target_id=2,
+        des_obj=destination,
+        des_obj_id=0,
+        des_obj_pose=[-0.2, 0.10, 0.82, 1.0, 0.0, 0.0, 0.0],
+        side_to_place="right",
+        robot=_TaskRobot(),
+        collision_list=[
+            {"actor": target, "collision_path": str(root / "assets/objects/021_cup/collision/base2.glb")},
+            {"actor": destination, "collision_path": str(root / "assets/objects/019_coaster/collision/base0.glb")},
+            {"actor": obstacle, "collision_path": str(root / "assets/objects/block/collision/base3.glb"), "is_obstacle": True},
+        ],
+    )
+
+
+def test_live_task_roles_and_waypoints() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        previous = os.environ.get("BENCH_ROOT")
+        os.environ["BENCH_ROOT"] = str(root)
+        try:
+            env = _task_api_env(root)
+            roles = resolve_task_roles(env, "put_cup_on_coaster")
+            first = canonical_waypoints(env, "put_cup_on_coaster")
+            second = canonical_waypoints(env, "put_cup_on_coaster")
+        finally:
+            if previous is None:
+                os.environ.pop("BENCH_ROOT", None)
+            else:
+                os.environ["BENCH_ROOT"] = previous
+    assert roles.target.actor is env.target_obj
+    assert roles.destination.actor is env.des_obj
+    assert [role.name for role in roles.obstacles] == ["block"]
+    assert first == second
+    assert first[0].arm == "right"
 
 
 def test_policy_camera_config() -> None:
@@ -324,6 +409,7 @@ def test_planner_qpos_keeps_topp_path() -> None:
 def main() -> None:
     test_office_scene_selection()
     test_stock_task_selection_and_outcome()
+    test_live_task_roles_and_waypoints()
     test_policy_camera_config()
     test_video_camera_selection()
     test_cup_coaster_success_uses_absolute_xy_error()

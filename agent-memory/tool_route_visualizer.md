@@ -5,9 +5,11 @@ metadata:
   type: project
 ---
 
-`visualize_task_metric_routes.py` replays each committed `put_cup_on_coaster` scene (no policy, no
-rollout), re-derives the metric, checks it against the committed record, and renders
-`metric_viz._metric_path3d`. Source of truth for the metric stays `metric_postprocess/`.
+**Retired 2026-08-10.** The cold source at
+`research_archive/bench_script_task_metric_2026/visualize_task_metric_routes.py` replayed each
+committed `put_cup_on_coaster` scene (no policy, no rollout), re-derived the metric, checked it
+against the committed record, and rendered `metric_viz._metric_path3d`. The completed 50-episode,
+200-figure audit and its metric records remain preserved; the command is no longer maintained.
 
 ## The figures are NOT geometrically shifted — do not re-investigate
 
@@ -51,7 +53,7 @@ quantity that is itself mis-specified — which is exactly why drawing them was 
 
 ## Config immutability: every code edit forces a fresh `--out-dir`
 
-`_visualization_code_version()` hashes `visualize_task_metric_routes.py` + `lib/metric_viz.py` +
+`_visualization_code_version()` hashed `visualize_task_metric_routes.py` + `lib/metric_viz.py` +
 `lib/plotting.py` into `config_sha256`. `_load_or_create_config` compares that against the saved
 `config.json` and **raises** `route-visualization configuration differs from the immutable saved
 config`. Partially-rendered episodes under the old hash are **rejected, not skipped**
@@ -86,5 +88,5 @@ its GOAL waypoint. Which leg binds depends on where the cup and coaster happened
 "place-only" scene just means the destination was in the crowded region and the pick was not.
 See [[tool_geometric_metric]] for why the bottleneck is the endpoint.
 
-`customized_robotwin/script/bench_script/plans/TASK_METRIC_ROUTE_VISUALIZATION_PLAN.md` §5/§6 still specify minimum-legs-only ("# only when
-tied", "every minimum-leg 3D PNG") and are out of sync with the code.
+The deleted route-visualization plan specified minimum-legs-only and was out of sync with the
+archived code; it remains recoverable from Git history at `3dc788a`.

@@ -22,8 +22,10 @@ empty. Keep this rule over any file-size preference.
 single config source, see below), `ik_grid.py`, `labeling.py`, `continuity.py` (warm-start branch
 propagation), `widest_path.py` (the DSU/eps* core), `obstacles.py` (occluder footprints, EDT,
 mesh slicing), `occluder_ring.py` (formation), `scene_build.py`, `scene_constants.py`,
-`visibility.py`, `planning_tuning.py`, `plotting.py`, and `run_io.py`. Later task-metric work added
-further reusable modules; do not rely on a hard-coded file count.
+`visibility.py`, `planning_tuning.py`, `plotting.py`, and `run_io.py`. The invalidated task-metric
+implementation was removed from this live layer on 2026-08-10 and preserved as cold source under
+`research_archive/bench_script_task_metric_2026/`; do not treat that archive as an importable
+package.
 
 **`task/` (7 modules — `analyze_occluder_visibility.py` shed 3081 lines into it):**
 `occluder_task.py` (the class), plus `grasp_mixin.py`, `placement_mixin.py` (647 L, the largest
@@ -38,8 +40,9 @@ these mixins**, not in `analyze_occluder_visibility.py`.
 `python -m lib.seed_from_clearance`.
 
 **Internal execution/design documents live under `bench_script/plans/`.** Keep top-level
-`bench_script/` for runnable entry points, tests, and support files; do not move these plans into
-the published `docs/` site.
+`bench_script/` for runnable entry points and the intentional `setup_paths.py` bootstrap. Surviving
+checks live under `bench_script/checks/`; retired execution plans are recoverable from Git history
+rather than retained beside active plans. Do not move plans into the published `docs/` site.
 
 **Deleted outright — do not go looking for them:** `clearance_metric.py` (the 2D tool; 10 of its 14
 shared functions were byte-identical to the 3D file and nothing imported it), plus
@@ -55,12 +58,12 @@ scheme, not one-off variables. Defaults: x[−0.6,0.6] y[−0.35,0.35] res 0.01,
 zres 0.03, gate_tau 0.35, ik_seeds 30, chunk 256, occ_shape "mesh", obstacles "all".
 
 **Verification bar for changes here** (no test runner is configured): `--help` on each top-level
-script exercises the full import chain without a GPU; `test_obstacle_set.py` and
-`test_ring_config.py` are CPU-only and fast (`test_ring_config` is the important one after any
-`occluder_ring.py` change — it asserts the formation is byte-identical per (seed, offset-spec),
-which is what guarantees the measured scene equals the rolled-out scene); `smoke_test_seed_2a.py`
-needs a GPU and is the only check that the seed pipeline still produces a correctly shaped tensor.
-Nothing may exceed 1000 lines.
+script exercises the full import chain without a GPU. From `bench_script/`, run CPU checks as
+`python -m checks.<module>`; `checks.test_obstacle_set` and `checks.test_ring_config` are fast
+(`test_ring_config` is the important one after any `occluder_ring.py` change — it asserts the
+formation is byte-identical per (seed, offset-spec), which is what guarantees the measured scene
+equals the rolled-out scene). `checks.smoke_test_seed_2a` needs a GPU and is the only check that the
+seed pipeline still produces a correctly shaped tensor. Nothing may exceed 1000 lines.
 
 **Note on citing code in these notes:** prefer symbol names over `file:line`. The refactor moved
 almost every line number in the older memories, and grep-able names survive.

@@ -5,8 +5,10 @@ metadata:
   type: project
 ---
 
-Findings from a 2026-08-07 audit of the `lib/waypoints.py` canonical chain feeding
-[[tool_geometric_metric]]'s `geometric_eps` in the `put_cup_on_coaster` association study.
+Findings from a 2026-08-07 audit of the live `lib/waypoints.py::canonical_waypoints` chain as it fed
+the now-retired [[tool_geometric_metric]] implementation in the `put_cup_on_coaster` association
+study. The retired core source is preserved under
+`research_archive/bench_script_task_metric_2026/`; its imports are intentionally unmaintained.
 **All four numbers below are measurements on real recorded runs, not deductions.** Provenance:
 `scripts/validation/results/task_metric/20260731-154726` (d10, seeds 1000–1099) and
 `20260731-163538` (d15), 100 scenes each. The same metric code produced the 3000-rollout campaign's

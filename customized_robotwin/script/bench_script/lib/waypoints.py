@@ -8,23 +8,12 @@ import transforms3d as t3d
 from .task_roles import SUPPORTED_TASK, resolve_task_roles
 
 
-LEG_KINDS = {"pre_grasp", "grasp", "lift", "carry", "pre_place", "place"}
-
-
 @dataclass(frozen=True)
 class Waypoint:
     xyz: tuple
     quat: tuple
     kind: str | None
     arm: str
-    gripper_state: str
-
-
-@dataclass(frozen=True)
-class CanonicalLeg:
-    start_xyz: tuple
-    goal_xyz: tuple
-    kind: str
     gripper_state: str
 
 
@@ -90,21 +79,3 @@ def canonical_waypoints(env, task_name):
         _waypoint(np.r_[pre_place_xyz, grasp_quat], "carry", arm, "holding"),
         _waypoint(np.r_[place_xyz, grasp_quat], "place", arm, "holding"),
     ]
-
-
-def canonical_legs(waypoints):
-    """Turn the ordered chain into metric requests and leg metadata."""
-    if len(waypoints) < 2:
-        raise ValueError("a canonical path needs at least two waypoints")
-    legs = []
-    for start, goal in zip(waypoints, waypoints[1:]):
-        if goal.kind not in LEG_KINDS:
-            raise ValueError(f"invalid canonical leg kind: {goal.kind!r}")
-        if start.arm != goal.arm:
-            raise ValueError("canonical leg changes acting arm")
-        if goal.gripper_state not in {"empty", "holding"}:
-            raise ValueError(f"invalid gripper state: {goal.gripper_state!r}")
-        legs.append(
-            CanonicalLeg(start.xyz, goal.xyz, goal.kind, goal.gripper_state)
-        )
-    return legs

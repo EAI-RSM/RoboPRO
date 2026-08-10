@@ -5,7 +5,9 @@ metadata:
   type: project
 ---
 
-`lib/geometric_metric.py::geometric_eps` is the additive CPU-only relaxation of
+**Retired 2026-08-10.** The source described here is preserved for inspection at
+`research_archive/bench_script_task_metric_2026/lib/geometric_metric.py`; it is intentionally not
+an importable or supported live module. `geometric_eps` was the additive CPU-only relaxation of
 [[tool_clearance_metric]]. It builds one endpoint-independent volume per `(scene, arm, cfg)` call
 and reuses it across an ordered list of world-space legs. Reachability comes only from the
 validated precomputed [[tool_reach_envelope]]; it imports no torch/curobo and constructs no IK
@@ -37,11 +39,12 @@ the unchanged `FREE & edt>=eps*` component. Physical anisotropic edge length is 
 clearance. This prevents the old BFS tie-break from selecting a short `zmin`-hugging route while
 leaving eps* unchanged; it is reporting-only and never enters `compute_route_configs` or a seed.
 
-CPU verification lives in `test_geometric_metric.py`: a fresh subprocess blocks torch/curobo
-imports, a real temporary target mesh proves label-only target masking leaves the obstacle EDT
-unchanged, and a two-leg call proves one shared volume plus the complete `LegResult` shape.
+The deleted `test_geometric_metric.py` formerly verified CPU-only imports, label-only target
+masking, and shared-volume `LegResult` behavior. It remains recoverable from Git history at
+`3dc788a`.
 
-`compare_geometric_vs_gated.py` is the Stage 3 runner. It rebuilds the same live scene once per
+The archived `research_archive/bench_script_task_metric_2026/compare_geometric_vs_gated.py` was the
+Stage 3 runner. It rebuilds the same live scene once per
 seed, then constructs two aligned pairs from the shared raw volumes: no-target isolation and
 target-masked production. Each pair snaps once against gated FREE and passes that exact voxel pair
 to both solvers. Grid/EDT equality, FREE-set inclusion, and the one-sided eps invariant are hard

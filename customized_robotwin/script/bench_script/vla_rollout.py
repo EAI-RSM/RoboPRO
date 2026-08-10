@@ -426,24 +426,6 @@ def _regenerate_reports(out_dir):
         return None
 
 
-def _run_metric_postprocess(args, out_dir):
-    if not args.postprocess_metrics:
-        return
-    if args.scene != "task":
-        raise ValueError("--postprocess-metrics is only valid with --scene task")
-    command = [
-        sys.executable,
-        str(Path(__file__).with_name("task_metric.py")),
-        "--rollout-run",
-        str(Path(out_dir).resolve()),
-        "--report-every",
-        str(int(args.report_every)),
-        "--no-scene-images",
-    ]
-    print("[postprocess] starting/resuming integrated task metrics")
-    subprocess.run(command, check=True)
-
-
 def run(args: argparse.Namespace) -> None:
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -475,7 +457,6 @@ def run(args: argparse.Namespace) -> None:
         if summary is None or not summary.get("collection_complete"):
             raise RuntimeError("completed rollout records did not regenerate a complete summary")
         print(f"[resume] rollout collection already complete at n={target_rollouts}")
-        _run_metric_postprocess(args, out_dir)
         return
 
     policy_eval = importlib.import_module("pi05.deploy_policy").eval
@@ -859,8 +840,6 @@ def run(args: argparse.Namespace) -> None:
             f"hard success: {summary['n_hard_success']}/{summary['n_episodes']} "
             f"(non_degenerate={summary['hard_success_non_degenerate']})"
         )
-    if summary is not None and summary.get("collection_complete"):
-        _run_metric_postprocess(args, out_dir)
     print(f"rollout validation ready -> {records_path}")
 
 
@@ -928,15 +907,6 @@ def main() -> None:
         default=10,
         help="atomically regenerate CSV, summary, and figures every N committed rollouts",
     )
-    parser.add_argument(
-        "--postprocess-metrics",
-        action=argparse.BooleanOptionalAction,
-        default=False,
-        help=(
-            "after stock-task rollout teardown, automatically start/resume crash-safe "
-            "metric processing and clearance-bucket reports"
-        ),
-    )
     args = parser.parse_args()
 
     if not 1 <= args.pi0_step <= 50:
@@ -961,8 +931,6 @@ def main() -> None:
         parser.error("--replicate cannot be negative")
     if args.report_every <= 0:
         parser.error("--report-every must be positive")
-    if args.postprocess_metrics and args.scene != "task":
-        parser.error("--postprocess-metrics is only valid with --scene task")
     if args.base_config is None:
         args.base_config = (
             f"bench_demo_{args.bench_subdir}_clean"

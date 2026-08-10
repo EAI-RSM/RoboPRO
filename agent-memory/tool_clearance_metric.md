@@ -61,11 +61,12 @@ GATED; "ungated merges but gated disconnects" = branch seams block the continuou
 Runs save `stack_data.npz` (label, qfield, edt, q_warm_2d/3d, xs/ys/zs) so results are
 re-analysable offline.
 
-**Envelope-only relaxation.** `lib/geometric_metric.py` is additive and does not change this
-pipeline. It replaces the per-scene IK node set with the precomputed reach envelope, drops the
-joint gate, and stamps the target mesh into labels only. It is called geometric eps*
-(`eps_geom`), never plain eps*, and remains gated on the empirical rank test described in
-[[tool_geometric_metric]].
+**Retired envelope-only relaxation.** The former `lib/geometric_metric.py` did not change this live
+pipeline. It replaced the per-scene IK node set with the precomputed reach envelope, dropped the
+joint gate, and stamped the target mesh into labels only. That experimental `eps_geom` slice is no
+longer active code; its cold source is
+`research_archive/bench_script_task_metric_2026/lib/geometric_metric.py`. See
+[[tool_geometric_metric]] for its findings and retirement context.
 
 **curobo IK API used** (verified in-repo `curobo/wrap/reacher/ik_solver.py`):
 `IKSolver.solve_batch(goal, seed_config=(n,batch,dof), return_seeds=K, num_seeds=None)`. Default
