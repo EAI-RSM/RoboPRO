@@ -5,10 +5,10 @@ import json
 import numpy as np
 import matplotlib.pyplot as plt
 
-from lib.continuity import _NEIGH8, _wrap_linf
-from lib.labeling import FREE
-from lib.obstacles import occluder_slice_polys
-from lib.plotting import _scene_anchor_markers
+from .continuity import _NEIGH8, _wrap_linf
+from .labeling import FREE
+from .obstacles import occluder_slice_polys
+from .plotting import _scene_anchor_markers
 
 GATE_TAU_CANDIDATES = (0.1, 0.2, 0.35, 0.5, 0.75, 1.0)
 

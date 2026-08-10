@@ -48,8 +48,8 @@ episode, after a grasp has already succeeded, so the exact spheres are simply av
 never runs inside it.)
 
 Usage:
-    python carry_object_spheres.py --analyze     # reproduce both measurements + figure
-    python carry_object_spheres.py --selftest    # no GPU, no scene, no assets beyond the model json
+    python -m lib.carry_object_spheres --analyze   # reproduce both measurements + figure
+    python -m lib.carry_object_spheres --selftest  # no GPU, no scene, no assets beyond the model json
 """
 
 from __future__ import annotations
@@ -62,7 +62,7 @@ from pathlib import Path
 
 import numpy as np
 
-from lib.scene_constants import TARGET_ID, TARGET_MODEL
+from .scene_constants import TARGET_ID, TARGET_MODEL
 
 # The mesh->gripper convention from _base_task.get_grasp_pose: the contact frame is post-multiplied
 # by this before the -0.12 m back-off along the gripper's approach axis. Duplicated here (rather
@@ -351,7 +351,7 @@ def _figure(md, mesh_path, summary, png_path):
 
 def _selftest() -> int:
     """Pure geometry -- no GPU, no sapien, no curobo."""
-    repo = Path(__file__).resolve().parents[2]
+    repo = Path(__file__).resolve().parents[3]
     md_path = repo / "assets" / "objects" / "001_bottle"
     md = load_model_data(md_path, 9)
 
@@ -499,7 +499,7 @@ def main() -> int:
     if args.selftest:
         return _selftest()
 
-    repo = Path(__file__).resolve().parents[2]
+    repo = Path(__file__).resolve().parents[3]
     # Default to the same shared target identity used by the rollout task.
     model, mid = TARGET_MODEL, TARGET_ID
     model_dir = Path(args.model_dir) if args.model_dir else repo / "assets" / "objects" / model

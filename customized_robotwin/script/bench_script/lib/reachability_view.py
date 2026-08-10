@@ -7,10 +7,10 @@ to any machine with a display and just run it. (Static PNGs are still written by
 script; this is only for exploring the shape by hand.)
 
 USAGE (from bench_script, on a machine with a display):
-    python reachability_view.py                      # newest vol_*.npz in the results dir
-    python reachability_view.py path/to/vol_*.npz    # a specific cache
-    python reachability_view.py --kind ceiling       # z_max(x,y) surface instead of the solid blob
-    python reachability_view.py --save shot.png      # also dump a PNG of the opening view
+    python -m lib.reachability_view                      # newest vol_*.npz in the results dir
+    python -m lib.reachability_view path/to/vol_*.npz    # a specific cache
+    python -m lib.reachability_view --kind ceiling       # z_max(x,y) surface instead of the solid blob
+    python -m lib.reachability_view --save shot.png      # also dump a PNG of the opening view
 
 --kind iso     -> marching-cubes isosurface of the whole reachable region (default)
 --kind ceiling -> the z_max(x,y) surface, turbo-coloured by height
@@ -23,8 +23,8 @@ from pathlib import Path
 import numpy as np
 
 # repo-root results dir, anchored to THIS file so it resolves the same from any cwd
-# (bench_script -> script -> customized_robotwin -> RoboPRO)
-RESULTS_DIR = Path(__file__).resolve().parents[3] / "scripts" / "validation" / "results" / "reachability"
+# (lib -> bench_script -> script -> customized_robotwin -> RoboPRO)
+RESULTS_DIR = Path(__file__).resolve().parents[4] / "scripts" / "validation" / "results" / "reachability"
 
 # Milk-box 038 id2 at scale 1.0 is stood upright, so its VERTICAL height is the long axis of the
 # model extents [0.110, 0.254, 0.122] -> 0.254 m (the other two dims are the 0.11x0.122 footprint).

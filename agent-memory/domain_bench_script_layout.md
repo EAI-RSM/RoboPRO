@@ -18,11 +18,12 @@ from `lib/`. Verify with
 `grep -rn "^from \(analyze_\|clearance_\|reachability_\|visualize_\|seed_from\)" lib/` → must be
 empty. Keep this rule over any file-size preference.
 
-**`lib/` (13 modules, the reusable layer):** `metric_config.py` (`SeedMetricConfig` — the single
-config source, see below), `ik_grid.py`, `labeling.py`, `continuity.py` (warm-start branch
+**`lib/` is the reusable layer.** Core modules include `metric_config.py` (`SeedMetricConfig` — the
+single config source, see below), `ik_grid.py`, `labeling.py`, `continuity.py` (warm-start branch
 propagation), `widest_path.py` (the DSU/eps* core), `obstacles.py` (occluder footprints, EDT,
 mesh slicing), `occluder_ring.py` (formation), `scene_build.py`, `scene_constants.py`,
-`visibility.py`, `planning_tuning.py`, `plotting.py`, `run_io.py`.
+`visibility.py`, `planning_tuning.py`, `plotting.py`, and `run_io.py`. Later task-metric work added
+further reusable modules; do not rely on a hard-coded file count.
 
 **`task/` (7 modules — `analyze_occluder_visibility.py` shed 3081 lines into it):**
 `occluder_task.py` (the class), plus `grasp_mixin.py`, `placement_mixin.py` (647 L, the largest
@@ -30,8 +31,10 @@ file in the tree and an accepted exception), `planning_mixin.py`, `seeding_mixin
 `state_checks_mixin.py`, `pose_geometry.py`. **`APPROACH_MODE`/`PLACEMENT_MODE` logic now lives in
 these mixins**, not in `analyze_occluder_visibility.py`.
 
-**Also split out of `clearance_metric_3d.py` (−1730 L):** `metric_diagnostics.py` and
-`metric_viz.py`.
+**Also split out of `clearance_metric_3d.py` (−1730 L):** `lib/metric_diagnostics.py` and
+`metric_viz.py`. The 2026-08-10 cleanup also moved `reachability_view.py` and
+`carry_object_spheres.py` under `lib/`; their runnable forms are
+`python -m lib.reachability_view` and `python -m lib.carry_object_spheres`.
 
 **Deleted outright — do not go looking for them:** `clearance_metric.py` (the 2D tool; 10 of its 14
 shared functions were byte-identical to the 3D file and nothing imported it), plus

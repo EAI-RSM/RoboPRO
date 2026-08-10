@@ -247,7 +247,7 @@ class SeedingMixin:
         seed = None
         ik = None
         try:
-            import carry_object_spheres as cos
+            from lib import carry_object_spheres as cos
             planner = self.robot.left_planner if tag == "left" else self.robot.right_planner
 
             # The held object, exactly as the motion_gen models it. attach_object() ran in
@@ -317,7 +317,7 @@ class SeedingMixin:
             # keeps this correct if the solver is ever made reusable.
             try:
                 if ik is not None:
-                    import carry_object_spheres as _cos
+                    from lib import carry_object_spheres as _cos
                     _cos.detach_attached_spheres(ik)
             except Exception:
                 pass

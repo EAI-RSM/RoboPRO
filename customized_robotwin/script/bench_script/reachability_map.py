@@ -30,7 +30,8 @@ USAGE (from the benchmark folder, env sourced + ROBOTWIN_BENCH_TASK=bench):
 and derives figures: (A) a ceiling z_max(x,y) 3D surface, (A2) a flat 2D z_max heatmap with a
 contrast-stretched turbo colour map, (B) reachable-area-vs-z curve, (C) a per-z slice montage,
 (D) a marching-cubes isosurface of the reachable region. For a rotatable version of the 3D
-views, run reachability_view.py on the cached .npz (needs only numpy+matplotlib, no GPU).
+views, run ``python -m lib.reachability_view`` on the cached .npz (needs only
+numpy+matplotlib, no GPU).
 
 NOTE: reachability is orientation-specific. By default we use the target's own
 horizontal side-grasp orientation (per arm). Pass --topdown for a top-down quat.
@@ -44,7 +45,7 @@ import numpy as np
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
-import reachability_view as rv
+from lib import reachability_view as rv
 
 from setup_paths import setup_paths
 setup_paths()
@@ -196,12 +197,13 @@ def _save_and_plot_volume(XX, YY, xs, ys, zs, reach_any, per_arm, box_p, tgt_p, 
     _plot_area_curve(zs, reach_any, per_arm, out / f"{stem}_area.png", args.res, box_p, args)
     _plot_slice_montage(XX, YY, zs, reach_any, out / f"{stem}_slices.png", box_p, tgt_p, pad_xy, args)
     _plot_isosurface(xs, ys, zs, reach_any, out / f"{stem}_iso.png", box_p, tgt_p, pad_xy, args)
-    print(f"[interactive] rotate the 3D view with:  python reachability_view.py {npz}")
+    print(f"[interactive] rotate the 3D view with:  python -m lib.reachability_view {npz}")
 
 
 def _plot_ceiling3d(XX, YY, zs, reach_any, path, box_p, tgt_p, pad_xy, args):
     """(A) ceiling z_max(x,y) as a single height-coloured 3D surface (floor dropped).
-    Static PNG; for a rotatable version run:  python reachability_view.py <cache.npz> --kind ceiling
+    Static PNG; for a rotatable version run:
+    python -m lib.reachability_view <cache.npz> --kind ceiling
     Colour is stretched to the actual ceiling min..max (turbo) to emphasise height differences."""
     z_ceil = rv._ceiling(reach_any, zs)
     if not np.isfinite(z_ceil).any():

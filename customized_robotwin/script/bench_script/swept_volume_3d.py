@@ -74,7 +74,7 @@ setup_paths()
 from task.occluder_task import make_occluder_task  # noqa: E402
 from lib.scene_build import DR_CLEAN, build_cfg  # noqa: E402
 from lib.scene_constants import OCC_HALF_FOOTPRINT, PAD_XY  # noqa: E402
-from reachability_view import OCC_HEIGHT  # noqa: E402  (milk-box height, 0.2542 m)
+from lib.reachability_view import OCC_HEIGHT  # noqa: E402  (milk-box height, 0.2542 m)
 # Landmark drawing / view angles / video+close handling are shared so the figures
 # stay visually comparable and the conventions live in one place.
 from lib.plotting import VIEWS, _box_wireframe, _write_video  # noqa: E402
