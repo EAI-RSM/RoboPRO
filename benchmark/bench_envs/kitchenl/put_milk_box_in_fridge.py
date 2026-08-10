@@ -141,14 +141,6 @@ class put_milk_box_in_fridge(Kitchen_base_large):
         if self.fridge_left is not None:
             self.add_prohibit_area(self.fridge_left, padding=0.1, area="table")
             
-    def _fridge_inside_target_pose(self) -> list[float]:
-        base_pose = self.fridge_left.get_link_pose("base_link")
-        base_tf = base_pose.to_transformation_matrix()
-        base_R = np.array(base_tf[:3, :3], dtype=float)
-        base_p = np.array(base_tf[:3, 3], dtype=float)
-        world_inside = base_p + base_R @ self.FRIDGE_PLACE_LOCAL
-        milk_q = self.milk_box.get_pose().q.tolist()
-        return world_inside.tolist() + milk_q
 
     def _is_milk_box_inside_fridge(self) -> bool:
         if self.milk_box is None or self.fridge_left is None:

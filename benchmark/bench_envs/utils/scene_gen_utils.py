@@ -456,41 +456,6 @@ def get_position_limits(surface_obj, boundary_thr = 0.15,
 
     return xlim, ylim, side_to_place
 
-def get_random_valid_placement(table_bounds, object_bounds, new_w, new_h):
-    tx1, tx2 = table_bounds[0]
-    ty1,ty2 = table_bounds[1]
-    
-    # 1. Generate candidate X and Y coordinates from all edges
-    # We also add a small buffer (0.01) if you want objects not to touch exactly
-    x_coords = sorted(list(set([tx1, tx2 - new_w] + [o for o in object_bounds if o <= tx2 - new_w] + [o for o in object_bounds if o <= tx2 - new_w])))
-    y_coords = sorted(list(set([ty1, ty2 - new_h] + [o for o in object_bounds if o <= ty2 - new_h] + [o for o in object_bounds if o <= ty2 - new_h])))
-
-    valid_spots = []
-
-    # 2. Collect ALL valid (x, y) coordinates
-    for x in x_coords:
-        for y in y_coords:
-            nx1, ny1, nx2, ny2 = x, y, x + new_w, y + new_h
-            
-            # Boundary check
-            if nx2 > tx2 or ny2 > ty2 or nx1 < tx1 or ny1 < ty1:
-                continue
-                
-            # Collision check against all existing objects
-            collision = False
-            for ox1, oy1, ox2, oy2 in object_bounds:
-                if not (nx2 <= ox1 or nx1 >= ox2 or ny2 <= oy1 or ny1 >= oy2):
-                    collision = True
-                    break
-            
-            if not collision:
-                valid_spots.append((nx1, ny1, nx2, ny2))
-
-    # 3. Pick one at random
-    if not valid_spots:
-        return None
-    
-    return np.random.choice(valid_spots)
 
 def get_collison_with_objs(object_bounds, obj_pose, x_thr, y_thr = None):
 
@@ -632,25 +597,3 @@ def point_to_box_distance(point, b_min, b_max):
     dz = max(0, b_min[2] - point[2], point[2] - b_max[2])
     
     return np.sqrt(dx**2 + dy**2 + dz**2)
-def get_obj_new_pose(obj, ele=0):
-    obj_pose = obj.get_pose()
-    bbox = get_actor_boundingbox(obj.actor)
-    change = False
-    z = obj_pose.p[2]
-    if bbox[0][-1] < obj_pose.p[-1]:
-        z += obj_pose.p[2]- bbox[0][2]
-        change = True
-    if ele > 0:
-        z += ele
-        change = True
-    if not change:
-        return
-    new_p = [obj_pose.p[0], obj_pose.p[1], 
-                z]
-    
-    obj.actor.set_pose(
-        sapien.Pose(
-            p = new_p, 
-            q = obj_pose.q)
-    )
-    print_c(f"Pose adjusted to {new_p}", "YELLOW")
