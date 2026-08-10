@@ -84,13 +84,6 @@ class put_milktea_on_shelf(Office_base_task):
         # action[1][0].target_pose[2] += 0.03
         self.move(action)
 
-        # # Record information about the objects and arm used in the task
-        # self.info["info"] = {
-        #     "{A}": f"047_mouse/base{self.mouse_id}",
-        #     "{B}": f"{self.color_name}",
-        #     "{a}": str(arm_tag),
-        # }
-        # return self.info
 
     def check_success(self):
         end_pose_actual = self.target_obj.get_pose().p[2]

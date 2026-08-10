@@ -115,13 +115,6 @@ class store_rubikscube_on_shelf(Office_base_task):
         
         self.move(self.open_gripper(arm_tag=arm_tag))
 
-        # Record information about the objects and arm used in the task
-        # self.info["info"] = {
-        #     "{A}": f"047_mouse/base{self.mouse_id}",
-        #     "{B}": f"{self.color_name}",
-        #     "{a}": str(arm_tag),
-        # }
-        # return self.info
 
     def check_success(self):
         end_pose_actual1 = self.target_obj.get_pose().p[2]
