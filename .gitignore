@@ -67,17 +67,16 @@ outputs/
 # they're fetched separately at install time. See docs/install.html Step 3.
 benchmark/assets
 benchmark/assets/
-benchmark_data/*
-!benchmark_data/.gitkeep
 benchmark/collision_test/
 benchmark/bench_script/collision_test/
-presentation_material/
 
 # Validation outputs (generated, not tracked)
 scripts/validation/results/
+customized_robotwin/visibility_validation/
 docs/objaverse_preview/
-docs/references/
-usecase_roadmap.tex
+
+# Generated codebase knowledge graphs
+graphify-out/
 
 # Reference materials (paper LaTeX + external links, not tracked)
 references/
