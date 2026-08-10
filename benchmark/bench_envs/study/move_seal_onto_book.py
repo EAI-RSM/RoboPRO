@@ -23,7 +23,7 @@ class move_seal_onto_book(Study_base_task):
         return {self.target_obj_1.get_name(), self.seal_obj.get_name()}
 
     def setup_demo(self, is_test=False, **kwargs):
-        kwargs["include_collison"] = False
+        kwargs["include_collision"] = False
         super().setup_demo(**kwargs)
 
     def load_actors(self):

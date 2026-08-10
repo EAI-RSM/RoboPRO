@@ -121,7 +121,9 @@ class Study_base_task(Bench_base_task):
         self.left_cnt = 0
         self.right_cnt = 0
         self.scene_id =kwags.get("scene_id") if kwags.get("scene_id") is not None else np.random.randint(0,3)  # for furniture arrangement
-        self.incl_collision = kwags.get("include_collison", True)
+        self.incl_collision = kwags.get(
+            "include_collision", kwags.get("include_collison", True)
+        )
         self.instruction = None  # for Eval
 
         self.collision_list = [] # list of collision objects for curobo planner

@@ -13,7 +13,7 @@ from transforms3d.euler import euler2quat
 class move_book_onto_table(Study_base_task):
 
     def setup_demo(self, is_test=False, **kwargs):
-        kwargs["include_collison"] = False
+        kwargs["include_collision"] = False
         super().setup_demo(**kwargs)
 
     def load_actors(self):

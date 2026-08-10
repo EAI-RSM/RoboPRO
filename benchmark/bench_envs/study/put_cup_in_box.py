@@ -11,7 +11,7 @@ from bench_envs.utils.scene_gen_utils import print_c, place_actor
 class put_cup_in_box(Study_base_task):
 
     def setup_demo(self, is_test=False, **kwargs):
-        kwargs["include_collison"] = True
+        kwargs["include_collision"] = True
         super().setup_demo(**kwargs)
 
     def load_actors(self):
