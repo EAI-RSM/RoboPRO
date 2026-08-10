@@ -12,7 +12,7 @@ robotwin_root = Path(os.environ["ROBOTWIN_ROOT"])
 
 
 def build_cfg(task_name, base_config, seed, dr_overrides, rollout=False, ep_num=0,
-              save_path=None, mode=None):
+              save_path=None, mode=None, eval_video_camera=None):
     """Build a setup_demo cfg.
 
     mode=None preserves the legacy ``rollout`` switch exactly:
@@ -23,6 +23,8 @@ def build_cfg(task_name, base_config, seed, dr_overrides, rollout=False, ep_num=
     (writes <save_path>/video/episode{ep_num}.mp4). Full render (not measurement_only).
     mode="policy": a no-expert VLA build -- eval loop/video enabled, no curobo calls
     and no dataset capture. ``save_path`` is the episode video directory.
+    ``eval_video_camera`` optionally pins the recorded camera without changing
+    legacy evaluation defaults.
     """
     if mode is None:
         mode = "expert" if rollout else "measure"
@@ -64,6 +66,8 @@ def build_cfg(task_name, base_config, seed, dr_overrides, rollout=False, ep_num=
         cfg["measurement_only"] = False
         if save_path is not None:
             cfg["eval_video_save_dir"] = str(save_path)
+        if eval_video_camera is not None:
+            cfg["eval_video_camera"] = str(eval_video_camera)
 
     cfg.setdefault("domain_randomization", {})
     cfg["domain_randomization"].update(dr_overrides)

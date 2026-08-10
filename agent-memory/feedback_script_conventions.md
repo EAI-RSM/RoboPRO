@@ -30,3 +30,8 @@ read a cramped multi-panel chart rendered inline. That dir is gitignored, so out
 and reproducible from the generating script.
 *How:* few panels, large figsize, big fonts, on-figure annotations so the takeaway needs no zoom.
 `/tmp` is only for throwaway smoke tests, never real results.
+
+**4. Save initialized-scene views for no-rollout scene generators.** If a script builds a live
+scene but deliberately executes no expert or policy, save static camera PNGs in the timestamped
+run so the user can verify what was measured. Do not create a one-frame/repeated-frame MP4 and
+call it a rollout video; label the artifact as an initialized-scene image.

@@ -66,6 +66,40 @@ def _prune_empty_topdirs(out_dir):
             pass
 
 
+def atomic_write_text(path, text):
+    """Durably replace one small text artifact without exposing a partial file."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    with temporary.open("w", encoding="utf-8") as stream:
+        stream.write(text)
+        stream.flush()
+        os.fsync(stream.fileno())
+    os.replace(temporary, path)
+    try:
+        directory_fd = os.open(path.parent, os.O_RDONLY)
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+    except OSError:
+        pass
+
+
+def atomic_write_json(path, value):
+    atomic_write_text(path, json.dumps(value, indent=2, allow_nan=False) + "\n")
+
+
+def append_jsonl_fsync(path, value):
+    """Append one complete JSON record and force it through the OS page cache."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as stream:
+        stream.write(json.dumps(value, allow_nan=False) + "\n")
+        stream.flush()
+        os.fsync(stream.fileno())
+
+
 class Timings:
     """Reusable per-component timer (project convention: time every script by phase and save the
     breakdown with the run). Use `with tm.section("name"):` around each logical phase; call
@@ -85,14 +119,14 @@ class Timings:
             self.records.append((name, dt))
             print(f"[time] {name}: {dt:.2f}s")
 
-    def save(self, out_dir, off_seconds=0.0):
+    def save(self, out_dir, off_seconds=0.0, filename="timings.json"):
         total = time.perf_counter() - self._wall0
         projected = total - off_seconds                       # cost if the OFF pass were skipped (--free-only)
         data = {"components": [{"name": n, "seconds": round(s, 3)} for n, s in self.records],
                 "total_seconds": round(total, 3),
                 "off_pass_seconds": round(off_seconds, 3),
                 "projected_free_only_seconds": round(projected, 3)}
-        (Path(out_dir) / "timings.json").write_text(json.dumps(data, indent=2))
+        atomic_write_json(Path(out_dir) / filename, data)
         width = max((len(n) for n, _ in self.records), default=10)
         print("[time] ---------------- component timing ----------------")
         for n, s in self.records:
@@ -103,5 +137,5 @@ class Timings:
                   f"(OFF pass {off_seconds:.2f}s = {100 * off_seconds / total if total else 0:.1f}% would be skipped)")
         else:
             print("[time] projected WITH --free-only: equals TOTAL above (--free-only already active)")
-        print("[time] wrote timings.json")
+        print(f"[time] wrote {filename}")
         return total

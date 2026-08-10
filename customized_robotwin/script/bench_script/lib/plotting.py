@@ -69,6 +69,19 @@ def _draw_occluder_solids_3d(ax, foots, shape):
         ax.add_collection3d(Poly3DCollection(faces, facecolor="red", alpha=0.12, edgecolor="red", lw=0.5))
 
 
+def _draw_ground_plane(ax, xlim, ylim, z):
+    """The support surface (table top) as a translucent quad at height z, so the obstacles read as
+    standing ON something instead of hovering. Drawn BEFORE the occluder solids: matplotlib
+    depth-sorts each Poly3DCollection independently, and adding the lowest surface first is what
+    keeps the painter's order right for a plane that sits under everything else."""
+    from mpl_toolkits.mplot3d.art3d import Poly3DCollection
+    quad = [[(xlim[0], ylim[0], z), (xlim[1], ylim[0], z),
+             (xlim[1], ylim[1], z), (xlim[0], ylim[1], z)]]
+    ax.add_collection3d(Poly3DCollection(quad, facecolor="#c8b89a", alpha=0.35,
+                                         edgecolor="#8a7a5a", lw=1.0, zsort="min"))
+    ax.plot([], [], [], "-", color="#8a7a5a", lw=1.2, label=f"table top (z = {z:.2f} m)")
+
+
 def _draw_eps_sphere(ax, centre, radius, n=48):
     """Wireframe sphere of radius eps* centred on the bottleneck voxel -- the 3D twin of the 2D eps*
     circle. Its surface is the set of points exactly eps* from the bottleneck, so with the axes at
@@ -99,6 +112,27 @@ def _equal_aspect_3d(ax, pts, pad=0.02):
     ax.set_ylim(mid[1] - span / 2, mid[1] + span / 2)
     ax.set_zlim(mid[2] - span / 2, mid[2] + span / 2)
     ax.set_box_aspect((1, 1, 1))
+
+
+def _true_aspect_3d(ax, lo, hi):
+    """Frame the axes on an EXPLICIT world box, still at a true 1:1:1 data aspect.
+
+    _equal_aspect_3d gets 1:1:1 by padding every axis out to the LONGEST span. That is right for
+    roughly cubic data and wasteful otherwise: a 1.2 x 0.7 x 0.3 m tabletop gets a 1.2 m z axis, so
+    the scene collapses into the middle third of an empty cube with no tick near it. Setting the box
+    aspect to the box's OWN spans keeps one metre the same rendered length on all three axes -- the
+    eps* sphere still renders as a sphere, so 'just kisses the nearest obstacle' stays checkable --
+    without the padding. Caller supplies the box, so the frame is the same in every figure."""
+    lo = np.asarray(lo, dtype=float)
+    hi = np.asarray(hi, dtype=float)
+    span = hi - lo
+    if not (np.all(np.isfinite(span)) and np.all(span > 0)):
+        return False
+    ax.set_xlim(lo[0], hi[0])
+    ax.set_ylim(lo[1], hi[1])
+    ax.set_zlim(lo[2], hi[2])
+    ax.set_box_aspect(tuple(span))
+    return True
 
 
 def _line_axis(g_xy, p_xy):

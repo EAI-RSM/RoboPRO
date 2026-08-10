@@ -22,8 +22,11 @@ import seed_from_clearance as sfc
 
 class GraspMixin:
     def _rank_side_grasp_ids(self, actor, arm_tag, limit=GRASP_CANDIDATE_LIMIT):
-        """Rank a few side grasps so we can search across candidates instead of
-            committing to exactly one local optimum."""
+        """Rank the grasps so we can search across candidates instead of committing to
+            exactly one local optimum. Ranking only -- nothing is discarded, so this sets
+            the order candidates are tried in, not which ones exist. `horiz` used to hard-
+            drop non-horizontal approaches; that was an assumption about this object and
+            has to be off for a scene-agnostic baseline, so it now only breaks ties."""
         side = 1.0 if str(arm_tag) == "right" else -1.0
         cx = float(actor.get_pose().p[0])
         conv = np.array([[0, 0, 1, 0], [-1, 0, 0, 0], [0, -1, 0, 0], [0, 0, 0, 1]])
@@ -35,8 +38,6 @@ class GraspMixin:
             R = g[:3, :3]
             approach = R @ np.array([1.0, 0.0, 0.0])      # gripper +x approach (world)
             horiz = abs(float(approach[2]))               # 0 = perfectly horizontal
-            if horiz > 0.35:                              # skip clearly tilted/vertical
-                continue
             grasp_x = float(g[0, 3]) + float((R @ np.array([-0.12, 0.0, 0.0]))[0])
             arm_side = side * (grasp_x - cx)              # >0 = gripper on arm's side
             score = arm_side - horiz                      # arm-side + as horizontal as possible
@@ -46,6 +47,20 @@ class GraspMixin:
         if os.environ.get("ROBOTWIN_LOG_MOVE", "") == "1":
             print(f"[grasp_id] arm={arm_tag} candidates={ids}")
         return ids
+
+
+    def _pick_side_grasp_id(self, actor, arm_tag):
+        """Top-ranked grasp only -- the single orientation the clearance grid is labelled at.
+
+            DO NOT DELETE AS DEAD CODE. Nothing in task/ calls this; both callers reach it
+            duck-typed through the env object, so a by-name scan of this package finds zero
+            references and is WRONG: lib/ik_grid.py grasp_orientation() and
+            reachability_map.py both do env._pick_side_grasp_id(...). Removing it on that
+            basis (a301e2e, 2026-07-29) killed the approach seed silently for every run after
+            -- _get_approach_seed catches the AttributeError and falls back to stock, so the
+            only symptom was a firing rate of 0. Restored 2026-07-30, verbatim from ea31499."""
+        ranked = self._rank_side_grasp_ids(actor, arm_tag, limit=1)
+        return ranked[0] if ranked else None
 
 
     def _geometric_grasp_pose(self, actor, cp_id, pre_dis=0.0):

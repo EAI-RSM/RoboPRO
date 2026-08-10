@@ -94,6 +94,9 @@ class put_cup_on_coaster(Study_base_task):
 
     def check_success(self):
         eps = 0.02
-        return (np.all((self.des_obj.get_pose().p[:2] - self.target_obj.get_pose().p[:2]) < [eps, eps])  
+        xy_error = np.abs(
+            self.des_obj.get_pose().p[:2] - self.target_obj.get_pose().p[:2]
+        )
+        return (np.all(xy_error < eps)
                 and self.robot.is_left_gripper_open()
                 and self.robot.is_right_gripper_open())

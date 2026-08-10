@@ -1,6 +1,7 @@
 """Two- and three-dimensional widest-path searches."""
 
 from collections import deque
+import heapq
 
 import numpy as np
 
@@ -203,6 +204,68 @@ def reconstruct_widest_path_3d(free_vol, edt, qvol, seed_a, seed_b, eps_star, ta
                     and (q_flat is None or _wrap_linf(q_flat[flat(cz, cy, cx)], q_flat[flat(z2, y2, x2)]) <= tau)):
                 prev[(z2, y2, x2)] = cur
                 dq.append((z2, y2, x2))
+    if sb not in prev:
+        return None
+    path, node = [], sb
+    while node is not None:
+        path.append(node)
+        node = prev[node]
+    return path[::-1]
+
+
+def reconstruct_clearance_preferred_path_3d(
+    free_vol, edt, seed_a, seed_b, eps_star, res, zres
+):
+    """Choose a high-clearance representative from the eps*-optimal component.
+
+    ``widest_path_eps_3d`` has already fixed the bottleneck.  This Dijkstra pass never leaves
+    ``FREE & (edt >= eps_star)``; it only breaks the many-way tie between bottleneck-optimal
+    routes.  Edge cost is anisotropic physical length divided by the smaller endpoint clearance.
+    Unbounded clearance is capped at the largest finite allowed value; an all-unbounded component
+    falls back to physical shortest path.
+
+    This is intentionally ungated and is used only by the geometric/reporting path.
+    """
+    if eps_star is None:
+        return None
+    allowed = free_vol & (edt >= eps_star - 1e-9)
+    sa, sb = tuple(seed_a), tuple(seed_b)
+    if not (allowed[sa] and allowed[sb]):
+        return None
+
+    finite = edt[allowed & np.isfinite(edt)]
+    all_unbounded = finite.size == 0
+    finite_cap = float(finite.max()) if finite.size else 1.0
+
+    dist = {sa: 0.0}
+    prev = {sa: None}
+    heap = [(0.0, sa)]
+    nz, ny, nx = allowed.shape
+    while heap:
+        cost, cur = heapq.heappop(heap)
+        if cost > dist.get(cur, np.inf):
+            continue
+        if cur == sb:
+            break
+        cz, cy, cx = cur
+        for dz, dy, dx in _NEIGH26:
+            nxt = (cz + dz, cy + dy, cx + dx)
+            z2, y2, x2 = nxt
+            if not (0 <= z2 < nz and 0 <= y2 < ny and 0 <= x2 < nx and allowed[nxt]):
+                continue
+            length = float(np.sqrt((dx * res) ** 2 + (dy * res) ** 2 + (dz * zres) ** 2))
+            if all_unbounded:
+                edge_cost = length
+            else:
+                c0 = finite_cap if np.isinf(edt[cur]) else float(edt[cur])
+                c1 = finite_cap if np.isinf(edt[nxt]) else float(edt[nxt])
+                edge_cost = length / max(min(c0, c1), 1e-12)
+            new_cost = cost + edge_cost
+            if new_cost + 1e-15 < dist.get(nxt, np.inf):
+                dist[nxt] = new_cost
+                prev[nxt] = cur
+                heapq.heappush(heap, (new_cost, nxt))
+
     if sb not in prev:
         return None
     path, node = [], sb

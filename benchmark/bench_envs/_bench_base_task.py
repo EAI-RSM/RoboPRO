@@ -14,6 +14,7 @@ import torch, random
 
 from envs.utils import *
 from bench_envs.utils import *
+from bench_envs.eval_video import select_eval_video_camera
 import math
 from envs.robot import Robot
 from envs.camera import Camera
@@ -1270,17 +1271,24 @@ class Bench_base_task(Base_Task):
         res_pose = (target_point - grasp_bias - pre_dis * target_dis_vec).tolist() + target_grasp_qpose.tolist()
         return res_pose
 
+    def _write_eval_video_frame(self):
+        obs = self.now_obs.get("observation", {})
+        camera_name = select_eval_video_camera(
+            obs,
+            getattr(self, "eval_video_camera", None),
+        )
+        if camera_name is not None:
+            self.eval_video_ffmpeg.stdin.write(
+                obs[camera_name]["rgb"].tobytes()
+            )
+
     def take_action(self, action, action_type:Literal['qpos', 'ee']='qpos'):  # action_type: qpos or ee
         if self.take_action_cnt == self.step_lim or self.eval_success:
             return
 
         eval_video_freq = 1  # fixed
         if (self.eval_video_path is not None and self.take_action_cnt % eval_video_freq == 0):
-            obs = self.now_obs.get("observation", {})
-            for _cam in ("demo_camera", "countertop_camera", "head_camera"):
-                if _cam in obs:
-                    self.eval_video_ffmpeg.stdin.write(obs[_cam]["rgb"].tobytes())
-                    break
+            self._write_eval_video_frame()
 
         self.take_action_cnt += 1
         print(f"step: \033[92m{self.take_action_cnt} / {self.step_lim}\033[0m", end="\r")
@@ -1337,37 +1345,48 @@ class Bench_base_task(Base_Task):
             # TODO
             topp_left_flag, topp_right_flag = True, True
 
-            try:
-                times, left_pos, left_vel, acc, duration = (self.robot.left_mplib_planner.TOPP(left_path,
-                                                                                            1 / 250,
-                                                                                            verbose=True))
-                left_result = dict()
-                left_result["position"], left_result["velocity"] = left_pos, left_vel
-                left_n_step = left_result["position"].shape[0]
-            except Exception as e:
-                # print("left arm TOPP error: ", e)
-                topp_left_flag = False
-                left_n_step = 50  # fixed
-
-            if left_n_step == 0:
-                topp_left_flag = False
-                left_n_step = 50  # fixed
-
-            try:
-                times, right_pos, right_vel, acc, duration = (self.robot.right_mplib_planner.TOPP(right_path,
+            if not self.robot.build_planner:
+                left_n_step = right_n_step = 50
+                left_result = {
+                    "position": np.linspace(left_current_qpos, left_arm_actions[0], left_n_step),
+                    "velocity": np.zeros((left_n_step, left_arm_dim)),
+                }
+                right_result = {
+                    "position": np.linspace(right_current_qpos, right_arm_actions[0], right_n_step),
+                    "velocity": np.zeros((right_n_step, right_arm_dim)),
+                }
+            else:
+                try:
+                    times, left_pos, left_vel, acc, duration = (self.robot.left_mplib_planner.TOPP(left_path,
                                                                                                 1 / 250,
                                                                                                 verbose=True))
-                right_result = dict()
-                right_result["position"], right_result["velocity"] = right_pos, right_vel
-                right_n_step = right_result["position"].shape[0]
-            except Exception as e:
-                # print("right arm TOPP error: ", e)
-                topp_right_flag = False
-                right_n_step = 50  # fixed
+                    left_result = dict()
+                    left_result["position"], left_result["velocity"] = left_pos, left_vel
+                    left_n_step = left_result["position"].shape[0]
+                except Exception as e:
+                    # print("left arm TOPP error: ", e)
+                    topp_left_flag = False
+                    left_n_step = 50  # fixed
 
-            if right_n_step == 0:
-                topp_right_flag = False
-                right_n_step = 50  # fixed
+                if left_n_step == 0:
+                    topp_left_flag = False
+                    left_n_step = 50  # fixed
+
+                try:
+                    times, right_pos, right_vel, acc, duration = (self.robot.right_mplib_planner.TOPP(right_path,
+                                                                                                    1 / 250,
+                                                                                                    verbose=True))
+                    right_result = dict()
+                    right_result["position"], right_result["velocity"] = right_pos, right_vel
+                    right_n_step = right_result["position"].shape[0]
+                except Exception as e:
+                    # print("right arm TOPP error: ", e)
+                    topp_right_flag = False
+                    right_n_step = 50  # fixed
+
+                if right_n_step == 0:
+                    topp_right_flag = False
+                    right_n_step = 50  # fixed
         
         elif action_type == 'ee':
 
@@ -1461,7 +1480,7 @@ class Bench_base_task(Base_Task):
                 self.eval_success = True
                 self.get_obs() # update obs
                 if (self.eval_video_path is not None):
-                    self.eval_video_ffmpeg.stdin.write(self.now_obs["observation"]["head_camera"]["rgb"].tobytes())
+                    self._write_eval_video_frame()
                 return
 
         self._update_render()

@@ -48,6 +48,16 @@ position offset is actually zero — see [[domain_curobo]]). **RIGHT ARM: PASS, 
 0 reachable cells pruned.** Re-validate after any embodiment or grid change. If prune is ever too
 low, raise `--occ-samples` (1.5M → 6–10M) to tighten the rind rather than shrinking dilation.
 
+**Current-grid two-arm validation (2026-07-30).** Fresh occupancy artifacts on the
+`SeedMetricConfig` `(16,71,121)` grid, using 1.5M feasible samples per arm, passed the strict
+false-prune gate: right 0 reachable among 43,578 pruned cells (31.70% of grid), left 0 among 37,226
+(27.08%). The envelope is therefore a valid outer bound on both arms. It is loose at a fixed grasp
+orientation: right false-keeps = 39,051 / 93,878 kept (41.60%; 28.41% of the whole grid), left =
+38,299 / 100,230 (38.21%; 27.86%). The looseness is present across the height stack and rises at
+the top slices. This does not answer whether envelope-only geometric eps* preserves scene rank;
+the saved per-voxel `false_keep_mask.npz` artifacts exist specifically for the Stage 3 route
+cross-reference in `GEOMETRIC_EPS_VALIDATION_PLAN.md`.
+
 **Workflow gotchas:**
 - After changing ANY `--occ-*` / `--reach-*` / grid arg you MUST re-run the PRODUCER; the validator
   and consumer only READ the .npz. The user hit this — a stale mask re-reported an identical 1846

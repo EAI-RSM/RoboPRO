@@ -14,9 +14,9 @@ the reasoning behind decisions that look arbitrary from the diff.
 - Record what was surprising, not what the code already says. Delete what turns out to be wrong.
 
 **Working with the user**
-- [Role boundary](feedback_role_boundary.md) — CRITICAL: user is the scientist, the agent is the engineer
-- [Scientific rigor](feedback_scientific_rigor.md) — faithful controls, confounds, scene-specific mechanisms OFF
-- [Minimal changes](feedback_minimal_changes.md) — smallest diff; no frameworks
+- [Role boundary](feedback_role_boundary.md) — CRITICAL: user is the scientist, agent is the engineer — but engineering must SERVE the science; classify validity/power/scope/quality; ask when unsure
+- [Scientific rigor](feedback_scientific_rigor.md) — faithful controls, scene-specific mechanisms OFF (test: can you construct a scene that breaks it?), **verify the treatment actually fired**, don't harden a claim ahead of its measurement
+- [Minimal changes](feedback_minimal_changes.md) — smallest diff; no frameworks; over-engineering is the WORST failure mode; "turn X off" never licenses building a replacement
 - [Script conventions](feedback_script_conventions.md) — timestamped folder + timings.json + legible results
 - [Math background](user_math_background.md) — strong stats/algebra, weak 3D geometry
 
@@ -26,6 +26,7 @@ the reasoning behind decisions that look arbitrary from the diff.
 - [Task assets](repo_task_assets.md) — task_objects.yml traps, OOD IDs, expert-first eval gate
 
 **How the system works**
+- [Expert baseline](domain_expert_baseline.md) — **READ BEFORE ANY CLAIM ABOUT "THE BASELINE"**: `direct` is a heavily-engineered expert minus two things; Hamid's July 0%→48% trajectory; what is stripped; the `off` cell that has never been run
 - [bench_script layout](domain_bench_script_layout.md) — post-refactor lib/ + task/ packages, dependency rule
 - [curobo](domain_curobo.md) — why subgoals, batched-IK recipe, knobs, what each failure means
 - [Scene](domain_scene.md) — target/occluder geometry, ring layout, collision-registration traps
@@ -33,11 +34,14 @@ the reasoning behind decisions that look arbitrary from the diff.
 
 **Tools**
 - [Clearance metric](tool_clearance_metric.md) — eps*, the 2.5D pipeline, known inaccuracies
+- [Geometric metric](tool_geometric_metric.md) — CPU-only envelope relaxation, target mask, Stage 3 gate, **study furniture IS in the obstacle set**, eps* is endpoint clearance
+- [Route visualizer](tool_route_visualizer.md) — the "shifted figures" false alarm (refuted twice, don't redo), the 0.12 m tool-offset gap, config-hash forces a fresh `--out-dir` on every edit
+- [Task-metric validity](tool_task_metric_validity.md) — **MEASURED 2026-08-07**: eps is endpoint-pinned 800/800, the 12 cm wrist offset makes it uncorrelated (rho=0.078) with real grasp tightness, 72/100 buckets flip on a legal grasp choice; plus the CPU offline-rebuild trick
 - [Seed from clearance](tool_seed_from_clearance.md) — APPROACH_MODE/PLACEMENT_MODE, seed format, A/B design
 - [Reach envelope](tool_reach_envelope.md) — producer/consumer/validator, calibration numbers
-- [VLA / pi05 port](tool_vla_pi05_port.md) — wired but blocked on the expert gate
+- [VLA / pi05 port](tool_vla_pi05_port.md) — runs end to end no-expert; ONE GPU is enough, MEM_FRACTION is a ceiling, planner-free mode moves no arms silently
 
 **State**
-- [Current status](status_current.md) — branch, uncommitted, unverified, next steps
+- [Current status](status_current.md) — branch, uncommitted, unverified, next steps + the 2026-07-30 finding that pre_grasp has NO headroom and carry_transit has all of it
 - [Archive: planner comparison](archive_planner_comparison.md) — dead multi-planner line + its lessons
 - [Artifacts](reference_artifacts.md) — published Artifact URLs and their caveats

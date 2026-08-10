@@ -4,12 +4,14 @@
 This is Stage 3 of GEOMETRIC_EPS_VALIDATION_PLAN.md.  Each seed builds one occluder scene, then
 measures the same grasp-to-pad leg with:
 
-* the existing gated metric (scene IK volume plus the joint-continuity gate), and
-* the CPU-only geometric relaxation (reach envelope, no scene IK or joint gate).
+* the gated graph (scene IK volume plus the joint-continuity gate), and
+* the CPU-only geometric graph (reach envelope, no scene IK or joint gate).
 
-The run writes per-scene values, inflation, route overlays, Stage-1 false-keep overlap, a Spearman
-summary, and timings.  The script can evaluate the rank threshold automatically; a person must
-still inspect the route overlays for far-field detours before the Stage-3 gate can pass.
+Both no-target and target-masked graph pairs use exact common snapped voxels and identical EDTs.
+The runner fails immediately unless geometric FREE is a superset and eps_geom >= eps_gated.  It
+writes both rank series, native independently-snapped diagnostics, a clearance-preferred geometric
+route, Stage-1 false-keep overlap, route diagnostics, overlays, and timings.  A person must still
+inspect the route overlays before the Stage-3 gate can pass.
 """
 
 import argparse
@@ -18,6 +20,7 @@ import json
 import time
 from datetime import datetime
 from pathlib import Path
+from types import SimpleNamespace
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -28,15 +31,22 @@ from setup_paths import setup_paths
 
 setup_paths()
 
-from lib.geometric_metric import geometric_eps
+from lib.geometric_metric import _build_geometric_volume, _label_for
 from lib.ik_grid import _build_ik_solver, build_grid, grasp_orientation
 from lib.labeling import BEYOND, FREE, LABEL_NAMES, OBSTACLE, load_reach_envelope
 from lib.metric_config import SeedMetricConfig
 from lib.obstacles import occluder_footprints_3d, occluder_slice_polys
+from lib.occluder_ring import draw_ring_config, parse_count_choices, parse_offset_specs
 from lib.plotting import _line_axis, _scene_anchor_markers
 from lib.run_io import CLEARANCE_RESULTS_DIR, Timings
 from lib.scene_build import DR_CLEAN, build_cfg
 from lib.scene_constants import PAD_XY
+from lib.widest_path import (
+    nearest_free_voxel,
+    reconstruct_clearance_preferred_path_3d,
+    reconstruct_widest_path_3d,
+    widest_path_eps_3d,
+)
 from metric_viz import LABEL_COLORS
 from seed_from_clearance import compute_route_configs
 from task.occluder_task import make_occluder_task
@@ -45,6 +55,18 @@ from task.occluder_task import make_occluder_task
 RESULTS_DIR = CLEARANCE_RESULTS_DIR.parent / "geometric_vs_gated"
 FALSE_KEEP_RESULTS_DIR = CLEARANCE_RESULTS_DIR.parent / "reach_envelope_validation"
 STAGE1_REACH_CACHE_DIR = CLEARANCE_RESULTS_DIR / "_reach_cache_geometric_stage1"
+
+
+class AlignmentError(ValueError):
+    """The two graphs do not satisfy the relaxation theorem's preconditions."""
+
+
+class RelaxationInvariantError(AssertionError):
+    """An aligned geometric graph produced eps_geom < eps_gated."""
+
+
+class SceneNotAlignableError(RuntimeError):
+    """This scene has no endpoint pair on which the aligned comparison can run."""
 
 
 def _json_eps(value, merged):
@@ -78,11 +100,9 @@ def _json_safe(value):
     return value
 
 
-def summarize_records(records):
-    """Return the Stage-3 numeric gate summary for completed scene records."""
-    rows = [r for r in records if r.get("status") == "ok"]
-    x = np.asarray([_rank_value(r, "gated") for r in rows], dtype=float)
-    y = np.asarray([_rank_value(r, "geom") for r in rows], dtype=float)
+def _summarize_series(rows, gated_prefix, geom_prefix):
+    x = np.asarray([_rank_value(r, gated_prefix) for r in rows], dtype=float)
+    y = np.asarray([_rank_value(r, geom_prefix) for r in rows], dtype=float)
 
     rho_all = p_all = None
     if len(rows) >= 2 and np.unique(x).size > 1 and np.unique(y).size > 1:
@@ -92,36 +112,30 @@ def summarize_records(records):
 
     finite_rows = [
         r for r in rows
-        if r["merged_gated"] and r["merged_geom"]
-        and np.isfinite(r["eps_gated"]) and np.isfinite(r["eps_geom"])
+        if r[f"merged_{gated_prefix}"] and r[f"merged_{geom_prefix}"]
+        and np.isfinite(r[f"eps_{gated_prefix}"]) and np.isfinite(r[f"eps_{geom_prefix}"])
     ]
     rho_finite = p_finite = None
     if len(finite_rows) >= 2:
-        xf = np.asarray([r["eps_gated"] for r in finite_rows], dtype=float)
-        yf = np.asarray([r["eps_geom"] for r in finite_rows], dtype=float)
+        xf = np.asarray([r[f"eps_{gated_prefix}"] for r in finite_rows], dtype=float)
+        yf = np.asarray([r[f"eps_{geom_prefix}"] for r in finite_rows], dtype=float)
         if np.unique(xf).size > 1 and np.unique(yf).size > 1:
             result = spearmanr(xf, yf)
             if np.isfinite(result.statistic):
                 rho_finite, p_finite = float(result.statistic), float(result.pvalue)
 
     disagreements = [
-        int(r["seed"]) for r in rows if not r["merged_gated"] and r["merged_geom"]
+        int(r["seed"]) for r in rows
+        if not r[f"merged_{gated_prefix}"] and r[f"merged_{geom_prefix}"]
     ]
     reverse_disagreements = [
-        int(r["seed"]) for r in rows if r["merged_gated"] and not r["merged_geom"]
+        int(r["seed"]) for r in rows
+        if r[f"merged_{gated_prefix}"] and not r[f"merged_{geom_prefix}"]
     ]
-    relaxation_violations = [
-        int(r["seed"]) for r in rows if r.get("relaxation_violation")
-    ]
-    geom_route_voxels = sum(int(r["geom_route_voxels"]) for r in rows)
-    false_keep_voxels = sum(int(r["false_keep_route_voxels"]) for r in rows)
     sufficient = len(rows) >= 8
     rank_pass = bool(sufficient and rho_all is not None and rho_all >= 0.8)
 
     return {
-        "requested_scenes": len(records),
-        "completed_scenes": len(rows),
-        "failed_scenes": len(records) - len(rows),
         "sufficient_for_rank_gate": sufficient,
         "spearman_all": rho_all,
         "spearman_all_pvalue": p_all,
@@ -132,13 +146,50 @@ def summarize_records(records):
         "spearman_finite_jointly_accessible": rho_finite,
         "spearman_finite_pvalue": p_finite,
         "unbounded_gated_scenes": sum(
-            bool(r["merged_gated"] and np.isinf(r["eps_gated"])) for r in rows
+            bool(r[f"merged_{gated_prefix}"] and np.isinf(r[f"eps_{gated_prefix}"]))
+            for r in rows
         ),
         "unbounded_geom_scenes": sum(
-            bool(r["merged_geom"] and np.isinf(r["eps_geom"])) for r in rows
+            bool(r[f"merged_{geom_prefix}"] and np.isinf(r[f"eps_{geom_prefix}"]))
+            for r in rows
         ),
         "gated_inaccessible_geom_merged_seeds": disagreements,
         "gated_merged_geom_inaccessible_seeds": reverse_disagreements,
+        "rank_gate_pass": rank_pass,
+    }
+
+
+def summarize_records(records):
+    """Return both aligned Stage-3 rank gates; target-masked is the production series."""
+    rows = [r for r in records if r.get("status") == "ok"]
+    not_alignable = [r for r in records if r.get("status") == "not_alignable"]
+    errors = [r for r in records if r.get("status") == "error"]
+    production = _summarize_series(rows, "gated", "geom")
+    isolation = _summarize_series(
+        rows, "gated_notarget_common", "geom_notarget_common"
+    )
+    relaxation_violations = [
+        int(r["seed"]) for r in rows if r.get("relaxation_violation")
+    ]
+    geom_route_voxels = sum(int(r["geom_route_voxels"]) for r in rows)
+    false_keep_voxels = sum(int(r["false_keep_route_voxels"]) for r in rows)
+    rank_pass = bool(
+        production["rank_gate_pass"]
+        and isolation["rank_gate_pass"]
+        and not relaxation_violations
+    )
+    return {
+        "requested_scenes": len(records),
+        "completed_scenes": len(rows),
+        "failed_scenes": len(records) - len(rows),
+        "not_alignable_scenes": len(not_alignable),
+        "not_alignable_seeds": [int(r["seed"]) for r in not_alignable],
+        "error_scenes": len(errors),
+        "error_seeds": [int(r["seed"]) for r in errors],
+        "production_target_masked": production,
+        "isolation_no_target": isolation,
+        # Production aliases keep old report readers working.
+        **production,
         "relaxation_violation_seeds": relaxation_violations,
         "geometric_route_voxels": geom_route_voxels,
         "false_keep_route_voxels": false_keep_voxels,
@@ -156,40 +207,54 @@ def summarize_records(records):
 
 def _write_scatter(out_dir, records, summary):
     rows = [r for r in records if r.get("status") == "ok"]
-    fig, ax = plt.subplots(figsize=(8, 7))
-    finite_xy = [
-        (_rank_value(r, "gated"), _rank_value(r, "geom"), int(r["seed"]))
-        for r in rows
-        if np.isfinite(_rank_value(r, "gated")) and np.isfinite(_rank_value(r, "geom"))
-    ]
-    if finite_xy:
-        x, y, seeds = map(np.asarray, zip(*finite_xy))
-        ax.scatter(x, y, s=65, color="#1565c0")
-        for xv, yv, seed in zip(x, y, seeds):
-            ax.annotate(str(int(seed)), (xv, yv), xytext=(4, 4), textcoords="offset points",
-                        fontsize=9)
-        lo, hi = float(min(x.min(), y.min())), float(max(x.max(), y.max()))
-        pad = max(0.005, 0.05 * (hi - lo if hi > lo else 1.0))
-        ax.plot([lo - pad, hi + pad], [lo - pad, hi + pad], "k--", lw=1.3,
-                label="identity")
-        ax.set_xlim(lo - pad, hi + pad)
-        ax.set_ylim(lo - pad, hi + pad)
-    rho = summary["spearman_all"]
-    rho_text = "undefined" if rho is None else f"{rho:.3f}"
-    ax.text(
-        0.03, 0.97,
-        f"Spearman = {rho_text}\n"
-        f"completed n = {summary['completed_scenes']}\n"
-        f"unbounded gated/geom = {summary['unbounded_gated_scenes']}/"
-        f"{summary['unbounded_geom_scenes']}",
-        transform=ax.transAxes, va="top", fontsize=11,
-        bbox={"facecolor": "white", "alpha": 0.85, "edgecolor": "0.7"},
+    fig, axes = plt.subplots(1, 2, figsize=(15, 7))
+    series = (
+        ("gated", "geom", summary["production_target_masked"], "Target-masked production"),
+        (
+            "gated_notarget_common",
+            "geom_notarget_common",
+            summary["isolation_no_target"],
+            "No-target isolation",
+        ),
     )
-    ax.set_xlabel("gated eps* (m; inaccessible = 0)")
-    ax.set_ylabel("geometric eps* (m; inaccessible = 0)")
-    ax.set_title("Geometric relaxation versus gated metric")
-    if finite_xy:
-        ax.legend(loc="lower right")
+    for ax, (gated_prefix, geom_prefix, stats, title) in zip(axes, series):
+        finite_xy = [
+            (_rank_value(r, gated_prefix), _rank_value(r, geom_prefix), int(r["seed"]))
+            for r in rows
+            if np.isfinite(_rank_value(r, gated_prefix))
+            and np.isfinite(_rank_value(r, geom_prefix))
+        ]
+        if finite_xy:
+            x, y, seeds = map(np.asarray, zip(*finite_xy))
+            ax.scatter(x, y, s=65, color="#1565c0")
+            for xv, yv, seed in zip(x, y, seeds):
+                ax.annotate(
+                    str(int(seed)), (xv, yv), xytext=(4, 4),
+                    textcoords="offset points", fontsize=9,
+                )
+            lo, hi = float(min(x.min(), y.min())), float(max(x.max(), y.max()))
+            pad = max(0.005, 0.05 * (hi - lo if hi > lo else 1.0))
+            ax.plot(
+                [lo - pad, hi + pad], [lo - pad, hi + pad],
+                "k--", lw=1.3, label="identity",
+            )
+            ax.set_xlim(lo - pad, hi + pad)
+            ax.set_ylim(lo - pad, hi + pad)
+            ax.legend(loc="lower right")
+        rho = stats["spearman_all"]
+        rho_text = "undefined" if rho is None else f"{rho:.3f}"
+        ax.text(
+            0.03, 0.97,
+            f"Spearman = {rho_text}\n"
+            f"completed n = {summary['completed_scenes']}\n"
+            f"unbounded gated/geom = {stats['unbounded_gated_scenes']}/"
+            f"{stats['unbounded_geom_scenes']}",
+            transform=ax.transAxes, va="top", fontsize=11,
+            bbox={"facecolor": "white", "alpha": 0.85, "edgecolor": "0.7"},
+        )
+        ax.set_xlabel("gated eps* (m; inaccessible = 0)")
+        ax.set_ylabel("geometric eps* (m; inaccessible = 0)")
+        ax.set_title(title)
     fig.tight_layout()
     fig.savefig(Path(out_dir) / "eps_geom_vs_gated_scatter.png", dpi=140)
     plt.close(fig)
@@ -272,6 +337,278 @@ def false_keep_overlap(route_world, false_keep):
         hits += bool(false_keep["mask"][iz, iy, ix])
     total = len(route_world)
     return hits, total, hits / total
+
+
+def _voxel_world(XX, YY, zs, voxel):
+    iz, iy, ix = voxel
+    return (float(XX[iy, ix]), float(YY[iy, ix]), float(zs[iz]))
+
+
+def _snap_common_pair(label, XX, YY, zs, start_xyz, goal_xyz, max_dist):
+    free = label == FREE
+    start = nearest_free_voxel(free, XX, YY, zs, start_xyz, max_dist)
+    goal = nearest_free_voxel(free, XX, YY, zs, goal_xyz, max_dist)
+    if start is None or goal is None:
+        which = "start" if start is None else "goal"
+        raise SceneNotAlignableError(
+            f"{which} common endpoint is unsnappable within {max_dist}m"
+        )
+    return tuple(start[0]), tuple(goal[0])
+
+
+def _subset_diagnostics(gated_label, geom_label, volume):
+    violation = (gated_label == FREE) & (geom_label != FREE)
+    attributed = np.zeros_like(violation)
+    result = {"total": int(violation.sum())}
+    for name in ("prune_mask", "occ_mask", "target_mask"):
+        mask = getattr(volume, name, None)
+        hits = violation & mask if mask is not None else np.zeros_like(violation)
+        attributed |= hits
+        result[name] = int(hits.sum())
+    result["unattributed"] = int((violation & ~attributed).sum())
+    return result
+
+
+def aligned_widest_pair(
+    gated_label, geom_label, gated_edt, geom_edt, qvol, seed_a, seed_b, tau
+):
+    """Solve one matched-mask graph pair and enforce the relaxation theorem."""
+    if gated_label.shape != geom_label.shape or gated_edt.shape != geom_edt.shape:
+        raise AlignmentError("aligned comparison grid shapes differ")
+    if not np.array_equal(gated_edt, geom_edt):
+        finite = np.isfinite(gated_edt) & np.isfinite(geom_edt)
+        max_diff = (
+            float(np.max(np.abs(gated_edt[finite] - geom_edt[finite])))
+            if finite.any() else None
+        )
+        raise AlignmentError(
+            f"aligned comparison EDTs differ (max finite abs diff={max_diff})"
+        )
+
+    gated_free = gated_label == FREE
+    geom_free = geom_label == FREE
+    subset_violations = int((gated_free & ~geom_free).sum())
+    if subset_violations:
+        raise AlignmentError(
+            f"geometric FREE is not a superset of gated FREE ({subset_violations} voxels)"
+        )
+    seed_a, seed_b = tuple(seed_a), tuple(seed_b)
+    if not (gated_free[seed_a] and gated_free[seed_b]
+            and geom_free[seed_a] and geom_free[seed_b]):
+        raise AlignmentError("common endpoints are not FREE on both aligned graphs")
+
+    eps_g, bott_g, merged_g = widest_path_eps_3d(
+        gated_label, gated_edt, qvol, seed_a, seed_b, tau
+    )
+    eps_m, bott_m, merged_m = widest_path_eps_3d(
+        geom_label, geom_edt, None, seed_a, seed_b, tau
+    )
+    reversal = bool(
+        (merged_g and not merged_m)
+        or (
+            merged_g and merged_m
+            and (
+                (np.isinf(eps_g) and not np.isinf(eps_m))
+                or (
+                    np.isfinite(eps_g) and np.isfinite(eps_m)
+                    and eps_m < eps_g - 1e-12
+                )
+            )
+        )
+    )
+    if reversal:
+        raise RelaxationInvariantError(
+            "aligned relaxation invariant failed: "
+            f"gated={_fmt_eps(eps_g, merged_g)}, geom={_fmt_eps(eps_m, merged_m)}"
+        )
+    return {
+        "seed_start": seed_a,
+        "seed_goal": seed_b,
+        "gated": {"eps": float(eps_g), "merged": bool(merged_g), "bottleneck": bott_g},
+        "geom": {"eps": float(eps_m), "merged": bool(merged_m), "bottleneck": bott_m},
+    }
+
+
+def _route_world(route, XX, YY, zs):
+    return [_voxel_world(XX, YY, zs, voxel) for voxel in route] if route else None
+
+
+def route_diagnostics(route_voxels, route_world, edt, zmin):
+    if not route_voxels or not route_world:
+        return {
+            "voxels": 0,
+            "z_min": None,
+            "z_max": None,
+            "zmin_fraction": None,
+            "physical_length_m": None,
+            "clearance_m": [],
+        }
+    points = np.asarray(route_world, dtype=float)
+    clearance = [float(edt[voxel]) for voxel in route_voxels]
+    return {
+        "voxels": len(route_voxels),
+        "z_min": float(points[:, 2].min()),
+        "z_max": float(points[:, 2].max()),
+        "zmin_fraction": float(np.isclose(points[:, 2], zmin).mean()),
+        "physical_length_m": float(np.linalg.norm(np.diff(points, axis=0), axis=1).sum()),
+        "clearance_m": clearance,
+    }
+
+
+def _solve_single(label, edt, qvol, seed_a, seed_b, tau):
+    eps, bottleneck, merged = widest_path_eps_3d(
+        label, edt, qvol, seed_a, seed_b, tau
+    )
+    return {"eps": float(eps), "merged": bool(merged), "bottleneck": bottleneck}
+
+
+def _mask_delta(no_target, target):
+    if not no_target["merged"] or not target["merged"]:
+        return None
+    if np.isinf(no_target["eps"]) and np.isinf(target["eps"]):
+        return 0.0
+    if np.isfinite(no_target["eps"]) and np.isfinite(target["eps"]):
+        return float(no_target["eps"] - target["eps"])
+    return None
+
+
+def build_aligned_comparison(gated, volume, start_xyz, goal_xyz, cfg):
+    """Build no-target and target-masked pairs on exact common voxel endpoints."""
+    for name, gated_grid, geom_grid in (
+        ("XX", gated.XX, volume.XX),
+        ("YY", gated.YY, volume.YY),
+        ("zs", gated.zs, volume.zs),
+    ):
+        if not np.array_equal(gated_grid, geom_grid):
+            raise AlignmentError(f"aligned comparison {name} grids differ")
+    missing = [
+        name for name in ("edt", "q_warm_3d") if getattr(gated, name) is None
+    ]
+    if missing:
+        if gated.reason:
+            raise SceneNotAlignableError(
+                f"gated metric ended before aligned comparison ({gated.reason}); "
+                f"missing {', '.join(missing)}"
+            )
+        raise AlignmentError(
+            "gated result unexpectedly lacks fields required for aligned comparison: "
+            + ", ".join(missing)
+        )
+
+    gated_notarget = np.asarray(gated.label, dtype=np.int8)
+    geom_notarget = _label_for(volume, mask_target=False)
+    if volume.target_mask is None:
+        raise AlignmentError("aligned production comparison requires target_mask")
+    gated_target = np.where(volume.target_mask, BEYOND, gated_notarget).astype(np.int8)
+    geom_target = _label_for(volume, mask_target=True)
+
+    seeds_notarget = _snap_common_pair(
+        gated_notarget, gated.XX, gated.YY, gated.zs,
+        start_xyz, goal_xyz, cfg.seed_snap,
+    )
+    seeds_target = _snap_common_pair(
+        gated_target, gated.XX, gated.YY, gated.zs,
+        start_xyz, goal_xyz, cfg.seed_snap,
+    )
+    subset_notarget = _subset_diagnostics(gated_notarget, geom_notarget, volume)
+    subset_target = _subset_diagnostics(gated_target, geom_target, volume)
+    if subset_notarget["total"]:
+        raise AlignmentError(
+            f"no-target FREE subset precondition failed: {subset_notarget}"
+        )
+    if subset_target["total"]:
+        raise AlignmentError(
+            f"target-masked FREE subset precondition failed: {subset_target}"
+        )
+    notarget = aligned_widest_pair(
+        gated_notarget, geom_notarget, gated.edt, volume.edt,
+        gated.q_warm_3d, *seeds_notarget, cfg.gate_tau,
+    )
+    target = aligned_widest_pair(
+        gated_target, geom_target, gated.edt, volume.edt,
+        gated.q_warm_3d, *seeds_target, cfg.gate_tau,
+    )
+
+    sa, sb = seeds_target
+    if target["gated"]["merged"]:
+        target["gated"]["route_voxels"] = reconstruct_widest_path_3d(
+            gated_target == FREE, gated.edt, gated.q_warm_3d,
+            sa, sb, target["gated"]["eps"], cfg.gate_tau,
+        )
+    else:
+        target["gated"]["route_voxels"] = None
+    target["gated"]["route_world"] = _route_world(
+        target["gated"]["route_voxels"], gated.XX, gated.YY, gated.zs
+    )
+
+    if target["geom"]["merged"]:
+        target["geom"]["route_bfs_voxels"] = reconstruct_widest_path_3d(
+            geom_target == FREE, volume.edt, None,
+            sa, sb, target["geom"]["eps"], cfg.gate_tau,
+        )
+        target["geom"]["route_voxels"] = reconstruct_clearance_preferred_path_3d(
+            geom_target == FREE, volume.edt, sa, sb, target["geom"]["eps"],
+            cfg.res, cfg.zres,
+        )
+    else:
+        target["geom"]["route_bfs_voxels"] = None
+        target["geom"]["route_voxels"] = None
+    target["geom"]["route_bfs_world"] = _route_world(
+        target["geom"]["route_bfs_voxels"], volume.XX, volume.YY, volume.zs
+    )
+    target["geom"]["route_world"] = _route_world(
+        target["geom"]["route_voxels"], volume.XX, volume.YY, volume.zs
+    )
+
+    native_seeds = _snap_common_pair(
+        geom_target, volume.XX, volume.YY, volume.zs,
+        start_xyz, goal_xyz, cfg.seed_snap,
+    )
+    native_geom = _solve_single(
+        geom_target, volume.edt, None, *native_seeds, cfg.gate_tau
+    )
+    native_geom["seed_start"], native_geom["seed_goal"] = native_seeds
+
+    gated_notarget_at_target_seeds = _solve_single(
+        gated_notarget, gated.edt, gated.q_warm_3d, sa, sb, cfg.gate_tau
+    )
+    geom_notarget_at_target_seeds = _solve_single(
+        geom_notarget, volume.edt, None, sa, sb, cfg.gate_tau
+    )
+    target["gated"]["target_mask_delta"] = _mask_delta(
+        gated_notarget_at_target_seeds, target["gated"]
+    )
+    target["geom"]["target_mask_delta"] = _mask_delta(
+        geom_notarget_at_target_seeds, target["geom"]
+    )
+
+    target["gated"]["route_diagnostics"] = route_diagnostics(
+        target["gated"]["route_voxels"], target["gated"]["route_world"],
+        gated.edt, float(gated.zs[0]),
+    )
+    target["geom"]["route_bfs_diagnostics"] = route_diagnostics(
+        target["geom"]["route_bfs_voxels"], target["geom"]["route_bfs_world"],
+        volume.edt, float(volume.zs[0]),
+    )
+    target["geom"]["route_diagnostics"] = route_diagnostics(
+        target["geom"]["route_voxels"], target["geom"]["route_world"],
+        volume.edt, float(volume.zs[0]),
+    )
+
+    return {
+        "notarget": notarget,
+        "target": target,
+        "native_geom": native_geom,
+        "subset_notarget": subset_notarget,
+        "subset_target": subset_target,
+        "subset_native_policy": _subset_diagnostics(
+            gated_notarget, geom_target, volume
+        ),
+        "grid_equal": True,
+        "edt_equal": True,
+        "edt_max_abs_diff": 0.0,
+        "gated_target_label": gated_target,
+    }
 
 
 def _draw_side_obstacles(ax, foots, p0, u, occ_shape):
@@ -386,86 +723,276 @@ def save_route_overlay(out_dir, args, gated, geom, foots, target_xyz):
     print(f"[viz] wrote {path.name}")
 
 
-def _scene_record(seed, arm, gated, geom, overlap, elapsed):
+def _inflation(gated, geom):
+    if np.isinf(geom["eps"]) and np.isinf(gated["eps"]):
+        return 0.0, False
+    if np.isinf(geom["eps"]):
+        return None, True
+    if np.isinf(gated["eps"]):
+        return None, False
+    return float(geom["eps"] - gated["eps"]), False
+
+
+def _scene_record(
+    seed, arm, gated_native, aligned, overlap, start_xyz, goal_xyz, elapsed,
+    ring_config=None,
+):
     hits, route_voxels, fraction = overlap
-    relaxation_violation = bool(
-        (gated.merged and not geom.merged)
-        or (
-            gated.merged and geom.merged
-            and (
-                (np.isinf(gated.eps_gated) and not np.isinf(geom.eps_star))
-                or (
-                    np.isfinite(gated.eps_gated) and np.isfinite(geom.eps_star)
-                    and geom.eps_star < gated.eps_gated - 1e-9
-                )
+    production = aligned["target"]
+    isolation = aligned["notarget"]
+    gated = production["gated"]
+    geom = production["geom"]
+    native_geom = aligned["native_geom"]
+    inflation, inflation_unbounded = _inflation(gated, geom)
+    sa_t, sb_t = production["seed_start"], production["seed_goal"]
+    sa_n, sb_n = isolation["seed_start"], isolation["seed_goal"]
+    native_reversal = bool(
+        gated_native.merged
+        and (
+            not native_geom["merged"]
+            or (
+                np.isinf(gated_native.eps_gated)
+                and not np.isinf(native_geom["eps"])
+            )
+            or (
+                np.isfinite(gated_native.eps_gated)
+                and np.isfinite(native_geom["eps"])
+                and native_geom["eps"] < gated_native.eps_gated - 1e-12
             )
         )
     )
-    gated_rank = float(gated.eps_gated) if gated.merged else 0.0
-    geom_rank = float(geom.eps_star) if geom.merged else 0.0
-    if np.isinf(geom_rank) and np.isinf(gated_rank):
-        inflation = 0.0
-        inflation_unbounded = False
-    elif np.isinf(geom_rank):
-        inflation = None
-        inflation_unbounded = True
-    elif np.isinf(gated_rank):
-        inflation = None
-        inflation_unbounded = False
-    else:
-        inflation = float(geom_rank - gated_rank)
-        inflation_unbounded = False
     return {
         "status": "ok",
         "seed": int(seed),
         "arm": arm,
-        "merged_gated": bool(gated.merged),
-        "merged_geom": bool(geom.merged),
-        "eps_gated": float(gated.eps_gated),
-        "eps_geom": float(geom.eps_star),
-        "eps_gated_m": _json_eps(gated.eps_gated, gated.merged),
-        "eps_geom_m": _json_eps(geom.eps_star, geom.merged),
-        "eps_gated_unbounded": bool(gated.merged and np.isinf(gated.eps_gated)),
-        "eps_geom_unbounded": bool(geom.merged and np.isinf(geom.eps_star)),
+        "occluder_ring": ring_config,
+        # Primary production series: target-masked, exact common endpoints.
+        "merged_gated": gated["merged"],
+        "merged_geom": geom["merged"],
+        "eps_gated": gated["eps"],
+        "eps_geom": geom["eps"],
+        "eps_gated_m": _json_eps(gated["eps"], gated["merged"]),
+        "eps_geom_m": _json_eps(geom["eps"], geom["merged"]),
+        "eps_gated_unbounded": bool(gated["merged"] and np.isinf(gated["eps"])),
+        "eps_geom_unbounded": bool(geom["merged"] and np.isinf(geom["eps"])),
         "inflation_m": inflation,
         "inflation_unbounded": inflation_unbounded,
-        "relaxation_violation": relaxation_violation,
-        "gated_reason": gated.reason,
-        "geom_reason": geom.reason,
-        "gated_route_voxels": len(gated.route_world or []),
+        "relaxation_violation": False,
+        # Isolation series: no target on either graph, exact common endpoints.
+        "merged_gated_notarget_common": isolation["gated"]["merged"],
+        "merged_geom_notarget_common": isolation["geom"]["merged"],
+        "eps_gated_notarget_common": isolation["gated"]["eps"],
+        "eps_geom_notarget_common": isolation["geom"]["eps"],
+        # Native independently snapped values are diagnostic only.
+        "merged_gated_native": bool(gated_native.merged),
+        "merged_geom_native": native_geom["merged"],
+        "eps_gated_native": float(gated_native.eps_gated),
+        "eps_geom_native": native_geom["eps"],
+        "native_relaxation_reversal": native_reversal,
+        "gated_reason": gated_native.reason,
+        "geom_reason": None,
+        "gated_route_voxels": len(gated["route_world"] or []),
         "geom_route_voxels": route_voxels,
         "false_keep_route_voxels": hits,
         "false_keep_route_fraction": fraction,
-        "start_xyz": [float(v) for v in geom.start_xyz],
-        "goal_xyz": [float(v) for v in geom.goal_xyz],
+        "start_xyz": [float(v) for v in start_xyz],
+        "goal_xyz": [float(v) for v in goal_xyz],
+        "common_endpoints": {
+            "target": {
+                "start_voxel": sa_t,
+                "goal_voxel": sb_t,
+                "start_world": _voxel_world(
+                    gated_native.XX, gated_native.YY, gated_native.zs, sa_t
+                ),
+                "goal_world": _voxel_world(
+                    gated_native.XX, gated_native.YY, gated_native.zs, sb_t
+                ),
+                "start_edt_m": float(gated_native.edt[sa_t]),
+                "goal_edt_m": float(gated_native.edt[sb_t]),
+            },
+            "notarget": {
+                "start_voxel": sa_n,
+                "goal_voxel": sb_n,
+                "start_world": _voxel_world(
+                    gated_native.XX, gated_native.YY, gated_native.zs, sa_n
+                ),
+                "goal_world": _voxel_world(
+                    gated_native.XX, gated_native.YY, gated_native.zs, sb_n
+                ),
+                "start_edt_m": float(gated_native.edt[sa_n]),
+                "goal_edt_m": float(gated_native.edt[sb_n]),
+            },
+        },
+        "native_endpoints": {
+            "gated_start_voxel": gated_native.seed_start,
+            "gated_goal_voxel": gated_native.seed_goal,
+            "geom_start_voxel": native_geom["seed_start"],
+            "geom_goal_voxel": native_geom["seed_goal"],
+        },
+        "target_mask_delta_m": {
+            "gated": gated["target_mask_delta"],
+            "geom": geom["target_mask_delta"],
+        },
+        "subset_diagnostics": {
+            "notarget": aligned["subset_notarget"],
+            "target": aligned["subset_target"],
+            "native_mismatched_policy": aligned["subset_native_policy"],
+        },
+        "alignment": {
+            "grid_equal": aligned["grid_equal"],
+            "edt_equal": aligned["edt_equal"],
+            "edt_max_abs_diff": aligned["edt_max_abs_diff"],
+        },
+        "route_diagnostics": {
+            "gated": gated["route_diagnostics"],
+            "geometric_bfs": geom["route_bfs_diagnostics"],
+            "geometric_clearance_preferred": geom["route_diagnostics"],
+        },
         "seconds": float(elapsed),
     }
 
 
-def _save_routes(out_dir, seed, arm, gated, geom):
+def _aligned_views(gated_native, aligned):
+    production = aligned["target"]
+    sa, sb = production["seed_start"], production["seed_goal"]
+    start = np.asarray(
+        _voxel_world(gated_native.XX, gated_native.YY, gated_native.zs, sa), dtype=float
+    )
+    goal = np.asarray(
+        _voxel_world(gated_native.XX, gated_native.YY, gated_native.zs, sb), dtype=float
+    )
+    gated = SimpleNamespace(
+        start_xyz=start,
+        goal_xyz=goal,
+        XX=gated_native.XX,
+        YY=gated_native.YY,
+        zs=gated_native.zs,
+        label=aligned["gated_target_label"],
+        route_world=production["gated"]["route_world"],
+        eps_gated=production["gated"]["eps"],
+        merged=production["gated"]["merged"],
+    )
+    geom = SimpleNamespace(
+        start_xyz=start,
+        goal_xyz=goal,
+        route_world=production["geom"]["route_world"],
+        eps_star=production["geom"]["eps"],
+        merged=production["geom"]["merged"],
+    )
+    return gated, geom
+
+
+def _save_routes(out_dir, seed, arm, gated, geom, aligned):
     np.savez_compressed(
         Path(out_dir) / f"routes_seed{seed}_{arm}.npz",
         gated_route=np.asarray(gated.route_world or [], dtype=float).reshape(-1, 3),
         geometric_route=np.asarray(geom.route_world or [], dtype=float).reshape(-1, 3),
+        geometric_bfs_route=np.asarray(
+            aligned["target"]["geom"]["route_bfs_world"] or [], dtype=float
+        ).reshape(-1, 3),
         start_xyz=np.asarray(geom.start_xyz, dtype=float),
         goal_xyz=np.asarray(geom.goal_xyz, dtype=float),
+        common_start_voxel=np.asarray(aligned["target"]["seed_start"], dtype=int),
+        common_goal_voxel=np.asarray(aligned["target"]["seed_goal"], dtype=int),
     )
 
 
+def _ring_config(args, seed):
+    offset_text = args.offsets if args.offsets is not None else str(args.offset)
+    specs = parse_offset_specs(offset_text)
+    if len(specs) != 1:
+        raise ValueError(
+            "geometric-vs-gated comparison accepts one fixed/range offset spec per run"
+        )
+    counts = parse_count_choices(args.num_occluders)
+    angle0, count, radii = draw_ring_config(
+        seed, specs[0], counts, args.random_ring_rotation
+    )
+    if not args.random_ring_rotation:
+        angle0 = float(args.occluder_angle0)
+    return {
+        "offset_spec": offset_text,
+        "offset_nominal_m": float(specs[0][2]),
+        "count": int(count),
+        "radii_m": [float(radius) for radius in radii],
+        "angle0_rad": float(angle0),
+        "random_rotation": bool(args.random_ring_rotation),
+    }
+
+
 def _build_scene(args, seed):
+    ring = _ring_config(args, seed)
     env = make_occluder_task()()
     env.spawn_occluder = True
-    env.occluder_offset = args.offset
-    env.num_occluders = args.num_occluders
-    env.occluder_angle0 = args.occluder_angle0
+    env.occluder_offset = ring["offset_nominal_m"]
+    env.num_occluders = ring["count"]
+    env.occluder_angle0 = ring["angle0_rad"]
+    env.occluder_radii = list(ring["radii_m"])
     env.setup_demo(**build_cfg("put_mouse_on_pad", args.base_config, seed, DR_CLEAN))
-    return env
+    ring["spawned_count"] = len(getattr(env, "occluders", []))
+    return env, ring
+
+
+def _read_records(path):
+    records = []
+    seen = set()
+    if not path.exists():
+        return records
+    with path.open(encoding="utf-8") as stream:
+        for line_number, line in enumerate(stream, 1):
+            if not line.strip():
+                continue
+            try:
+                record = json.loads(line)
+                seed = int(record["seed"])
+            except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+                raise ValueError(f"invalid record at {path}:{line_number}: {exc}") from exc
+            if seed in seen:
+                raise ValueError(f"duplicate seed {seed} in {path}")
+            seen.add(seed)
+            records.append(record)
+    return records
+
+
+def _restore_resume_config(args):
+    """Restore the exact scene/metric configuration stored by an interrupted run."""
+    if not args.resume_dir:
+        return None, None, []
+    out_dir = Path(args.resume_dir).resolve()
+    config_path = out_dir / "config.json"
+    if not config_path.is_file():
+        raise FileNotFoundError(f"resume directory lacks config.json: {out_dir}")
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+    for name in (
+        "seeds", "arm", "base_config", "offset", "num_occluders",
+        "occluder_angle0", "reach_cache_dir", "reach_mode",
+    ):
+        setattr(args, name, config[name])
+    args.offsets = config.get("offsets")
+    args.random_ring_rotation = bool(config.get("random_ring_rotation", False))
+    for name, value in config["metric"].items():
+        setattr(args, name, value)
+    args.false_keep_mask = config["false_keep_mask"]
+    records = _read_records(out_dir / "records.jsonl")
+    requested = {int(seed) for seed in args.seeds}
+    unexpected = sorted(
+        int(record["seed"])
+        for record in records
+        if int(record["seed"]) not in requested
+    )
+    if unexpected:
+        raise ValueError(f"resume records contain seeds absent from config.json: {unexpected}")
+    return out_dir, config, records
 
 
 def run(args):
-    out_dir = Path(args.out_dir) / datetime.now().strftime("%Y%m%d-%H%M%S")
-    out_dir.mkdir(parents=True, exist_ok=True)
-    print(f"[run] writing to {out_dir}")
+    out_dir, stored_config, records = _restore_resume_config(args)
+    if out_dir is None:
+        out_dir = Path(args.out_dir) / datetime.now().strftime("%Y%m%d-%H%M%S")
+        out_dir.mkdir(parents=True, exist_ok=True)
+        print(f"[run] writing to {out_dir}")
+    else:
+        print(f"[run] resuming {out_dir} ({len(records)} recorded scenes)")
 
     cfg = SeedMetricConfig.from_args(args)
     for field, value in vars(cfg).items():
@@ -486,25 +1013,53 @@ def run(args):
         "arm": args.arm,
         "base_config": args.base_config,
         "offset": args.offset,
+        "offsets": args.offsets,
         "num_occluders": args.num_occluders,
         "occluder_angle0": args.occluder_angle0,
+        "random_ring_rotation": args.random_ring_rotation,
         "reach_cache_dir": str(args.reach_cache_dir),
         "reach_mode": args.reach_mode,
         "false_keep_mask": false_keep["path"],
         "metric": vars(cfg),
     }
-    (out_dir / "config.json").write_text(json.dumps(config, indent=2))
+    if stored_config is None:
+        (out_dir / "config.json").write_text(json.dumps(config, indent=2))
+    else:
+        expected_config = dict(stored_config)
+        expected_config.setdefault("offsets", None)
+        expected_config.setdefault("random_ring_rotation", False)
+        if _json_safe(config) != expected_config:
+            raise ValueError("restored resume configuration does not match config.json")
     records_path = out_dir / "records.jsonl"
-    records = []
     timings = Timings()
+    recorded_seeds = {int(record["seed"]) for record in records}
+    pending_seeds = [int(seed) for seed in args.seeds if int(seed) not in recorded_seeds]
+    if stored_config is not None:
+        print(
+            f"[run] skipping {len(recorded_seeds)} recorded scenes; "
+            f"{len(pending_seeds)} remain"
+        )
 
-    for index, seed in enumerate(args.seeds, 1):
-        print(f"[scene] {index}/{len(args.seeds)} seed={seed}")
+    for index, seed in enumerate(pending_seeds, 1):
+        print(f"[scene] {index}/{len(pending_seeds)} remaining, seed={seed}")
         started = time.perf_counter()
-        env = planner = ik = gated = geom = None
+        env = planner = ik = gated = volume = aligned = gated_view = geom_view = None
+        ring_config = None
         try:
             with timings.section(f"seed_{seed}_scene_setup"):
-                env = _build_scene(args, seed)
+                env, ring_config = _build_scene(args, seed)
+                print(
+                    f"[scene] ring count={ring_config['count']} "
+                    f"spawned={ring_config['spawned_count']} "
+                    f"radii={[round(v, 3) for v in ring_config['radii_m']]} "
+                    f"angle0={ring_config['angle0_rad']:.3f} rad"
+                )
+                if ring_config["spawned_count"] != ring_config["count"]:
+                    raise SceneNotAlignableError(
+                        "one or more sampled occluders fell outside the table: "
+                        f"requested {ring_config['count']}, "
+                        f"spawned {ring_config['spawned_count']}"
+                    )
                 grasp_q, grasp_pose = grasp_orientation(env, args.arm, False)
                 if grasp_pose is None:
                     raise RuntimeError("no side-grasp pose; Stage 3 requires fixed grasp->pad endpoints")
@@ -516,10 +1071,9 @@ def run(args):
                 )
 
             with timings.section(f"seed_{seed}_geometric"):
-                geom = geometric_eps(
-                    env, args.arm, [(start_xyz, goal_xyz)], cfg,
-                    args.reach_cache_dir, args.reach_mode,
-                )[0]
+                volume = _build_geometric_volume(
+                    env, args.arm, cfg, args.reach_cache_dir, args.reach_mode
+                )
 
             with timings.section(f"seed_{seed}_gated"):
                 ik = _build_ik_solver(planner)
@@ -527,25 +1081,56 @@ def run(args):
                     env, planner, args.arm, ik, grasp_q, start_xyz, goal_xyz, cfg
                 )
 
-            overlap = false_keep_overlap(geom.route_world, false_keep)
-            foots = gated.foots or occluder_footprints_3d(env, obstacles=cfg.obstacles)
+            with timings.section(f"seed_{seed}_aligned_compare"):
+                aligned = build_aligned_comparison(
+                    gated, volume, start_xyz, goal_xyz, cfg
+                )
+                gated_view, geom_view = _aligned_views(gated, aligned)
+
+            overlap = false_keep_overlap(geom_view.route_world, false_keep)
+            foots = gated.foots or volume.foots or occluder_footprints_3d(
+                env, obstacles=cfg.obstacles
+            )
             with timings.section(f"seed_{seed}_report"):
                 args.seed = int(seed)
-                save_route_overlay(out_dir, args, gated, geom, foots, target_xyz)
-                _save_routes(out_dir, seed, args.arm, gated, geom)
+                save_route_overlay(
+                    out_dir, args, gated_view, geom_view, foots, target_xyz
+                )
+                _save_routes(
+                    out_dir, seed, args.arm, gated_view, geom_view, aligned
+                )
             record = _scene_record(
-                seed, args.arm, gated, geom, overlap, time.perf_counter() - started
+                seed, args.arm, gated, aligned, overlap,
+                start_xyz, goal_xyz, time.perf_counter() - started, ring_config,
             )
             print(
-                f"[scene] seed={seed} gated={_fmt_eps(gated.eps_gated, gated.merged)}  "
-                f"geometric={_fmt_eps(geom.eps_star, geom.merged)}  "
+                f"[scene] seed={seed} target-common "
+                f"gated={_fmt_eps(gated_view.eps_gated, gated_view.merged)}  "
+                f"geometric={_fmt_eps(geom_view.eps_star, geom_view.merged)}  "
+                f"no-target-common "
+                f"gated={_fmt_eps(aligned['notarget']['gated']['eps'], aligned['notarget']['gated']['merged'])}  "
+                f"geometric={_fmt_eps(aligned['notarget']['geom']['eps'], aligned['notarget']['geom']['merged'])}  "
                 f"false-keep route={overlap[0]}/{overlap[1]}"
             )
+        except SceneNotAlignableError as exc:
+            record = {
+                "status": "not_alignable",
+                "seed": int(seed),
+                "arm": args.arm,
+                "occluder_ring": ring_config,
+                "reason": str(exc),
+                "seconds": time.perf_counter() - started,
+            }
+            print(f"[scene] seed={seed} NOT ALIGNABLE: {exc}")
+        except (AlignmentError, RelaxationInvariantError) as exc:
+            print(f"[scene] seed={seed} FATAL: {type(exc).__name__}: {exc}")
+            raise
         except Exception as exc:
             record = {
                 "status": "error",
                 "seed": int(seed),
                 "arm": args.arm,
+                "occluder_ring": ring_config,
                 "error": f"{type(exc).__name__}: {exc}",
                 "seconds": time.perf_counter() - started,
             }
@@ -556,7 +1141,7 @@ def run(args):
                     env.close_env()
                 except Exception:
                     pass
-            del ik, gated, geom, planner, env
+            del ik, gated, volume, aligned, gated_view, geom_view, planner, env
             gc.collect()
             try:
                 import torch
@@ -571,9 +1156,14 @@ def run(args):
     with timings.section("aggregate_report"):
         summary = write_reports(out_dir, records, config)
     timings.save(out_dir)
-    rho = summary["spearman_all"]
-    print(f"[gate] Spearman = {'undefined' if rho is None else f'{rho:.3f}'} "
-          f"(threshold {summary['rank_threshold']:.1f})")
+    rho = summary["production_target_masked"]["spearman_all"]
+    rho_isolation = summary["isolation_no_target"]["spearman_all"]
+    print(
+        "[gate] Spearman target-masked = "
+        f"{'undefined' if rho is None else f'{rho:.3f}'}, no-target = "
+        f"{'undefined' if rho_isolation is None else f'{rho_isolation:.3f}'} "
+        f"(threshold {summary['rank_threshold']:.1f} for both)"
+    )
     print(f"[gate] numeric verdict: {summary['stage3_verdict']}")
     print("[gate] final verdict remains pending until the route overlays are inspected.")
     print(f"[run] outputs in {out_dir}")
@@ -586,9 +1176,26 @@ def main():
     parser.add_argument("--seeds", type=int, nargs="+", default=list(range(10)))
     parser.add_argument("--arm", choices=["left", "right"], default="right")
     parser.add_argument("--base-config", default="bench_demo_office_clean")
-    parser.add_argument("--offset", type=float, default=0.2)
-    parser.add_argument("--num-occluders", type=int, default=4)
+    parser.add_argument(
+        "--offset", type=float, default=0.2,
+        help="legacy fixed ring radius; ignored when --offsets is supplied",
+    )
+    parser.add_argument(
+        "--offsets",
+        help=(
+            "one fixed radius or range; 0.1-0.25 samples each occluder radius "
+            "independently per seed"
+        ),
+    )
+    parser.add_argument(
+        "--num-occluders", default="4",
+        help="one count or a comma-separated per-seed menu, e.g. 2,3,4,5",
+    )
     parser.add_argument("--occluder-angle0", type=float, default=0.0)
+    parser.add_argument(
+        "--random-ring-rotation", action="store_true",
+        help="draw a deterministic whole-ring rotation for every seed",
+    )
     parser.add_argument("--reach-mode", choices=["occupancy", "sphere"], default="occupancy")
     parser.add_argument(
         "--reach-cache-dir", default=str(STAGE1_REACH_CACHE_DIR)
@@ -599,6 +1206,13 @@ def main():
         help="searched for the newest matching Stage-1 false_keep_mask.npz",
     )
     parser.add_argument("--out-dir", default=str(RESULTS_DIR))
+    parser.add_argument(
+        "--resume-dir",
+        help=(
+            "resume an existing timestamped run directory; its config.json is authoritative "
+            "and seeds already present in records.jsonl are skipped"
+        ),
+    )
 
     parser.add_argument("--xmin", type=float, default=None)
     parser.add_argument("--xmax", type=float, default=None)

@@ -17,6 +17,30 @@ The scene built by `analyze_occluder_visibility.py` (office `put_mouse_on_pad` h
   fat). Ranked by aspect ratio (tallest extent ÷ larger footprint extent), filtered to
   `stable: true`: olive-oil is H 0.305 m, aspect 3.8; milk-box was H 0.254 m, aspect 2.1 — taller
   and ~35% skinnier. Runner-up for max-skinny: `065_soy-sauce` id 0.
+- **Both assets are selectable again (2026-07-31).** `--occluder-asset olive_oil|milk_box` on
+  `analyze_occluder_visibility.py`, or `OCCLUDER_ASSET=` in the environment (that is what
+  `run_approach_mode_ab.sh` inherits; the flag wins if both are set). Table lives in
+  `lib/scene_constants.py`. Default `olive_oil` reproduces the prior constants exactly — verified
+  field by field including `OCC_PAD_MIN_DIST` — so leaving it unset changes nothing.
+  **Why `milk_box` was restored:** to rebuild the ORIGINAL pre-July scene and test whether the
+  direct (waypoint-free) solver clears the scene the old baseline scored **0/16** on. See
+  [[domain_expert_baseline]].
+  **Non-obvious bits, all verified 2026-07-31:**
+  - The footprint constants MUST travel with the asset (`OCC_HALF_FOOTPRINT` 0.04→0.08,
+    `_OCC_HALF` 0.04→0.06, recovered from `b3c2e66`). The carton is genuinely ~2x the bottle;
+    otherwise `_box_side_x` and the pad-distance scene filter size against the wrong object.
+  - A plain argparse flag CANNOT drive this: the task mixins do `from lib.scene_constants import *`,
+    which COPIES the constants, so the asset must be known before those imports run. The flag value
+    is consumed by an argv pre-scan at the top of the file that sets the env var; argparse registers
+    it only for `--help` and typo rejection. Do not "simplify" that away.
+  - The original scene is reproduced by `--num-occluders 1 --no-random-ring-rotation --offsets 0.2`.
+    Asserted that `occluder_ring_xy(n=1, angle0=0)` returns exactly `(target_x, target_y - offset)`,
+    the same point the old hardcoded `oy = mp[1] - occluder_offset` produced.
+  - Per-occluder random YAW stays on (`rotate_lim=[0, 3.14, 0]`) because the original had it too.
+    Faithful, but a rectangular carton presents a different silhouette per seed in a way the round
+    bottle never did — a real difference in variance between the two assets.
+  - Records and the run banner now stamp `occluder_asset`. Pooling assets would be wrong (2x
+    footprint difference), and before this stamp the two were indistinguishable in `records.jsonl`.
 - `scale` in this repo is a **direct vertex multiplier** (real size = raw extents × scale), and raw
   extents in `model_dataN.json` are scale-1.0 metres — so aspect ratio is what matters, height is
   freely rescalable.

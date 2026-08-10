@@ -309,7 +309,9 @@ class SeedingMixin:
                             sub = (_P(out_root) / "seed_route_visuals"
                                    / f"episode{ep}_{tag}_carry")
                             sfc.save_route_visuals(res, sub,
-                                                   seed_label=f"{ep}-carry", arm=tag)
+                                                   seed_label=f"{ep}-carry", arm=tag,
+                                                   start_label="post-lift gripper",
+                                                   goal_label="pad transit")
                 except Exception as _ve:
                     print(f"[carry-seed-viz] skipped ({_ve})")
         except Exception as e:      # never let seeding break the expert

@@ -120,6 +120,7 @@ class Study_base_task(Bench_base_task):
         self.now_obs = {}
         self.take_action_cnt = 0
         self.eval_video_path = kwags.get("eval_video_save_dir", None)
+        self.eval_video_camera = kwags.get("eval_video_camera", None)
 
         self.save_freq = kwags.get("save_freq")
         self.world_pcd = None

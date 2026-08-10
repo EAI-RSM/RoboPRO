@@ -35,6 +35,12 @@
 #   NUM_SEEDS=50 bash scripts/validation/run_approach_mode_ab.sh
 #   MODES="direct seed" NUM_SEEDS=30 bash scripts/validation/run_approach_mode_ab.sh
 #
+# A MODES entry may pin its own backward leg as `approach:placement`; a bare entry uses
+# the run-wide PLACEMENT_MODE. `off:scripted` is the only configuration that is the
+# HISTORICAL expert (both legs on) -- plain `off` keeps the around-box waypoint but still
+# does the single unstaged lift->pad transit, which nothing ever ran.
+#   MODES="off:scripted direct seed" bash scripts/validation/run_approach_mode_ab.sh
+#
 # SCENES: the cells run on two scene types, the same NUM_SEEDS each, so the two are
 # weighted equally by construction:
 #   curated   olive-oil occluders always spawned, in a RANDOMIZED formation: the whole
@@ -150,7 +156,7 @@ fi
 echo "============================================================"
 echo " Phase 4: APPROACH_MODE A/B  (does the clearance seed help?)"
 echo "   modes        : $MODES  (forward leg -- the A/B variable)"
-echo "   placement    : $PLACEMENT_MODE  (backward leg -- same in every cell)"
+echo "   placement    : $PLACEMENT_MODE  (backward leg default; a MODES entry may pin its own)"
 echo "   scenes       : $SCENES"
 echo "   seeds        : $NUM_SEEDS per cell (from $SEED_START) -- equal across scenes"
 echo "   curated      : occluders ON, n in {$OCCLUDER_COUNTS}, radii=$OFFSET,"
@@ -192,7 +198,7 @@ fi
 # A non-zero exit (often just the post-run plotting hiccuping AFTER records.jsonl is
 # written) is logged and we move on -- the summary reads whatever records.jsonl exists.
 run_cell () {
-  local scene="$1" mode="$2"
+  local scene="$1" mode="$2" pmode="$3"
   local logf="$LOG_DIR/${scene}_${mode}.log"
   local occ_prob clutter counts rot_flag
   # The randomized formation only applies where occluders spawn. On the standard scene the
@@ -207,11 +213,11 @@ run_cell () {
     *) echo "!!! unknown scene '$scene' -- skipping"; return ;;
   esac
   echo ""
-  echo ">>> [$(date +%T)] START  scene=$scene APPROACH_MODE=$mode (clutter=$clutter"
+  echo ">>> [$(date +%T)] START  scene=$scene APPROACH_MODE=$mode PLACEMENT_MODE=$pmode (clutter=$clutter"
   [[ "$scene" == "curated" ]] && echo "        occluders=$counts  radii=$OFFSET  $rot_flag"
   # -u: stdout is redirected to a file, so without it Python block-buffers and the cell
   # log stays EMPTY for hours on a 50-seed run. Unbuffered keeps `tail -f` live.
-  if APPROACH_MODE="$mode" "$PYTHON" -u script/bench_script/analyze_occluder_visibility.py \
+  if APPROACH_MODE="$mode" PLACEMENT_MODE="$pmode" "$PYTHON" -u script/bench_script/analyze_occluder_visibility.py \
         --base-config "$BASE_CONFIG" --seed-start "$SEED_START" --num-seeds "$NUM_SEEDS" \
         --rollout --out-dir "$OUT_ROOT/$scene" --run-type "$mode" \
         --offsets "$OFFSET" --clutter-densities "$clutter" --no-occluder-prob "$occ_prob" \
@@ -236,11 +242,25 @@ run_cell () {
 # Scene-major order: each scene's cells run back to back, so a run killed part-way still
 # leaves at least one COMPLETE scene rather than two half-finished ones.
 for scene in $SCENES; do
-  for mode in $MODES; do
-    case "$mode" in
-      off|direct|seed) run_cell "$scene" "$mode" ;;
-      *) echo "!!! unknown mode '$mode' (expected off|direct|seed) -- skipping" ;;
+  for spec in $MODES; do
+    # A MODES entry is `approach` or `approach:placement`; bare entries take the run-wide
+    # PLACEMENT_MODE, so the existing two-cell usage is unchanged. The per-cell form exists
+    # because the two legs are independent knobs (seeding_mixin._placement_mode) and the
+    # historical expert is BOTH of them on -- off:scripted. Without it, an `off` cell would
+    # keep the around-box waypoint but still carry the object to the pad as one big
+    # unstaged transit, which is not a configuration that has ever existed.
+    amode="${spec%%:*}"
+    pmode="${spec#*:}"
+    [[ "$pmode" == "$spec" ]] && pmode="$PLACEMENT_MODE"
+    case "$amode" in
+      off|direct|seed) ;;
+      *) echo "!!! unknown approach mode '$amode' in '$spec' (expected off|direct|seed) -- skipping"; continue ;;
     esac
+    case "$pmode" in
+      scripted|direct) ;;
+      *) echo "!!! unknown placement mode '$pmode' in '$spec' (expected scripted|direct) -- skipping"; continue ;;
+    esac
+    run_cell "$scene" "$amode" "$pmode"
   done
 done
 

@@ -21,4 +21,22 @@ finding both duplicates that work and burns real GPU time on a question they nev
 - For anything involving SAPIEN rollouts, write a self-contained script under `scripts/validation/`
   and hand the user the command. Don't execute it.
 
-Pairs with [[feedback_scientific_rigor]] (report honestly, including confounds).
+**THE NUANCE (stated 2026-07-30, after a session that drifted badly).** "Engineer, not scientist"
+does NOT mean "build whatever is asked and ignore the science." It means: **every engineering
+decision must be judged by whether it serves the experiment.** Being a good engineer here is
+mostly about what you *decline* to build.
+
+- Before proposing any change, say which of these it is: **validity** (the comparison is wrong
+  without it) / **power** (the comparison can't detect an effect without it) / **scope** (it
+  widens the claim) / **quality** (it's just nicer). **Only validity blocks a run.** Say the
+  category out loud every time — mislabelling scope as validity is what justified a whole chain
+  of unnecessary work on 2026-07-28.
+- **If you are not sure whether something is needed, ASK.** Do not build it and find out after.
+  The user would rather answer one question than review a day of work aimed at the wrong thing.
+- Don't let "next step" framing make continuation the default. Approving one step is not
+  approving the strategy — re-surface the strategic choice rather than assuming it stands.
+- When your OWN change breaks something, that is a signal the plan costs more than estimated.
+  Stop and re-ask; don't just fix and continue.
+
+Pairs with [[feedback_scientific_rigor]] (report honestly, including confounds) and
+[[feedback_minimal_changes]] (over-engineering is the single worst failure mode).

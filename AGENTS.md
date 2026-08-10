@@ -1,8 +1,19 @@
 ## Agent memory
 
-Durable working notes live in `agent-memory/`. **Read `agent-memory/MEMORY.md` at the start of a
-session**, then open the individual files it points to when relevant — do not read all of them up
-front.
+Durable working notes live in `agent-memory/`. At the start of every session, before acting on the
+first task:
+
+1. Read `agent-memory/MEMORY.md` in full.
+2. Read `agent-memory/status_current.md` in full so the branch, unfinished work, verification gaps,
+   and next steps are current.
+3. Identify the task's main concepts, filenames, and symbols. Search across `agent-memory/*.md` for
+   them, then read every matching topical note linked by `MEMORY.md` before inspecting or changing
+   that part of the project. If the task expands into another subsystem, repeat the search.
+
+Do not read every memory file up front. `MEMORY.md` is the routing index; task-scoped search plus
+full reads of relevant notes gives better recall without consuming the session context with
+unrelated history. Do not rely only on remembered context from an earlier session, because Claude
+Code and other agents update these files too.
 
 - `agent-memory/status_current.md` is the only file holding volatile state (branch, uncommitted
   work, what is unverified, what is next). Read it before acting on anything time-sensitive, and

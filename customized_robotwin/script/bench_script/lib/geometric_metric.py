@@ -3,8 +3,9 @@
 This module keeps the existing obstacle-clearance widest-path calculation and replaces the
 per-scene IK volume plus joint-continuity gate with the validated, precomputed reach envelope.
 One label/clearance volume is built per :func:`geometric_eps` call and reused for every requested
-leg. The result is a relaxation of the gated metric: ``eps_geom >= eps_gated``. It can make a
-scene look easier than the arm-specific gated metric, never harder.
+leg. With a common snapped voxel pair and matched mask policy, the result is a relaxation of the
+gated metric: ``eps_geom >= eps_gated``. Native calls that snap independently are not comparable
+under that invariant.
 
 Known and accepted gaps:
 
@@ -38,7 +39,7 @@ from .obstacles import (
 from .scene_constants import OCC_HALF_FOOTPRINT
 from .widest_path import (
     nearest_free_voxel,
-    reconstruct_widest_path_3d,
+    reconstruct_clearance_preferred_path_3d,
     widest_path_eps_3d,
 )
 
@@ -66,6 +67,10 @@ class _GeometricVolume:
     YY: np.ndarray
     label: np.ndarray
     edt: np.ndarray
+    prune_mask: np.ndarray | None = None
+    occ_mask: np.ndarray | None = None
+    target_mask: np.ndarray | None = None
+    foots: list | None = None
 
 
 def _target_collision_path(env):
@@ -130,7 +135,25 @@ def _build_geometric_volume(env, arm, cfg, reach_cache_dir, reach_mode):
         occ_mask = edt <= 0.0
     target_mask = _target_mask(env, XX, YY, zs, cfg.occ_shape)
     label = np.where(prune_mask | occ_mask | target_mask, BEYOND, FREE).astype(np.int8)
-    return _GeometricVolume(xs, ys, zs, XX, YY, label, edt)
+    return _GeometricVolume(
+        xs, ys, zs, XX, YY, label, edt,
+        prune_mask=prune_mask,
+        occ_mask=occ_mask,
+        target_mask=target_mask,
+        foots=foots,
+    )
+
+
+def _label_for(volume, mask_target=True):
+    """Derive either target policy without rebuilding the shared geometric fields."""
+    if volume.prune_mask is None or volume.occ_mask is None:
+        return volume.label
+    blocked = volume.prune_mask | volume.occ_mask
+    if mask_target:
+        if volume.target_mask is None:
+            raise ValueError("target-masked geometric label requires target_mask")
+        blocked = blocked | volume.target_mask
+    return np.where(blocked, BEYOND, FREE).astype(np.int8)
 
 
 def _world(volume, voxel):
@@ -149,6 +172,7 @@ def geometric_eps(
     cfg: SeedMetricConfig = None,
     reach_cache_dir=None,
     reach_mode="occupancy",
+    mask_target=True,
 ):
     """Return one :class:`LegResult` per ``(start_xyz, goal_xyz)`` leg.
 
@@ -159,7 +183,8 @@ def geometric_eps(
     if reach_cache_dir is None:
         raise ValueError("reach_cache_dir is required; geometric eps* never rebuilds the envelope")
     volume = _build_geometric_volume(env, arm, cfg, reach_cache_dir, reach_mode)
-    free = volume.label == FREE
+    label = _label_for(volume, mask_target=mask_target)
+    free = label == FREE
     n_free = int(free.sum())
 
     results = []
@@ -187,7 +212,7 @@ def geometric_eps(
 
         (seed_a, _), (seed_b, _) = seed_start, seed_goal
         eps_star, bottleneck, merged = widest_path_eps_3d(
-            volume.label, volume.edt, None, seed_a, seed_b, cfg.gate_tau)
+            label, volume.edt, None, seed_a, seed_b, cfg.gate_tau)
         if not merged:
             results.append(LegResult(
                 float(eps_star), False, None, None, start, goal, n_free,
@@ -195,8 +220,8 @@ def geometric_eps(
             ))
             continue
 
-        route = reconstruct_widest_path_3d(
-            free, volume.edt, None, seed_a, seed_b, eps_star, cfg.gate_tau)
+        route = reconstruct_clearance_preferred_path_3d(
+            free, volume.edt, seed_a, seed_b, eps_star, cfg.res, cfg.zres)
         bottleneck_xyz = _world(volume, bottleneck) if bottleneck is not None else None
         if not route:
             results.append(LegResult(

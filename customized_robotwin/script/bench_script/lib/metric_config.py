@@ -1,7 +1,7 @@
 """Single source of truth for clearance-route metric configuration."""
 
 import os
-from dataclasses import dataclass, fields, replace
+from dataclasses import dataclass, field, fields, replace
 
 
 def _env_value(raw, current):
@@ -11,8 +11,8 @@ def _env_value(raw, current):
         return int(raw)
     if isinstance(current, float):
         return float(raw)
-    if isinstance(current, tuple):
-        return tuple(float(item.strip()) for item in raw.split(",") if item.strip())
+    if isinstance(current, (list, tuple)):
+        return [float(item.strip()) for item in raw.split(",") if item.strip()]
     return raw.strip()
 
 
@@ -34,7 +34,9 @@ class SeedMetricConfig:
     zmax: float = 1.23
     zres: float = 0.03
     gate_tau: float = 0.35
-    gate_tau_sweep: tuple = (0.5, 0.7, 1.0, 1.5, 2.0)
+    gate_tau_sweep: list[float] = field(
+        default_factory=lambda: [0.5, 0.7, 1.0, 1.5, 2.0]
+    )
     seed_snap: float = 0.10
     warm_seeds: int = 8
     ik_seeds: int = 30

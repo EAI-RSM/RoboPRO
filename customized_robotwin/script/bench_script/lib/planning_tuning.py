@@ -9,7 +9,12 @@ SIDE_WAYPOINT_GAP = 0.24       # clearance from the box EDGE to the waypoint (gr
 REACH_X_LIMIT = 0.5
 
 
-GRASP_CANDIDATE_LIMIT = 4
+# All of the target's contact points, not a subset. A smaller limit combined with the
+# arm-side ranking in _rank_side_grasp_ids discarded half the bottle's 8 (yaw-variant)
+# grasps, and the occluder ring is placed at a random rotation -- so the one gap in the
+# ring could sit on exactly the side that was never tried. Scene-specific, so it is off
+# for the baseline.
+GRASP_CANDIDATE_LIMIT = 8
 
 
 GRASP_LIFT_HEIGHT = 0.15

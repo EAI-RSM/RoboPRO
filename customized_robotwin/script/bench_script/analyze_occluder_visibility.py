@@ -54,6 +54,19 @@ from curobo.types.state import JointState
 from setup_paths import setup_paths
 setup_paths()
 
+# --occluder-asset has to be resolved BEFORE lib.scene_constants is imported below. The task
+# mixins do `from lib.scene_constants import *`, which COPIES each constant into their own
+# module namespace, so rebinding the constants after import would not reach them. Pre-scanning
+# argv here and handing the value to the env var the table reads is the only way a CLI flag can
+# drive it. The flag is still registered with argparse further down so --help documents it and a
+# typo is rejected there; OCCLUDER_ASSET=... in the environment works identically (that is what
+# run_approach_mode_ab.sh inherits), and the flag wins when both are given.
+for _i, _a in enumerate(sys.argv):
+    if _a.startswith("--occluder-asset="):
+        os.environ["OCCLUDER_ASSET"] = _a.split("=", 1)[1]
+    elif _a == "--occluder-asset" and _i + 1 < len(sys.argv):
+        os.environ["OCCLUDER_ASSET"] = sys.argv[_i + 1]
+
 from lib.occluder_ring import (
     draw_ring_config, occluder_ring_xy, parse_count_choices, parse_offset_specs,
 )
@@ -93,6 +106,7 @@ def run(args):
     print(f"seeds from {args.seed_start}, want {args.num_seeds} STABLE  offsets=[{spec_desc}]  "
           f"n_occluders={count_choices}  ring_rotation="
           f"{'random' if args.random_ring_rotation else 'fixed(front)'}  "
+          f"occluder_asset={OCCLUDER_ASSET} ({OCCLUDER_MODEL} id{OCCLUDER_ID})  "
           f"clutter_densities={clutter_densities}  rollout={rollout}  camera={CAMERA}")
     print(f"writing -> {jsonl_path}\n")
 
@@ -214,6 +228,10 @@ def run(args):
                            "num_occluders": int(n_occ) if show else 0,
                            "occluder_radii": ([round(r, 4) for r in radii] if show else []),
                            "occluder_angle0": (round(float(angle0), 4) if show else None),
+                           # WHICH object the occluders are. Stamped because milk_box and
+                           # olive_oil runs are otherwise indistinguishable in records.jsonl,
+                           # and their footprints differ by 2x -- pooling them would be wrong.
+                           "occluder_asset": OCCLUDER_ASSET,
                            "clutter_density": int(cd)}
                     seed_items.append({"off": off, "cd": cd, "show": show,
                                        "n_occ": n_occ, "angle0": angle0, "radii": list(radii),
@@ -362,6 +380,18 @@ def main():
                     help="rotate the whole formation by a random theta in [0, 2pi) per scene, so "
                          "the occluders are not always anchored with one directly in front of the "
                          "target. Off by default (theta=0), which keeps the historical layout.")
+    # Registered so --help documents it and a typo is rejected; the VALUE is consumed by the
+    # pre-argv-scan at the top of this file, because lib.scene_constants must already know the
+    # asset by the time it is imported. Both spellings are handled there.
+    ap.add_argument("--occluder-asset", default=os.environ.get("OCCLUDER_ASSET", "olive_oil"),
+                    choices=["olive_oil", "milk_box"],
+                    help="which object the occluders are made of. olive_oil (default) = the "
+                         "current ring benchmark, 029_olive-oil id3, round ~0.08 footprint. "
+                         "milk_box = the ORIGINAL pre-July scene's obstacle, 038_milk-box id2, "
+                         "carton ~0.11x0.122 -- noticeably bigger. To rebuild that original "
+                         "scene exactly, pair it with --num-occluders 1 --no-random-ring-rotation "
+                         "(and --offsets 0.2 for the historical distance), which places the single "
+                         "box directly in front (-y) of the target as the old hardcoded scene did.")
     ap.add_argument("--clutter-densities", default="0",
                     help="table clutter density/densities to sweep in the measurement scene, "
                          "comma-separated (0=off). e.g. 0,8,15")

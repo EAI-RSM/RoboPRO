@@ -1,9 +1,21 @@
 #!/bin/bash
-# Start the pi05 JAX server and the no-expert occluder-scene rollout client.
+# Start the pi05 JAX server and the no-expert office/occluder rollout client.
 #
-# Usage (from customized_robotwin/):
+# Clean office smoke (from customized_robotwin/):
 #   bash policy/pi05/vla_occluder_rollout.sh \
-#       --num-seeds 1 --num-occluders 1
+#       --scene office --num-seeds 1 --run-type office_smoke
+#
+# The original custom scene remains available with --scene occluder.
+#
+# Long stock-task run (1000 per density, 3000 total, interleaved):
+#   bash policy/pi05/vla_occluder_rollout.sh \
+#       --scene task --task-name put_cup_on_coaster --bench-subdir study \
+#       --base-config bench_demo_study_clean --clutter-densities 6,10,15 \
+#       --rollouts-per-density 1000 --max-steps 600 --report-every 10 \
+#       --run-type association_d6_d10_d15
+#
+# Resume after interruption (the stored config restores every experiment flag):
+#   bash policy/pi05/vla_occluder_rollout.sh --resume-dir /absolute/run/directory
 #
 # Optional environment overrides:
 #   GPU_SPEC=0:0 PI0_STEP=50 bash policy/pi05/vla_occluder_rollout.sh ...

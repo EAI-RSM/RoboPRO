@@ -365,14 +365,47 @@ def build_seed(env, planner, arm, ik, grasp_q, start_q, goal_q, start_xyz, goal_
     return seed, res
 
 
-def save_route_visuals(res: RouteResult, out_dir, seed_label="0", arm="left", cfg=None, gripper_r=0.03):
+def seed_polyline_world(res: RouteResult):
+    """The world path the SEED actually encodes -- route_world with the real endpoints welded on.
+
+    route_world is the widest-path VOXEL CENTRES, but the tensor handed to curobo is
+    [real start_q] + route_qs + [curobo goal_q] (see resample_route_to_seed 2b): the route's own
+    ends are grasp-orientation IK at snapped voxels and differ from the real endpoints by up to
+    cfg.seed_snap (0.1 m default). Plotting route_world alone therefore hides two segments that
+    ARE in the seed -- and "what path is the seed using" is the whole question these figures
+    answer. Resampling to action_horizon only redistributes samples ALONG this polyline, so the
+    waypoint geometry here is the seed's geometry.
+
+    Returns a list of (x, y, z), or None when there is no route."""
+    if res is None or res.route_world is None:
+        return None
+    pts = [tuple(float(c) for c in p) for p in res.route_world]
+    for end, xyz in ((0, res.start_xyz), (-1, res.goal_xyz)):
+        if xyz is None:
+            continue
+        w = tuple(float(c) for c in np.asarray(xyz, float).reshape(-1)[:3])
+        if pts and np.allclose(pts[end], w, atol=1e-6):     # snap was exact -> no weld segment
+            continue
+        pts.insert(0, w) if end == 0 else pts.append(w)
+    return pts
+
+
+def save_route_visuals(res: RouteResult, out_dir, seed_label="0", arm="left", cfg=None, gripper_r=0.03,
+                       start_label="gripper now", goal_label="grasp"):
     """Render the metric's OWN route views for a seeded rollout into out_dir (reused verbatim, no new
     plotting): the 3D climb-over path (_metric_path3d), top-down route coloured by height (_viz_topdown),
     and the side elevation (_viz_side_elevation) -- so you can SEE the exact path this rollout's seed
-    encodes. The two widest-path ends here are (gripper=start, grasp=goal); cm's legend still says
-    "grasp/pad seed" (cosmetic). No-op when there's no route; never raises (visuals must not break a
-    rollout)."""
-    if res is None or res.route_world is None:
+    encodes.
+
+    The drawn path is seed_polyline_world(res), NOT res.route_world: it includes the two weld
+    segments that the route omits. start_label/goal_label name this leg's widest-path ends and are
+    forwarded to cm's legends, which otherwise hardcode the metric's own grasp/pad pair -- the
+    approach leg runs gripper->grasp and the carry leg post-lift->pad, so both would read "grasp/pad"
+    and be indistinguishable side by side. Defaults name the approach leg.
+
+    No-op when there's no route; never raises (visuals must not break a rollout)."""
+    route_w = seed_polyline_world(res)
+    if route_w is None:
         return
     from pathlib import Path as _Path
     from types import SimpleNamespace
@@ -381,16 +414,18 @@ def save_route_visuals(res: RouteResult, out_dir, seed_label="0", arm="left", cf
     cfg = cfg or SeedMetricConfig()
     args = SimpleNamespace(seed=seed_label, arm=arm, res=cfg.res, zres=cfg.zres,
                            occ_shape=cfg.occ_shape, gripper_r=gripper_r, zmin=cfg.zmin, zmax=cfg.zmax)
-    g_xyz, p_xyz = res.start_xyz, res.goal_xyz          # gripper (start) -> grasp (goal)
+    g_xyz, p_xyz = res.start_xyz, res.goal_xyz          # leg start -> leg goal
+    lbl = dict(start_label=start_label, goal_label=goal_label)
     try:
         cm._metric_path3d(out_dir, args, res.foots, res.occ_ps, g_xyz, p_xyz, res.bott_xyz,
-                          res.route_world, res.eps_gated, res.merged, tgt_p=res.tgt_p, ee_xyz=g_xyz)
+                          route_w, res.eps_gated, res.merged, tgt_p=res.tgt_p, ee_xyz=g_xyz, **lbl)
         cm._viz_topdown(out_dir, args, res.XX, res.YY, res.label, res.foots, g_xyz, p_xyz,
-                        res.route_world, tgt_p=res.tgt_p, ee_xyz=g_xyz)
+                        route_w, tgt_p=res.tgt_p, ee_xyz=g_xyz, **lbl)
         cm._viz_side_elevation(out_dir, args, res.XX, res.YY, res.zs, res.label, res.foots,
-                               g_xyz, p_xyz, res.route_world, res.eps_gated, res.merged,
-                               tgt_p=res.tgt_p, ee_xyz=g_xyz)
-        print(f"[seed-viz] wrote 3D/topdown/side route figures -> {out_dir}")
+                               g_xyz, p_xyz, route_w, res.eps_gated, res.merged,
+                               tgt_p=res.tgt_p, ee_xyz=g_xyz, **lbl)
+        print(f"[seed-viz] wrote 3D/topdown/side route figures ({len(route_w)} pts, "
+              f"{start_label}->{goal_label}) -> {out_dir}")
     except Exception as e:  # a plotting failure must never abort the rollout
         print(f"[seed-viz] route visuals failed ({e}); continuing")
 

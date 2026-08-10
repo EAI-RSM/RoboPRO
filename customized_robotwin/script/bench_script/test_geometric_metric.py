@@ -14,6 +14,11 @@ from lib.labeling import BEYOND, FREE
 from lib.metric_config import SeedMetricConfig
 from lib.obstacles import occluder_clearance_3d
 from lib.scene_constants import OCC_HALF_FOOTPRINT
+from lib.widest_path import (
+    reconstruct_clearance_preferred_path_3d,
+    reconstruct_widest_path_3d,
+    widest_path_eps_3d,
+)
 
 
 class FakeActor:
@@ -94,6 +99,7 @@ def test_target_blocks_label_not_edt():
         iy = int(np.argmin(np.abs(ys)))
         ix = int(np.argmin(np.abs(xs)))
         assert volume.label[iz, iy, ix] == BEYOND, "target centre remained traversable"
+        assert gm._label_for(volume, mask_target=False)[iz, iy, ix] == FREE
         no_target_edt = occluder_clearance_3d(
             [], [], XX, YY, zs, cfg.res, cfg.zres,
             OCC_HALF_FOOTPRINT, shape=cfg.occ_shape,
@@ -143,11 +149,40 @@ def test_two_legs_share_one_volume():
     print("  [3] two-leg call builds one volume and returns complete LegResults    PASS")
 
 
+def test_clearance_preferred_route_climbs_without_changing_eps():
+    label = np.full((2, 1, 5), FREE, dtype=np.int8)
+    edt = np.ones(label.shape, dtype=float)
+    edt[1, :, :] = 10.0
+    seed_a, seed_b = (0, 0, 0), (0, 0, 4)
+    eps_star, _bottleneck, merged = widest_path_eps_3d(
+        label, edt, None, seed_a, seed_b, 0.35
+    )
+    assert merged and eps_star == 1.0
+
+    bfs = reconstruct_widest_path_3d(
+        label == FREE, edt, None, seed_a, seed_b, eps_star, 0.35
+    )
+    preferred = reconstruct_clearance_preferred_path_3d(
+        label == FREE, edt, seed_a, seed_b, eps_star, res=0.1, zres=0.1
+    )
+    assert all(voxel[0] == 0 for voxel in bfs)
+    assert any(voxel[0] == 1 for voxel in preferred)
+    assert preferred[0] == seed_a and preferred[-1] == seed_b
+    assert all(edt[voxel] >= eps_star for voxel in preferred)
+
+    eps_after, _bottleneck, merged_after = widest_path_eps_3d(
+        label, edt, None, seed_a, seed_b, 0.35
+    )
+    assert merged_after and eps_after == eps_star
+    print("  [4] preferred representative climbs with eps* unchanged              PASS")
+
+
 def main():
     print("geometric eps* -- CPU checks")
     test_cpu_only_import()
     test_target_blocks_label_not_edt()
     test_two_legs_share_one_volume()
+    test_clearance_preferred_route_climbs_without_changing_eps()
     print("ALL PASS")
 
 

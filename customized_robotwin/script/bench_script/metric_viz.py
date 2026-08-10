@@ -10,8 +10,8 @@ from matplotlib.colors import BoundaryNorm, ListedColormap
 from lib.labeling import BEYOND, FREE, LABEL_NAMES, OBSTACLE
 from lib.obstacles import occluder_slice_polys, surface_distance_to_occluders
 from lib.plotting import (
-    _draw_eps_sphere, _draw_occluder_solids_3d, _equal_aspect_3d, _line_axis,
-    _scene_anchor_markers,
+    _draw_eps_sphere, _draw_ground_plane, _draw_occluder_solids_3d, _equal_aspect_3d,
+    _line_axis, _scene_anchor_markers, _true_aspect_3d,
 )
 from lib.scene_constants import OCC_HALF_FOOTPRINT
 
@@ -127,21 +127,56 @@ def report(args, out_dir, XX, YY, label, edt, box_p, occ_ps, polys, tgt_p, pad_x
 
 
 def _metric_path3d(out_dir, args, foots, occ_ps, g_xyz, p_xyz, bott_xyz, route_w, eps_star, merged,
-                   tgt_p=None, ee_xyz=None):
+                   tgt_p=None, ee_xyz=None, start_label="grasp seed", goal_label="pad seed",
+                   route_label="gated widest path", metric_label="eps* (gated)",
+                   title_context=None, stem=None, frame_xy=None, ground_z=None, view=None,
+                   tool_link_xyz=None, dest_xyz=None, target_label="target bottle (spawn)",
+                   geom_label="occluder"):
     """3D view of the gated climb-over route through the stack: occluder solids, the route, the scene
     anchors (target bottle spawn + the gripper's current pose), and the eps* sphere sitting on the
-    bottleneck."""
-    fig = plt.figure(figsize=(9.5, 8))
+    bottleneck.
+
+    start_label/goal_label name the two widest-path ends. They default to the metric's own
+    grasp->pad pair so this tool's output is unchanged; the seed builder overrides them because
+    its ends are different (gripper->grasp on the approach leg, post-lift->pad on the carry leg)
+    and two figures both captioned "grasp/pad" are unreadable side by side.
+
+    Every argument from frame_xy on is opt-in framing/annotation for a tabletop scene, and each
+    defaults to the historical behaviour so the ring-benchmark callers are byte-identical:
+
+      frame_xy/ground_z  fix the frame to the support surface instead of the data's own bounding
+                         cube (see _true_aspect_3d) and draw that surface, so the scene stops
+                         floating in empty space. Both are needed; either alone is ignored.
+      view               explicit (elev, azim); the matplotlib default is a poor angle for a wide
+                         shallow tabletop.
+      tool_link_xyz      the END-EFFECTOR-LINK waypoint that pairs with tgt_p. The canonical
+                         waypoints carry a fixed tool offset, so the leg endpoint sits well above
+                         the target and the path looks like it misses; the dotted connector says
+                         that gap is the tool offset, not an error.
+      dest_xyz           where the object is going (a second scene anchor, like tgt_p).
+      target_label       tgt_p's legend entry -- the target is not a bottle in every task.
+      geom_label         what the obstacle set is called in the title."""
+    framed = frame_xy is not None and ground_z is not None
+    fig = plt.figure(figsize=(10, 7.5) if framed else (9.5, 8))
     ax = fig.add_subplot(111, projection="3d")
+    if framed:                              # lowest surface first: keeps the painter's order right
+        _draw_ground_plane(ax, frame_xy[0], frame_xy[1], float(ground_z))
     _draw_occluder_solids_3d(ax, foots, args.occ_shape)
     if route_w and len(route_w) > 1:
         rx, ry, rz = zip(*route_w)
-        ax.plot(rx, ry, rz, "-", color="gold", lw=2.5, label="gated widest path")
-    ax.scatter(*g_xyz, c="cyan", marker="o", s=80, label="grasp seed")
-    ax.scatter(*p_xyz, c="magenta", marker="s", s=70, label="pad seed")
+        ax.plot(rx, ry, rz, "-", color="gold", lw=2.5, label=route_label)
+    ax.scatter(*g_xyz, c="cyan", marker="o", s=80, label=start_label)
+    ax.scatter(*p_xyz, c="magenta", marker="s", s=70, label=goal_label)
     if tgt_p is not None:
         ax.scatter(tgt_p[0], tgt_p[1], tgt_p[2], c="blue", marker="*", s=200,
-                   label="target bottle (spawn)")
+                   label=target_label)
+        if tool_link_xyz is not None:
+            ax.plot([tgt_p[0], tool_link_xyz[0]], [tgt_p[1], tool_link_xyz[1]],
+                    [tgt_p[2], tool_link_xyz[2]], ":", color="0.35", lw=1.2,
+                    label="tool offset (EE link -> target)")
+    if dest_xyz is not None:
+        ax.scatter(dest_xyz[0], dest_xyz[1], dest_xyz[2], c="limegreen", marker="P", s=110,
+                   edgecolors="k", linewidths=0.5, label="destination (spawn)")
     if ee_xyz is not None:
         ax.scatter(ee_xyz[0], ee_xyz[1], ee_xyz[2], c="darkorange", marker="^", s=110,
                    edgecolors="k", linewidths=0.5, label=f"gripper now ({args.arm})")
@@ -164,7 +199,19 @@ def _metric_path3d(out_dir, args, foots, occ_ps, g_xyz, p_xyz, bott_xyz, route_w
         corners += [np.asarray(route_w).min(axis=0), np.asarray(route_w).max(axis=0)]
     if drew_sphere:
         corners += [np.asarray(bott_xyz) - eps_star, np.asarray(bott_xyz) + eps_star]
-    _equal_aspect_3d(ax, corners)
+    if dest_xyz is not None:
+        corners.append(np.asarray(dest_xyz))
+    # Framed mode pins x/y to the support surface so every figure shares one frame, and only lets
+    # the z ceiling follow the data; otherwise fall back to the data's own bounding cube.
+    if framed:
+        zs = [float(np.asarray(c)[2]) for c in corners if c is not None]
+        lo = (frame_xy[0][0], frame_xy[1][0], float(ground_z) - 0.01)
+        hi = (frame_xy[0][1], frame_xy[1][1], max(max(zs) + 0.02, float(ground_z) + 0.20))
+        framed = _true_aspect_3d(ax, lo, hi)
+    if not framed:
+        _equal_aspect_3d(ax, corners)
+    if view is not None:
+        ax.view_init(elev=view[0], azim=view[1])
 
     eps_txt = "inf" if (merged and np.isinf(eps_star)) else (f"{eps_star:.3f} m" if merged else "INACCESSIBLE")
     sub = ""
@@ -172,16 +219,22 @@ def _metric_path3d(out_dir, args, foots, occ_ps, g_xyz, p_xyz, bott_xyz, route_w
         sub = (f"\ntrue mesh-surface distance at the bottleneck = {exact:.3f} m  "
                f"(EDT - true = {float(eps_star) - exact:+.3f} m, grid bias)")
     ax.set_xlabel("x (m)"); ax.set_ylabel("y (m)"); ax.set_zlabel("z (m)")
-    ax.set_title(f"2.5D metric route  |  seed {args.seed}, arm {args.arm}, occluder geom={args.occ_shape}"
-                 f"\neps* (gated) = {eps_txt}{sub}", fontsize=10)
+    context = "" if title_context is None else f"\n{title_context}"
+    ax.set_title(f"2.5D metric route  |  seed {args.seed}, arm {args.arm}, "
+                 f"{geom_label} geom={args.occ_shape}"
+                 f"\n{metric_label} = {eps_txt}{sub}{context}", fontsize=10)
     ax.legend(loc="upper left", fontsize=8)
-    stem = f"metric_path3d_seed{args.seed}_{args.arm}"
-    fig.savefig(out_dir / f"{stem}.png", dpi=120, bbox_inches="tight"); plt.close(fig)
+    stem = stem or f"metric_path3d_seed{args.seed}_{args.arm}"
+    # A wide, flat framed box pushes the z-axis label outside matplotlib's tight bbox for 3D axes.
+    # Extra padding keeps it in frame; 0.1 is the matplotlib default, so unframed output is unchanged.
+    fig.savefig(out_dir / f"{stem}.png", dpi=120, bbox_inches="tight",
+                pad_inches=0.3 if framed else 0.1)
+    plt.close(fig)
     return exact
 
 
 def _viz_side_elevation(out_dir, args, XX, YY, zs, label, foots, g_xyz, p_xyz, route_w, eps_star,
-                        merged, tgt_p=None, ee_xyz=None):
+                        merged, tgt_p=None, ee_xyz=None, start_label="grasp", goal_label="pad"):
     """SIDE ELEVATION: the 3D scene projected onto the vertical plane through grasp->pad. Background =
     labels sampled along that line at every height; the bottle is a red box (footprint projected onto
     the line x its z-range); the route arcs up and over. The most legible 'is it climbing over?' view."""
@@ -226,9 +279,9 @@ def _viz_side_elevation(out_dir, args, XX, YY, zs, label, foots, g_xyz, p_xyz, r
     if route_w and len(route_w) > 1:
         rs = [float((np.asarray(r[:2]) - p0) @ u) for r in route_w]
         ax.plot(rs, [r[2] for r in route_w], "-", color="gold", lw=2.5, label="route")
-    ax.plot(0, g_xyz[2], "o", color="cyan", ms=11, mec="k", label="grasp")
-    ax.plot(L, p_xyz[2], "s", color="magenta", ms=10, mec="k", label="pad")
-    # scene anchors, projected onto the same grasp->pad axis
+    ax.plot(0, g_xyz[2], "o", color="cyan", ms=11, mec="k", label=start_label)
+    ax.plot(L, p_xyz[2], "s", color="magenta", ms=10, mec="k", label=goal_label)
+    # scene anchors, projected onto the same start->goal axis
     if tgt_p is not None:
         ax.plot(float((np.asarray(tgt_p[:2]) - p0) @ u), float(tgt_p[2]), "*", color="blue", ms=17,
                 mec="k", mew=0.6, label="target bottle (spawn)")
@@ -240,8 +293,9 @@ def _viz_side_elevation(out_dir, args, XX, YY, zs, label, foots, g_xyz, p_xyz, r
     h, _ = ax.get_legend_handles_labels()
     ax.legend(handles=proxies + h, loc="upper right", fontsize=8)
     eps_txt = "inf" if (merged and np.isinf(eps_star)) else (f"{eps_star:.3f}m" if merged else "INACCESSIBLE")
-    ax.set_xlabel("arc distance grasp->pad (m)"); ax.set_ylabel("z (m)")
-    ax.set_title(f"Side elevation (profile through grasp->pad)  |  seed {args.seed}, arm {args.arm}"
+    _pair = f"{start_label}->{goal_label}"
+    ax.set_xlabel(f"arc distance {_pair} (m)"); ax.set_ylabel("z (m)")
+    ax.set_title(f"Side elevation (profile through {_pair})  |  seed {args.seed}, arm {args.arm}"
                  f"   eps*={eps_txt}")
     stem = f"metric_side_seed{args.seed}_{args.arm}"
     fig.tight_layout(); fig.savefig(out_dir / f"{stem}.png", dpi=120); plt.close(fig)
@@ -278,7 +332,8 @@ def _viz_clearance_profile(out_dir, args, route_w, route_clear, eps_star, merged
     print(f"[viz] wrote {stem}.png")
 
 
-def _viz_topdown(out_dir, args, XX, YY, label, foots, g_xyz, p_xyz, route_w, tgt_p=None, ee_xyz=None):
+def _viz_topdown(out_dir, args, XX, YY, label, foots, g_xyz, p_xyz, route_w, tgt_p=None, ee_xyz=None,
+                 start_label="grasp", goal_label="pad"):
     """TOP-DOWN plan: reachable-at-some-height footprint (green) + occluder outline + the route's (x,y)
     coloured by height z. Shows the sideways detour and how high it climbs, in one plan view."""
     any_free = (label == FREE).any(axis=0)
@@ -295,8 +350,8 @@ def _viz_topdown(out_dir, args, XX, YY, label, foots, g_xyz, p_xyz, route_w, tgt
         P = np.asarray(route_w, float)
         sc = ax.scatter(P[:, 0], P[:, 1], c=P[:, 2], cmap="plasma", s=16)
         fig.colorbar(sc, ax=ax, label="route height z (m)")
-    ax.plot(g_xyz[0], g_xyz[1], "o", color="cyan", ms=12, mec="k", label="grasp")
-    ax.plot(p_xyz[0], p_xyz[1], "s", color="magenta", ms=10, mec="k", label="pad")
+    ax.plot(g_xyz[0], g_xyz[1], "o", color="cyan", ms=12, mec="k", label=start_label)
+    ax.plot(p_xyz[0], p_xyz[1], "s", color="magenta", ms=10, mec="k", label=goal_label)
     _scene_anchor_markers(ax, tgt_p, ee_xyz, args.arm)
     ax.legend(loc="upper right", fontsize=8)
     ax.set_xlabel("x (m)"); ax.set_ylabel("y (m)")

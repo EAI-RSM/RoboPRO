@@ -30,7 +30,15 @@ Spec: action_dim 32 (14 physical, padded), horizon 50 @ 25 Hz, output [50,14] AB
 targets; state float32[14] absolute joints, Aloha convention; cams `cam_high` / `cam_left_wrist` /
 `cam_right_wrist` at 224²; norm stats at `assets/roboreal_lerobot/norm_stats.json` (REQUIRED).
 
-Port status — **code complete and standalone inference verified.** Done and verified: `.venv` built via
+**Training-task membership (confirmed 2026-07-31):** the user reports that the RoboPRO team
+confirmed `put_cup_on_coaster` was included in the `roboreal_lerobot` data used to train
+`mzxuan/robopro_jax_30000`. Local/public artifacts are consistent but not independently decisive:
+the checkpoint card says it was trained on 80 tasks, and this repository's 80-task benchmark list
+contains `put_cup_on_coaster`, while the checkpoint repository does not ship an explicit task
+inventory. Attribute the definitive membership claim to the team confirmation via the user.
+
+Port status — **working end to end on the office control scene; occluder scene is the open smoke.**
+Done and verified: `.venv` built via
 `uv sync --python 3.11` (must pin 3.11; miniconda's 3.13 has no open3d wheel), JAX 0.5.0 on the
 RTX 4080; the JAX half downloaded (~15.6 GB) and laid out at
 `checkpoints/pi05_robopro_top_cam_jax/robopro/30000/`; `TrainConfig(name="pi05_robopro_top_cam_jax")`
@@ -41,11 +49,21 @@ state is 14-dim absolute same order; `left_camera`/`right_camera` ARE the wrist 
 `encode_obs` switched `head_camera` → **`countertop_camera`** (the model trained on countertop, and
 they are DISTINCT cams in this env).
 
-**Standalone model load + inference passed on 2026-07-30.** With no SAPIEN process, a synthetic
-observation (three uint8 240x320 RGB images + float32[14] state) returned a finite float64 action
-array of shape `[50,14]`. The server alone peaked at **8,454 MiB VRAM** with
-`XLA_PYTHON_CLIENT_PREALLOCATE=false` and `XLA_PYTHON_CLIENT_MEM_FRACTION=0.85`; use 0.45 when it
-must share the 16 GiB RTX 4080 with SAPIEN.
+**Standalone model load + inference passed 2026-07-30.** Synthetic obs (three uint8 240x320 RGB +
+float32[14] state), no SAPIEN in the process → finite `[50,14]`. Server alone peaks at
+**8,454 MiB**.
+
+**`XLA_PYTHON_CLIENT_MEM_FRACTION` is a CEILING, not just a preallocation size — it binds even with
+`PREALLOCATE=false`.** Measured: 0.45 OOMs during checkpoint restore (0.45 x 16 GiB = 7.2 < 8.45),
+**0.55 works** (8.8 > 8.45) and is what the launcher sets. Do not assume `PREALLOCATE=false` makes
+the fraction inert — it does not. This is the single number to touch if the server won't load.
+
+**ONE GPU IS ENOUGH, and always was.** The two-*process* split exists because the envs conflict
+(pi05 needs a uv `.venv` on py3.11 with jax/openpi; the sim needs the robopro conda env with
+SAPIEN/curobo/torch — they cannot share an interpreter). It is NOT about GPU count:
+`eval_double_env.sh` has always parsed `GPU_SPEC` as `server:client` and accepted `0:0`. Outside
+advice that "VLA rollouts need 2 GPUs" is VRAM headroom sizing for the *full* eval pipeline, where
+the curobo expert gate competes with the model. A no-expert rollout removes that competitor.
 
 **The old eval smoke path is BLOCKED by the expert feasibility gate, not by the port.** Env boots,
 SAPIEN inits, and the client handshakes, but `eval_policy_client.py` crashes before policy inference
@@ -60,26 +78,34 @@ context (torch + jax co-resident) and it spun 169k identical errors forever.
 **`GPU_SPEC` MUST be `0:0`** (single 16 GB card). The VLA occluder rollout driver must bypass
 `play_once`; do not repair the expert gate as part of that validation path.
 
-**No-expert occluder driver added 2026-07-30.** `script/bench_script/vla_rollout.py` drives pi05
-directly, writes timestamped `records.jsonl` / per-episode logs / success-fail videos /
-`timings.json`, and continues after an episode exception. `policy/pi05/vla_occluder_rollout.sh`
-starts the JAX server and client on `GPU_SPEC=0:0`. The policy cfg opts out of constructing the two
-unused CuRobo planners via `build_planner=False`; every existing config leaves the default on.
-`XLA_PYTHON_CLIENT_MEM_FRACTION=0.45` is **too small** (checkpoint restore OOM allocating 2.25 GiB);
-**0.55 loads and returns finite `[50,14]`**, and is the launcher setting.
+**The no-expert driver.** `script/bench_script/vla_rollout.py` (+ launcher
+`policy/pi05/vla_occluder_rollout.sh`, `GPU_SPEC=0:0` default) drives pi05 with no `play_once`.
+`--scene office|occluder`: **office is a staging CONTROL** (stock `047_mouse` task, `DR_CLEAN`,
+canonical instruction) used to prove the loop before trusting the custom scene — not a replacement
+for it.
 
-The first user-run SAPIEN smoke reached the loaded model server but every scene failed during
-initial gripper opening: `together_open_gripper` calls `Robot.plan_grippers`, even though that
-"planner" method is only a 200-step `np.linspace`. Planner-free mode must retain that interpolation
-locally; otherwise `left_planner=None` raises before actors/cameras/policy execution. Fixed in
-`e4a2624`. The same fix makes non-`UnStableError` scene-build exceptions fatal after one attempt,
-instead of cycling through the 70-seed instability allowance.
+**`build_planner=False` (policy cfg only; every other config keeps the default) cost two bugs, both
+because things named "planner" are not planners.** Worth remembering as a class:
+1. `together_open_gripper` → `Robot.plan_grippers`, which is **only a 200-step `np.linspace`**. With
+   no planner it raised before actors/cameras/policy ever ran. Planner-free mode keeps that
+   interpolation locally.
+2. **The silent one.** `Bench_base_task.take_action(qpos)` always tried
+   `left/right_mplib_planner.TOPP`. Both failed → both `topp_*_flag` false → the loop sent *gripper*
+   targets but **no arm targets**. The rollout completed, wrote a valid MP4, and reported no error
+   while the arms never moved. Planner-free qpos now uses a 50-step linear interpolation to the
+   policy target; the TOPP branch is untouched. **A video that renders is not proof the robot
+   acted** — check for arm motion explicitly.
 
-Two validation-video gotchas are intentional/minimal: the custom occluder task's target is
-`001_bottle` while the required `put_mouse_on_pad` instruction bank says "mouse" (a semantic OOD
-mismatch), and `Bench_base_task.take_action` records the first available demo/countertop/head
-camera, so office videos use `demo_camera` even though pi05 observes `countertop_camera`. Do not
-silently "fix" either while validating basic end-to-end execution.
+**Instruction must name the scene's actual objects.** `--scene occluder` defaults to "Put the
+non-olive oil bottle onto the mouse pad. The olive oil bottles are obstacles, do not touch them."
+matching `001_bottle` ID 9 target / gray pad / `029_olive-oil` ID 3 ring. Consequently the driver
+defaults `--no-occluder-prob` to **0.0** — the default scene must not omit obstacles its default
+instruction names. (Office scenes read from `bench_task_config/instruction_bank.json`, which has 10
+`put_mouse_on_pad` phrasings; `put_mouse_on_pad.play_once` has its `self.info["info"]` block
+commented out, so the expert-derived instruction path yields nothing anyway.)
+
+Policy cfg pins `eval_video_camera="countertop_camera"` (what pi05 observes); evaluations that don't
+request one keep the legacy demo/countertop/head order.
 
 **How the custom metric connects.** The occluder/clearance work is OFFLINE scene analysis with no
 policy in the loop, so: using clearance/visibility as a **stratifier** of VLA success is trivial
