@@ -17,9 +17,9 @@ Without `ROBOTWIN_BENCH_TASK=bench` the system silently uses upstream RoboTwin c
 benchmark configs. Scripts in `scripts/validation/` expect invocation from `customized_robotwin/`
 with paths like `../scripts/validation/foo.sh`.
 
-*Exception:* `analyze_natural_visibility.py` and `analyze_occluder_visibility.py` self-bootstrap —
-`setup_paths()` derives ROBOTWIN_ROOT/BENCH_ROOT from the file location if unset, and both
-`setdefault` ROBOTWIN_BENCH_TASK=bench. Every other script still needs the exports.
+*Exception:* `analyze_occluder_visibility.py` self-bootstraps — `setup_paths()` derives
+ROBOTWIN_ROOT/BENCH_ROOT from the file location if unset, and the script uses `setdefault` for
+ROBOTWIN_BENCH_TASK=bench. Every other script still needs the exports.
 
 **Git remote:** `git@github.com:EAI-RSM/RoboPRO.git`. The local clone sometimes shows
 `HaccerKat/EAI-RSM/RoboPRO`, which is invalid (three path segments) and fails push with "not a
