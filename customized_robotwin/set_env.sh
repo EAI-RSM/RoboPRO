@@ -9,5 +9,8 @@ export WORKSPACE_ROOT="$(cd "$ROBOTWIN_ROOT/.." && pwd)"
 # bench root
 export BENCH_ROOT="$WORKSPACE_ROOT/benchmark"
 
+# Make the tracked graph runtime importable from customized_robotwin/.
+export PYTHONPATH="$WORKSPACE_ROOT${PYTHONPATH:+:$PYTHONPATH}"
+
 echo "BENCH_ROOT=$BENCH_ROOT"
 echo "ROBOTWIN_ROOT=$ROBOTWIN_ROOT"

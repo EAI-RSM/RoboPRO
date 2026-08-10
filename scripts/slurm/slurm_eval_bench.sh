@@ -19,10 +19,10 @@ if [[ -z "${SLURM_JOB_ID:-}" ]]; then
 fi
 
 TASK_NAME="${1:-put_sauce_can_in_basket}"
-TASK_CONFIG="${2:-relation_validation_d14}"
-TRAIN_CONFIG="${3:-pi05_aloha_full_base}"
-MODEL_NAME="${4:-pi05_base}"
-CKPT_ID="${5:-0}"
+TASK_CONFIG="${2:-bench_demo_kitchenl_clean}"
+TRAIN_CONFIG="${3:-pi05_robopro_top_cam_jax}"
+MODEL_NAME="${4:-robopro_jax}"
+CKPT_ID="${5:-30000}"
 SEED="${6:-0}"
 TEST_NUM="${7:-1}"
 GRAPH_INPUT_CONDITION="${8:-visual_only}"

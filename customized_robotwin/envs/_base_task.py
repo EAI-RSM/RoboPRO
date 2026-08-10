@@ -3308,6 +3308,39 @@ class Base_Task(gym.Env):
                 sid = _scene_id(obj)
                 if sid is not None:
                     roles[f"{key}_id"] = sid
+
+        # Some tasks expose placement destinations as des_obj_1, des_obj_2,
+        # ... rather than through singular des_obj. Tasks with a differently
+        # named destination may opt in with benchmark_destination_attrs. Do
+        # not infer roles from generic attribute names (for example,
+        # basket_right can be a source in pick-from-basket tasks).
+        destination_ids = set()
+        destination_names = set()
+        explicit_attrs = getattr(self, "benchmark_destination_attrs", ()) or ()
+        if isinstance(explicit_attrs, str):
+            explicit_attrs = (explicit_attrs,)
+        invalid_attrs = [attr for attr in explicit_attrs if not isinstance(attr, str)]
+        if invalid_attrs:
+            raise TypeError("benchmark_destination_attrs must contain attribute names")
+        destination_attrs = {
+            attr for attr in vars(self) if attr.startswith("des_obj")
+        }
+        destination_attrs.update(explicit_attrs)
+        for attr in sorted(destination_attrs):
+            obj = getattr(self, attr, None)
+            if obj is None:
+                continue
+            sid = _scene_id(obj)
+            if sid is not None:
+                destination_ids.add(sid)
+            try:
+                destination_names.add(obj.get_name())
+            except Exception:
+                pass
+        if destination_ids:
+            roles["destination_ids"] = sorted(destination_ids)
+            if len(destination_ids) == 1:
+                roles["destination_id"] = next(iter(destination_ids))
         if hasattr(self, "_get_target_object_names"):
             try:
                 roles["target_object_names"] = sorted(self._get_target_object_names())
@@ -3319,7 +3352,8 @@ class Base_Task(gym.Env):
         # intended-contact bodies (grasp_actor-marked: grasp targets, drawer /
         # appliance handles + articulation links). Both are populated by episode
         # end, when the collectors call this.
-        dests = getattr(self, "destination_object_names", None)
+        dests = set(getattr(self, "destination_object_names", None) or ())
+        dests.update(destination_names)
         if dests:
             roles["destination_object_names"] = sorted(dests)
         intended = getattr(self, "_intended_contact_names", None)

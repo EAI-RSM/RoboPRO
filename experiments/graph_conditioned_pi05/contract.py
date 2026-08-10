@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
+from typing import Iterable
 
 
 class InputCondition(str, Enum):
@@ -61,6 +62,7 @@ class GraphFact:
     source: str
     destination: str
     qualifier: str = ""
+    required_aliases: tuple[str, ...] = ()
 
     def key(self) -> tuple[str, str, str, str]:
         return self.relation, self.source, self.destination, self.qualifier
@@ -72,7 +74,7 @@ class GraphNode:
 
     `position` is the node's world-frame 3D center, rounded to 1 decimal
     place. `bbox_size` is the node's axis-aligned world-frame extent
-    (upper - lower corner, rounded to 1 decimal place); it is None for node
+    (upper - lower corner, rounded to 2 decimal places); it is None for node
     kinds where no collision geometry is available (e.g. end effectors).
     Declaring these lets the model distinguish two same-name objects (e.g.
     two "bowl" instances from a cluttered-table distractor draw) by where
@@ -85,6 +87,30 @@ class GraphNode:
     kind: str
     position: tuple[float, float, float]
     bbox_size: tuple[float, float, float] | None = None
+    alias: str = ""
+
+
+def stable_aliases(
+    object_ids: Iterable[int],
+    is_target: Iterable[bool],
+    destination_ids: Iterable[int] = (),
+) -> dict[int, str]:
+    """Assign deterministic role-aware aliases from the complete catalog."""
+    ids = [int(value) for value in object_ids]
+    targets = {object_id for object_id, flag in zip(ids, is_target) if flag}
+    destinations = {int(value) for value in destination_ids} - targets
+    aliases: dict[int, str] = {}
+    if -2 in ids:
+        aliases[-2] = "L"
+    if -3 in ids:
+        aliases[-3] = "R"
+    for prefix, members in (("T", targets), ("D", destinations)):
+        for index, object_id in enumerate(sorted(members), 1):
+            aliases[object_id] = f"{prefix}{index}"
+    others = sorted(object_id for object_id in ids if object_id not in aliases)
+    for index, object_id in enumerate(others, 1):
+        aliases[object_id] = f"O{index}"
+    return aliases
 
 
 @dataclass(frozen=True)

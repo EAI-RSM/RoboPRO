@@ -648,6 +648,11 @@ def eval_policy(task_name,
         # "Prompt is required" on the first get_action.
         model.reset_model()
         TASK_ENV._graph_conditioning_stats = []
+        TASK_ENV._graph_prompt_phase = "grasp"
+        TASK_ENV._graph_active_prompt = None
+        TASK_ENV._graph_held_arm = None
+        TASK_ENV._graph_held_loss_count = 0
+        TASK_ENV._graph_chunk_interrupts = 0
         while TASK_ENV.take_action_cnt < TASK_ENV.step_lim:
             observation = TASK_ENV.get_obs()
             eval_func(TASK_ENV, model, observation)
@@ -693,6 +698,13 @@ def eval_policy(task_name,
                     "destination_seed_available": bool(any(
                         item["destination_seed_available"] for item in graph_stats
                     )),
+                    "prompt_phases": [
+                        item["prompt_phase"] for item in graph_stats
+                    ],
+                    "prompt_update_count": int(sum(
+                        item["prompt_updated"] for item in graph_stats
+                    )),
+                    "chunk_interrupt_count": int(TASK_ENV._graph_chunk_interrupts),
                 }
             if collision_metrics_active:
                 col = TASK_ENV.get_collision_metrics()

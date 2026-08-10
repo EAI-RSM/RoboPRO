@@ -74,13 +74,24 @@ benchmark/bench_script/collision_test/
 benchmark/test_output/
 presentation_material/
 
-# External policy implementation and local model artifacts.
-/customized_robotwin/policy/pi05/
+# External pi05/OpenPI implementation and local model artifacts. Keep the
+# vendor tree ignored, but track the small RoboPRO-owned runtime adapters.
+/customized_robotwin/policy/pi05/*
+!/customized_robotwin/policy/pi05/__init__.py
+!/customized_robotwin/policy/pi05/deploy_policy.py
+!/customized_robotwin/policy/pi05/deploy_policy.yml
+!/customized_robotwin/policy/pi05/pi_model.py
+!/customized_robotwin/policy/pi05/eval.sh
+!/customized_robotwin/policy/pi05/eval_double_env.sh
+!/customized_robotwin/policy/pi05/collect_rollout.sh
 /customized_robotwin/policy/robopro_jax_30000/
 /policy/
 
-# Local experiment workspaces. Reproducible source may be explicitly tracked.
-experiments/
+# Local experiment workspaces. Track the reproducible graph-conditioned pi05
+# runtime, but keep other workspaces and generated evaluation runs ignored.
+/experiments/*
+!/experiments/graph_conditioned_pi05/
+/experiments/graph_conditioned_pi05/evaluation/runs/
 
 tmp/
 usecase_roadmap.tex

@@ -95,33 +95,42 @@ def format_fact(fact: GraphFact) -> str:
     return DEFAULT_GRAPH_RENDERER.render_fact(fact)
 
 
-def _format_number(value: float) -> str:
-    rounded = round(float(value), 1)
+def _format_number(value: float, decimals: int = 1) -> str:
+    rounded = round(float(value), decimals)
     if rounded == 0:
         rounded = 0.0  # normalize away "-0.0"
-    return f"{rounded:.1f}"
+    return f"{rounded:.{decimals}f}"
 
 
-def _format_vector(values: Sequence[float]) -> str:
-    return "(" + ", ".join(_format_number(v) for v in values) + ")"
+def _format_vector(values: Sequence[float], decimals: int = 1) -> str:
+    return "(" + ", ".join(_format_number(v, decimals) for v in values) + ")"
 
 
 def format_node(node: GraphNode) -> str:
     """Render a node's unique identifier and grounding attributes.
 
-    Position and bounding-box size are reported at 1-decimal precision so a
-    model that has never seen a catalog ID before still gets a concrete,
-    if coarse, spatial handle for telling apart two same-named objects.
+    Position is reported at 1-decimal precision. Bounding-box size uses 2
+    decimals so centimeter-scale objects do not acquire zero-width dimensions.
+    Together these give a model that has never seen a catalog ID a concrete
+    spatial handle for telling apart two same-named objects.
     """
+    # Goal-role nodes use task-relative geometry supplied by the mandatory
+    # Goal section. Repeating their absolute world positions is both less
+    # actionable and expensive in the small pi0.5 prompt budget.
+    role_node = node.alias.startswith(("T", "D"))
     position = _format_vector(node.position)
     if node.bbox_size is not None:
-        size = _format_vector(node.bbox_size)
-        return f"{node.label} is at {position} with bounding-box size {size}."
-    return f"{node.label} is at {position}."
+        size = _format_vector(node.bbox_size, decimals=2)
+        if role_node:
+            return f"{node.alias} = {node.label}, size {size}."
+        return f"{node.alias or node.label} = {node.label} at {position}, size {size}."
+    if role_node:
+        return f"{node.alias} = {node.label}."
+    return f"{node.alias or node.label} = {node.label} at {position}."
 
 
 NODE_HEADER = "Nodes:"
-FACT_HEADER = "Scene graph:"
+FACT_HEADER = "Relations:"
 
 # Ranks are exponentially spaced (see `_rank_value`) so that within the
 # "maximize total information under budget" objective, a single
@@ -149,14 +158,28 @@ class PackedItem:
     rank: int
     section: str  # "node" or "fact"
     origin: object = None
+    provides: str = ""
+    requires: tuple[str, ...] = ()
+    mandatory: bool = False
 
 
 def node_pack_item(node: GraphNode) -> PackedItem:
-    return PackedItem(format_node(node), NODE_RANK, "node", origin=node)
+    # Target and destination seeds define the task grounding. They must not
+    # disappear merely because no relation involving them is true in the
+    # current frame (a destination commonly has no target relation before the
+    # object is placed). Other nodes remain dependency-selected by facts.
+    mandatory = node.alias.startswith(("T", "D"))
+    return PackedItem(
+        format_node(node), NODE_RANK, "node", origin=node,
+        provides=node.alias, mandatory=mandatory,
+    )
 
 
 def fact_pack_item(fact: GraphFact) -> PackedItem:
-    return PackedItem(format_fact(fact), relation_rank(fact.priority), "fact", origin=fact)
+    return PackedItem(
+        format_fact(fact), relation_rank(fact.priority), "fact", origin=fact,
+        requires=fact.required_aliases,
+    )
 
 
 def _knapsack_select(weights: Sequence[int], values: Sequence[int], capacity: int) -> list[int]:
@@ -194,10 +217,15 @@ class PackedGraph:
 
 def _render(selected: Sequence[PackedItem]) -> str:
     node_texts = [item.text for item in selected if item.section == "node"]
+    goal_texts = [item.text for item in selected if item.section == "goal"]
     fact_texts = [item.text for item in selected if item.section == "fact"]
     sections = []
     if node_texts:
         sections.append(NODE_HEADER + " " + " ".join(node_texts))
+    if goal_texts:
+        # Goal items are already imperative natural-language sentences. A
+        # structural header adds distribution shift without useful grounding.
+        sections.append(" ".join(goal_texts))
     if fact_texts:
         sections.append(FACT_HEADER + " " + " ".join(fact_texts))
     return " ".join(sections)
@@ -221,20 +249,81 @@ def pack_items(
     if not items:
         return PackedGraph("", 0, (), 0)
 
-    order = sorted(range(len(items)), key=lambda i: (-items[i].rank, items[i].text))
-    weights = [max(token_counter(items[i].text), 1) for i in order]
-    values = [_rank_value(items[i].rank) for i in order]
+    node_by_alias = {
+        item.provides: index for index, item in enumerate(items)
+        if item.section == "node" and item.provides
+    }
+    facts = sorted(
+        (index for index, item in enumerate(items) if item.section == "fact"),
+        key=lambda i: (-items[i].rank, items[i].text),
+    )
+    # One-hop retrieved graphs are small. Keeping exact candidate closures
+    # avoids tokenizer separator approximations and charges shared nodes once.
+    # Keying by dependency closure and exact token count prunes equivalent
+    # fact subsets, bounding the search by aliases x budget rather than 2^facts.
+    mandatory_indices = tuple(
+        index for index, item in enumerate(items) if item.mandatory
+    )
+    for index in mandatory_indices:
+        missing = [
+            alias for alias in items[index].requires if alias not in node_by_alias
+        ]
+        if missing:
+            raise ValueError(
+                f"mandatory graph item requires undeclared aliases: {missing}"
+            )
+    mandatory_aliases = frozenset(
+        alias
+        for index in mandatory_indices
+        for alias in ((items[index].provides,) + items[index].requires)
+        if alias
+    )
+    mandatory_text = _render([items[index] for index in mandatory_indices])
+    mandatory_count = token_counter(mandatory_text) if mandatory_text else 0
+    if mandatory_count > token_budget:
+        raise ValueError(
+            "graph token budget is too small for mandatory target/destination "
+            f"context: need {mandatory_count}, have {token_budget}"
+        )
 
-    header_cost = 0
-    if any(items[i].section == "node" for i in order):
-        header_cost += token_counter(NODE_HEADER)
-    if any(items[i].section == "fact" for i in order):
-        header_cost += token_counter(FACT_HEADER)
-    capacity = max(token_budget - header_cost, 0)
-
-    chosen = _knapsack_select(weights, values, capacity)
-    chosen_original = sorted(order[i] for i in chosen)
-    selected = tuple(items[i] for i in chosen_original)
+    candidates: dict[
+        tuple[frozenset[str], int], tuple[int, tuple[int, ...], tuple[int, ...]]
+    ] = {
+        (mandatory_aliases, mandatory_count): (0, (), mandatory_indices)
+    }
+    for fact_index in facts:
+        updated = dict(candidates)
+        for (old_required, _), (value, chosen_facts, _) in candidates.items():
+            required = old_required | frozenset(items[fact_index].requires)
+            if any(alias not in node_by_alias for alias in required):
+                continue
+            chosen = tuple(sorted((*chosen_facts, fact_index)))
+            indices = tuple(
+                sorted(
+                    set(mandatory_indices)
+                    | set(chosen)
+                    | {node_by_alias[a] for a in required}
+                )
+            )
+            rendered = _render([items[index] for index in indices])
+            count = token_counter(rendered)
+            if count > token_budget:
+                continue
+            candidate = (
+                value + _rank_value(items[fact_index].rank), chosen, indices
+            )
+            key = (required, count)
+            previous = updated.get(key)
+            if previous is None or (candidate[0], len(candidate[1])) > (
+                previous[0], len(previous[1])
+            ):
+                updated[key] = candidate
+        candidates = updated
+    _, _, selected_indices = max(
+        candidates.values(),
+        key=lambda result: (result[0], len(result[1]), tuple(-i for i in result[2])),
+    )
+    selected = tuple(items[index] for index in selected_indices)
 
     text = _render(selected)
     count = token_counter(text) if text else 0
@@ -257,7 +346,15 @@ def serialize_graph(
     token_budget: int,
     token_counter: TokenCounter = conservative_token_count,
 ) -> SerializedGraph:
-    node_list = sorted(nodes, key=lambda n: n.object_id)
+    alias_order = {"T": 0, "D": 1, "O": 2, "L": 3, "R": 4}
+    node_list = sorted(
+        nodes,
+        key=lambda node: (
+            alias_order.get((node.alias or "O")[0], 5),
+            int(node.alias[1:]) if node.alias[1:].isdigit() else 0,
+            node.object_id,
+        ),
+    )
     fact_list = sorted(facts)
     items = [node_pack_item(n) for n in node_list] + [fact_pack_item(f) for f in fact_list]
     packed = pack_items(items, token_budget, token_counter)

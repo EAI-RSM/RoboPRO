@@ -170,6 +170,19 @@ Eval rolls a trained checkpoint out against a `(task, config)` pair and writes a
 
 For pi05, symlink the downloaded `jax_30000/` dir to `policy/pi05/checkpoints/<train_config_name>/<model_name>/30000/`.
 
+The upstream OpenPI runtime, virtual environment, and model weights are intentionally
+not tracked. Restore the pinned runtime snapshot while preserving RoboPRO's tracked
+adapters, then optionally synchronize its dependencies:
+
+```bash
+bash scripts/setup_pi05_runtime.sh
+bash scripts/setup_pi05_runtime.sh --sync  # requires network access
+```
+
+RoboPRO registers `pi05_robopro_top_cam_jax` dynamically from the tracked
+`customized_robotwin/policy/pi05_robopro_config.py`; do not patch the ignored
+OpenPI `src/openpi/training/config.py` manually.
+
 **Args (shared by both modes):**
 
 | Arg | Meaning |

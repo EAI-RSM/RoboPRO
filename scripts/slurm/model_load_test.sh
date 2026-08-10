@@ -1,10 +1,8 @@
 #!/usr/bin/env bash
 
-# Master/login-node entry point for a checkpoint-load smoke test: allocates
-# one GPU, starts policy_model_server.py (which loads the pi0/pi05 checkpoint
-# via openpi) inside the GB10 Docker image, then lets `timeout` kill it once
-# it has had time to load. No eval client is started and no episode runs —
-# this only verifies the checkpoint loads and the server binds its socket.
+# Master/login-node entry point for a checkpoint inference smoke test: loads
+# the pi0.5 checkpoint inside the GB10 Docker image and executes one synthetic
+# 50-action inference. A load-only server test misses GPU compiler failures.
 #
 # Usage:
 #   scripts/slurm/model_load_test.sh [train_config] [model_name] [ckpt_id] [load_timeout_s]
@@ -21,7 +19,7 @@ CKPT_ID="${3:-30000}"
 LOAD_TIMEOUT="${4:-240}"
 
 PARTITION="${PARTITION:-gb10}"
-TIME_LIMIT="${TIME_LIMIT:-00:10:00}"
+TIME_LIMIT="${TIME_LIMIT:-00:20:00}"
 MEMORY="${MEMORY:-32G}"
 CPUS_PER_TASK="${CPUS_PER_TASK:-8}"
 # trt-gb10-1 currently cannot initialize NVIDIA containers because NVML is
@@ -30,6 +28,7 @@ CPUS_PER_TASK="${CPUS_PER_TASK:-8}"
 EXCLUDE_NODES="${EXCLUDE_NODES-trt-gb10-1}"
 IMAGE="${IMAGE:-robopro:gb10}"
 PROJECT_ROOT="${PROJECT_ROOT:-$ROOT_DIR}"
+PI05_VENV="${PI05_VENV:-policy/pi05/.venv-jax083}"
 
 if ! command -v sbatch >/dev/null 2>&1; then
   echo "ERROR: sbatch is not available on this node" >&2
@@ -50,7 +49,7 @@ else
   exit 1
 fi
 
-export IMAGE PROJECT_ROOT
+export IMAGE PROJECT_ROOT PI05_VENV
 export PULL_IMAGE="${PULL_IMAGE:-0}"
 export IMAGE_TAR="${IMAGE_TAR:-}"
 
@@ -60,14 +59,12 @@ if [[ -n "$EXCLUDE_NODES" ]]; then
 fi
 
 # Mirrors the server half of customized_robotwin/policy/pi05/eval_double_env.sh
-# (venv selection, cudnn LD_LIBRARY_PATH shim, XLA memory flags) but never
-# starts the sim-side client. `timeout` kills the server once it has had a
-# chance to load; exit code 124 there means it was healthily waiting for a
-# client and is the expected outcome, not a failure.
+# Mirrors the model-server runtime (venv selection, matching cuDNN path,
+# and XLA memory flags), then executes one synthetic action inference.
 read -r -d '' WORKER_CMD <<EOF || true
 set -uo pipefail
 cd customized_robotwin
-PI05_VENV=policy/pi05/.venv
+PI05_VENV=${PI05_VENV@Q}
 if [[ ! -x "\${PI05_VENV}/bin/python" ]]; then
   echo "[error] pi05 virtualenv not found: \${PI05_VENV}/bin/python" >&2
   exit 1
@@ -75,29 +72,26 @@ fi
 export PYTHONWARNINGS=ignore::UserWarning
 export XLA_PYTHON_CLIENT_PREALLOCATE=false
 export XLA_PYTHON_CLIENT_MEM_FRACTION=0.85
-for lib in "\${PI05_VENV}"/lib/python*/site-packages/nvidia/cudnn/lib; do
-  if [[ -d "\$lib" ]]; then
-    export LD_LIBRARY_PATH="\$lib:\${LD_LIBRARY_PATH:-}"
+export PI05_COMPUTE_DTYPE="${PI05_COMPUTE_DTYPE:-bfloat16}"
+echo "[inference-smoke] PI05_COMPUTE_DTYPE=\${PI05_COMPUTE_DTYPE}"
+for cudnn_dir in "\${PI05_VENV}"/lib/python*/site-packages/nvidia/cudnn/lib; do
+  if [[ -d "\${cudnn_dir}" ]]; then
+    export LD_LIBRARY_PATH="\${cudnn_dir}:\${LD_LIBRARY_PATH:-}"
+    echo "[inference-smoke] cuDNN library path: \${cudnn_dir}"
     break
   fi
 done
-echo "[model-load-test] train_config=${TRAIN_CONFIG} model=${MODEL_NAME} ckpt=${CKPT_ID} timeout=${LOAD_TIMEOUT}s"
-timeout ${LOAD_TIMEOUT} "\${PI05_VENV}/bin/python" script/policy_model_server.py \\
-  --port 0 \\
-  --config policy/pi05/deploy_policy.yml \\
-  --overrides \\
-  --train_config_name ${TRAIN_CONFIG} \\
-  --model_name ${MODEL_NAME} \\
-  --checkpoint_id ${CKPT_ID} \\
-  --ckpt_setting ${MODEL_NAME} \\
-  --seed 0 \\
-  --policy_name pi05
+echo "[inference-smoke] train_config=${TRAIN_CONFIG} model=${MODEL_NAME} ckpt=${CKPT_ID} timeout=${LOAD_TIMEOUT}s"
+timeout ${LOAD_TIMEOUT} "\${PI05_VENV}/bin/python" ../scripts/pi05_inference_smoke.py \
+  --train-config ${TRAIN_CONFIG} \
+  --model-name ${MODEL_NAME} \
+  --checkpoint-id ${CKPT_ID}
 rc=\$?
-if (( rc == 124 )); then
-  echo "[model-load-test] server ran past the timeout without crashing (expected — it serves forever). Check the log above for 'loading model success!'."
+if (( rc == 0 )); then
+  echo "[inference-smoke] checkpoint produced a valid action chunk"
   exit 0
 fi
-echo "[model-load-test] server exited early with code \$rc (unexpected)"
+echo "[inference-smoke] failed with code \$rc"
 exit \$rc
 EOF
 

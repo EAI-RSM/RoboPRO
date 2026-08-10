@@ -14,6 +14,7 @@ from .contract import (
     VALIDITY_FIELD,
     GraphFact,
     RetrievalContract,
+    stable_aliases,
 )
 
 
@@ -43,7 +44,13 @@ class HDF5GraphRetriever:
         relation_ids = np.asarray(self.state["object_ids"][()], dtype=np.int64)
         if not np.array_equal(self.object_ids, relation_ids):
             raise ValueError("Object catalog and relation-state IDs are not aligned")
-        self.labels = [f"{name}#{int(object_id)}" for name, object_id in zip(self.names, self.object_ids)]
+        destination_ids = [
+            int(object_id)
+            for object_id, role in zip(self.object_ids, self.roles)
+            if "destination" in role.lower()
+        ]
+        self.aliases = stable_aliases(self.object_ids, self.is_target, destination_ids)
+        self.labels = [self.aliases[int(object_id)] for object_id in self.object_ids]
         self.effector_names = _decode(self.state["held_by_effector_names"][()])
         self.reachable_names = _decode(self.state["reachable_by_effector_names"][()])
         self.camera_names = _decode(self.state["visible_to_camera_names"][()])
@@ -137,7 +144,7 @@ class HDF5GraphRetriever:
                         ),
                     )
                 qualifier = ",".join(
-                    name
+                    self._effector_alias(name)
                     for name, flag in zip(self.blocks_effector_names, per_effector)
                     if flag
                 )
@@ -148,6 +155,12 @@ class HDF5GraphRetriever:
                     self.labels[source],
                     self.labels[destination],
                     qualifier,
+                    tuple(
+                        dict.fromkeys(
+                            (self.labels[source], self.labels[destination])
+                            + tuple(value for value in qualifier.split(",") if value)
+                        )
+                    ),
                 )
             )
         return result
@@ -174,8 +187,22 @@ class HDF5GraphRetriever:
                 continue
             if relation == "visible_to" and labels[destination] != self.contract.default_camera:
                 continue
+            rendered_destination = (
+                labels[destination]
+                if relation == "visible_to"
+                else self._effector_alias(labels[destination])
+            )
             result.append(
-                GraphFact(priority, relation, self.labels[source], labels[destination])
+                GraphFact(
+                    priority,
+                    relation,
+                    self.labels[source],
+                    rendered_destination,
+                    "",
+                    (self.labels[source],)
+                    if relation == "visible_to"
+                    else (self.labels[source], rendered_destination),
+                )
             )
         return result
 
@@ -205,9 +232,19 @@ class HDF5GraphRetriever:
                     self.labels[source],
                     self.labels[destination],
                     self.contract.default_camera,
+                    (self.labels[source], self.labels[destination]),
                 )
             )
         return result
+
+    @staticmethod
+    def _effector_alias(name: str) -> str:
+        lowered = name.lower()
+        if "left" in lowered:
+            return "L"
+        if "right" in lowered:
+            return "R"
+        return name
 
     def retrieve_frame(
         self,

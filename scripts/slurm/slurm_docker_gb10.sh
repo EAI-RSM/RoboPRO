@@ -29,6 +29,14 @@ if [[ ! -d "$PROJECT_ROOT" ]]; then
   exit 1
 fi
 PROJECT_ROOT=$(cd "$PROJECT_ROOT" && pwd)
+CONTAINER_PROJECT_ROOT=/workspace/RoboPRO
+container_eval_seed_file="${EVAL_SEED_FILE:-}"
+if [[ -n "$container_eval_seed_file" && "$container_eval_seed_file" == "$PROJECT_ROOT"/* ]]; then
+  container_eval_seed_file="$CONTAINER_PROJECT_ROOT/${container_eval_seed_file#"$PROJECT_ROOT"/}"
+elif [[ -n "$container_eval_seed_file" && "$container_eval_seed_file" == /* && "$container_eval_seed_file" != "$CONTAINER_PROJECT_ROOT"/* ]]; then
+  echo "ERROR: EVAL_SEED_FILE is outside the Docker project mount: $container_eval_seed_file" >&2
+  exit 2
+fi
 
 if [[ $# -eq 0 ]]; then
   command=(python -c "import torch, sapien, mplib; print(torch.cuda.get_device_name(0), sapien.__version__, mplib.__version__)")
@@ -86,14 +94,16 @@ srun --ntasks=1 --nodes=1 docker run --rm \
   --env HOME=/tmp \
   --env PI05_VENV="${PI05_VENV:-}" \
   --env OPENPI_DATA_HOME=/workspace/RoboPRO/customized_robotwin/policy/pi05/.cache/openpi \
-  --env TORCH_EXTENSIONS_DIR=/workspace/RoboPRO/customized_robotwin/envs/curobo/.cache/torch-extensions \
+  --env TORCH_EXTENSIONS_DIR="/tmp/robopro-torch-extensions-${UID}" \
   --env TORCHINDUCTOR_CACHE_DIR="/tmp/torchinductor-${UID}" \
   --env XDG_CACHE_HOME="/tmp/robopro-cache-${UID}" \
-  --env PI05_ASSET_ID="${PI05_ASSET_ID:-trossen}" \
+  --env PI05_ASSET_ID="${PI05_ASSET_ID:-roboreal_lerobot}" \
   --env EVAL_RUN_TAG="${EVAL_RUN_TAG:-}" \
+  --env EVAL_SEED_FILE="$container_eval_seed_file" \
+  --env PYTHONPATH=/workspace/RoboPRO \
   --env PYTHONUNBUFFERED=1 \
   --env NVIDIA_DRIVER_CAPABILITIES=graphics,utility,compute \
-  --volume "$PROJECT_ROOT:/workspace/RoboPRO" \
-  --workdir /workspace/RoboPRO \
+  --volume "$PROJECT_ROOT:$CONTAINER_PROJECT_ROOT" \
+  --workdir "$CONTAINER_PROJECT_ROOT" \
   "$IMAGE" \
   "${command[@]}"

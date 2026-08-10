@@ -11,10 +11,10 @@ cd "$ROOT_DIR"
 mkdir -p logs
 
 TASK_NAME="${1:-put_sauce_can_in_basket}"
-TASK_CONFIG="${2:-relation_validation_d14}"
-TRAIN_CONFIG="${3:-pi05_aloha_full_base}"
-MODEL_NAME="${4:-pi05_base}"
-CKPT_ID="${5:-0}"
+TASK_CONFIG="${2:-bench_demo_kitchenl_clean}"
+TRAIN_CONFIG="${3:-pi05_robopro_top_cam_jax}"
+MODEL_NAME="${4:-robopro_jax}"
+CKPT_ID="${5:-30000}"
 SEED="${6:-0}"
 TEST_NUM="${7:-1}"
 GRAPH_INPUT_CONDITION="${8:-visual_only}"
@@ -30,6 +30,7 @@ CPUS_PER_TASK="${CPUS_PER_TASK:-8}"
 EXCLUDE_NODES="${EXCLUDE_NODES-trt-gb10-1}"
 IMAGE="${IMAGE:-robopro:gb10}"
 PROJECT_ROOT="${PROJECT_ROOT:-$ROOT_DIR}"
+PI05_VENV="${PI05_VENV:-policy/pi05/.venv-jax083}"
 
 if ! command -v sbatch >/dev/null 2>&1; then
   echo "ERROR: sbatch is not available on this node" >&2
@@ -50,10 +51,10 @@ else
   exit 1
 fi
 
-export IMAGE PROJECT_ROOT
+export IMAGE PROJECT_ROOT PI05_VENV
 export PULL_IMAGE="${PULL_IMAGE:-0}"
 export IMAGE_TAR="${IMAGE_TAR:-}"
-export PI05_ASSET_ID="${PI05_ASSET_ID:-trossen}"
+export PI05_ASSET_ID="${PI05_ASSET_ID:-roboreal_lerobot}"
 
 node_args=()
 if [[ -n "$EXCLUDE_NODES" ]]; then
