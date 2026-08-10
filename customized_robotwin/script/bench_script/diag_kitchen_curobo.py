@@ -13,10 +13,8 @@ robotwin_root = Path(os.environ["ROBOTWIN_ROOT"])
 os.chdir(robotwin_root)
 
 from envs import CONFIGS_PATH
+from lib.scene_build import get_embodiment_config
 
-def get_embodiment_config(robot_file):
-    with open(os.path.join(robot_file, "config.yml"), "r") as f:
-        return yaml.load(f.read(), Loader=yaml.FullLoader)
 
 def build_cfg(seed):
     config_path = bench_root / "bench_task_config" / "bench_demo_kitchens_clean.yml"
