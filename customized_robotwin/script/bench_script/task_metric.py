@@ -7,7 +7,6 @@ computes every canonical leg in one geometric_eps call, and writes no outcome/HS
 
 import argparse
 import gc
-import hashlib
 import json
 import os
 import time
@@ -37,6 +36,7 @@ from lib.run_io import (
     append_jsonl_fsync,
     atomic_write_json,
     atomic_write_text,
+    sha256_file,
 )
 from lib.scene_build import build_cfg, get_env_class
 from lib.scene_provenance import (
@@ -179,12 +179,6 @@ def _dr_overrides(args):
     }
 
 
-def _sha256(path):
-    digest = hashlib.sha256()
-    with Path(path).open("rb") as stream:
-        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
 
 
 def _default_instruction(task_name):
@@ -330,7 +324,7 @@ def _metric_run_config(args, metric_cfg, manifest_path, jobs):
         "scene_manifest": (
             None if manifest_path is None else {
                 "path": str(manifest_path),
-                "sha256": _sha256(manifest_path),
+                "sha256": sha256_file(manifest_path),
                 "records": len(jobs),
             }
         ),
@@ -352,7 +346,7 @@ def _metric_run_config(args, metric_cfg, manifest_path, jobs):
         "gripper_reference_radius_m": args.gripper_r,
         "bucket_spec": {
             "path": str(Path(args.bucket_spec).resolve()),
-            "sha256": _sha256(args.bucket_spec),
+            "sha256": sha256_file(args.bucket_spec),
         },
         "report_every": int(args.report_every),
         "final_bootstrap_resamples": int(args.bootstrap_resamples),
@@ -443,10 +437,10 @@ def _regenerate_postprocess_reports(args, out_dir, records, *, complete, raise_e
         config_path = Path(out_dir) / "config.json"
         provenance = {
             "records_path": str(records_path.resolve()),
-            "records_sha256": _sha256(records_path),
+            "records_sha256": sha256_file(records_path),
             "record_count": len(records),
             "source_config_path": str(config_path.resolve()),
-            "source_config_sha256": _sha256(config_path),
+            "source_config_sha256": sha256_file(config_path),
             "outcome_data_loaded": False,
             "provisional": not complete,
         }

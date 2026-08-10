@@ -44,6 +44,7 @@ import numpy as np
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+import reachability_view as rv
 
 from setup_paths import setup_paths
 setup_paths()
@@ -198,23 +199,11 @@ def _save_and_plot_volume(XX, YY, xs, ys, zs, reach_any, per_arm, box_p, tgt_p, 
     print(f"[interactive] rotate the 3D view with:  python reachability_view.py {npz}")
 
 
-def _column_bounds(reach_any, zs):
-    """Per (x,y): lowest and highest reachable z (NaN where the column is never reachable).
-    A vertical line through the arm's shell-shaped workspace enters once and exits once, so
-    [z_floor, z_ceil] is an (almost always) lossless summary of the column."""
-    any_reach = reach_any.any(axis=0)                                   # (ny,nx)
-    floor_idx = np.argmax(reach_any, axis=0)                            # first True from bottom
-    ceil_idx = reach_any.shape[0] - 1 - np.argmax(reach_any[::-1], axis=0)  # first True from top
-    z_floor = zs[floor_idx].astype(float); z_floor[~any_reach] = np.nan
-    z_ceil = zs[ceil_idx].astype(float);   z_ceil[~any_reach] = np.nan
-    return z_floor, z_ceil
-
-
 def _plot_ceiling3d(XX, YY, zs, reach_any, path, box_p, tgt_p, pad_xy, args):
     """(A) ceiling z_max(x,y) as a single height-coloured 3D surface (floor dropped).
     Static PNG; for a rotatable version run:  python reachability_view.py <cache.npz> --kind ceiling
     Colour is stretched to the actual ceiling min..max (turbo) to emphasise height differences."""
-    _, z_ceil = _column_bounds(reach_any, zs)
+    z_ceil = rv._ceiling(reach_any, zs)
     if not np.isfinite(z_ceil).any():
         print("ceiling3d skipped: nothing reachable"); return
     vmin, vmax = float(np.nanmin(z_ceil)), float(np.nanmax(z_ceil))
@@ -238,7 +227,6 @@ def _plot_ceiling_heatmap(XX, YY, zs, reach_any, path, box_p, tgt_p, pad_xy, arg
     """(A2) flat 2D z_max(x,y) heatmap with the 'clears the milk-box top' divider. The actual
     drawing lives in reachability_view.ceiling_heatmap (single source, so the standalone viewer
     regenerates the identical figure from the cache with no re-sweep)."""
-    import reachability_view as rv   # light module (numpy/argparse only at import); safe under Agg
     fig, _ = rv.ceiling_heatmap(XX[0, :], YY[:, 0], zs, reach_any, box_p, tgt_p, pad_xy,
                                 OCC_HALF_FOOTPRINT, args.arms)
     if fig is None:
@@ -298,22 +286,10 @@ def _plot_isosurface(xs, ys, zs, reach_any, path, box_p, tgt_p, pad_xy, args):
         print("isosurface skipped: nothing reachable"); return
     if len(zs) < 2:
         print("isosurface skipped: need >= 2 z levels"); return
-    from skimage import measure
     from mpl_toolkits.mplot3d.art3d import Poly3DCollection
-    vol = reach_any.astype(np.float32)                        # (nz, ny, nx)
-    try:                                                      # light smoothing -> a readable blob
-        from scipy.ndimage import gaussian_filter
-        vol = gaussian_filter(vol, sigma=0.6)
-    except Exception:
-        pass
-    spacing = (float(zs[1] - zs[0]), float(ys[1] - ys[0]), float(xs[1] - xs[0]))
-    try:
-        verts, faces, _, _ = measure.marching_cubes(vol, level=0.5, spacing=spacing)
-    except (ValueError, RuntimeError) as e:
-        print(f"isosurface skipped: {e}"); return
-    # verts columns are (z,y,x) in index*spacing -> shift onto world axes, reorder to (x,y,z)
-    vz = verts[:, 0] + float(zs.min()); vy = verts[:, 1] + float(ys.min()); vx = verts[:, 2] + float(xs.min())
-    tri = np.stack([vx, vy, vz], axis=1)[faces]               # (nfaces, 3, 3)
+    tri = rv._iso_mesh(xs, ys, zs, reach_any)
+    if tri is None:
+        print("isosurface skipped: marching cubes failed"); return
     zlo, zhi = float(tri[..., 2].min()), float(tri[..., 2].max())   # fit z to the blob, not the sweep
     fig = plt.figure(figsize=(8, 7))
     ax = fig.add_subplot(111, projection="3d")

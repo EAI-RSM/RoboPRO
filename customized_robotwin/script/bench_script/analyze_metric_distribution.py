@@ -6,9 +6,7 @@ fields are rejected. This script never creates or recommends analysis buckets.
 """
 
 import argparse
-import hashlib
 import json
-import os
 from collections import Counter
 from datetime import datetime
 from pathlib import Path
@@ -19,10 +17,12 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 
+from lib.plotting import save_figure_atomic
 from lib.run_io import (
     CLEARANCE_RESULTS_DIR,
     Timings,
     atomic_write_json,
+    sha256_file,
 )
 
 
@@ -40,12 +40,6 @@ FORBIDDEN_OUTCOME_KEYS = {
 QUANTILES = (0.0, 0.1, 0.25, 0.5, 0.75, 0.9, 1.0)
 
 
-def _sha256(path):
-    digest = hashlib.sha256()
-    with Path(path).open("rb") as stream:
-        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
 
 
 def _forbidden_path(value, prefix=""):
@@ -192,18 +186,6 @@ def _primary_values(records):
     )
 
 
-def _save_figure(fig, out_path, *, bbox_inches=None):
-    """Atomically replace a derived plot so interruption cannot expose a partial PNG."""
-    out_path = Path(out_path)
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = out_path.with_name(
-        f".{out_path.stem}.{os.getpid()}.tmp{out_path.suffix}"
-    )
-    fig.savefig(temporary, dpi=160, bbox_inches=bbox_inches)
-    os.replace(temporary, out_path)
-    plt.close(fig)
-
-
 def plot_primary_distribution(records, out_path, *, scope_label=None):
     values = _primary_values(records)
     finite = np.sort(values[np.isfinite(values)])
@@ -228,7 +210,7 @@ def plot_primary_distribution(records, out_path, *, scope_label=None):
         title = f"{scope_label}: {title}"
     fig.suptitle(title, fontsize=16)
     fig.tight_layout()
-    _save_figure(fig, out_path)
+    save_figure_atomic(fig, out_path, bbox_inches=None)
 
 
 def plot_by_leg(records, out_path, *, scope_label=None):
@@ -261,7 +243,7 @@ def plot_by_leg(records, out_path, *, scope_label=None):
         title = f"{scope_label}: {title}"
     fig.suptitle(title, fontsize=16)
     fig.tight_layout()
-    _save_figure(fig, out_path)
+    save_figure_atomic(fig, out_path, bbox_inches=None)
 
 
 def plot_by_scene(records, out_path, *, scope_label=None):
@@ -309,7 +291,7 @@ def plot_by_scene(records, out_path, *, scope_label=None):
     ax.set_xticks([])
     ax.grid(axis="y", alpha=0.2)
     fig.tight_layout()
-    _save_figure(fig, out_path, bbox_inches="tight")
+    save_figure_atomic(fig, out_path, bbox_inches="tight")
 
 
 def write_distribution_reports(out_dir, records, provenance):
@@ -390,10 +372,10 @@ def run(args):
     source_config = records_path.parent / "config.json"
     provenance = {
         "records_path": str(records_path),
-        "records_sha256": _sha256(records_path),
+        "records_sha256": sha256_file(records_path),
         "record_count": len(records),
         "source_config_path": str(source_config.resolve()) if source_config.is_file() else None,
-        "source_config_sha256": _sha256(source_config) if source_config.is_file() else None,
+        "source_config_sha256": sha256_file(source_config) if source_config.is_file() else None,
         "outcome_data_loaded": False,
     }
     with timings.section("summarize"):

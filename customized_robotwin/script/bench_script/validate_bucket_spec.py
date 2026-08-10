@@ -2,11 +2,11 @@
 """Validate the frozen metric bucket specification against its outcome-blind pilot."""
 
 import argparse
-import hashlib
 import json
 from pathlib import Path
 
 from lib.metric_buckets import count_metric_record_buckets, load_bucket_spec
+from lib.run_io import sha256_file
 
 
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -14,12 +14,6 @@ REPO_ROOT = SCRIPT_DIR.parents[2]
 DEFAULT_SPEC = SCRIPT_DIR / "bucket_spec.json"
 
 
-def _sha256(path):
-    digest = hashlib.sha256()
-    with Path(path).open("rb") as stream:
-        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
 
 
 def _read_records(path):
@@ -43,13 +37,13 @@ def _read_records(path):
 def validate_frozen_source(spec, records_path):
     source = spec["source_distribution"]
     records_path = Path(records_path).resolve()
-    if _sha256(records_path) != source["records_sha256"]:
+    if sha256_file(records_path) != source["records_sha256"]:
         raise ValueError("records SHA-256 does not match frozen source_distribution")
     metric_run = REPO_ROOT / source["metric_run"]
     distribution_run = REPO_ROOT / source["distribution_run"]
-    if _sha256(metric_run / "config.json") != source["config_sha256"]:
+    if sha256_file(metric_run / "config.json") != source["config_sha256"]:
         raise ValueError("metric config SHA-256 does not match frozen source_distribution")
-    if _sha256(distribution_run / "distribution_summary.json") != source["distribution_summary_sha256"]:
+    if sha256_file(distribution_run / "distribution_summary.json") != source["distribution_summary_sha256"]:
         raise ValueError("distribution summary SHA-256 does not match frozen source_distribution")
 
     records = _read_records(records_path)

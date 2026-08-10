@@ -32,7 +32,7 @@ from lib.geometric_metric import geometric_eps
 from lib.metric_buckets import assign_metric_record, load_bucket_spec
 from lib.metric_config import SeedMetricConfig
 from lib.obstacles import obstacle_centers, occluder_footprints_3d
-from lib.run_io import atomic_write_json
+from lib.run_io import atomic_write_json, sha256_file
 from lib.scene_build import build_cfg, get_env_class
 from lib.scene_provenance import fingerprint, hash_files, task_scene_code_version
 from lib.task_roles import resolve_task_roles
@@ -58,15 +58,9 @@ DEFAULT_ROLLOUT = (
 FLOAT_ATOL = 1e-12
 
 
-def _sha256(path):
-    digest = hashlib.sha256()
-    with Path(path).open("rb") as stream:
-        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
 
 
-def _record_sha256(record):
+def _recordsha256_file(record):
     payload = json.dumps(
         record, sort_keys=True, separators=(",", ":"), allow_nan=False
     ).encode("utf-8")
@@ -404,13 +398,13 @@ def _visual_config(rollout_dir, rollout_config, metric_config_path, metric_confi
         },
         "source_metric_config": {
             "path": str(Path(metric_config_path).resolve()),
-            "file_sha256": _sha256(metric_config_path),
+            "file_sha256": sha256_file(metric_config_path),
             "config_sha256": metric_config["config_sha256"],
             "metric_code_version": metric_config["metric_code_version"],
         },
         "bucket_spec": {
             "path": str(Path(bucket_spec_path).resolve()),
-            "sha256": _sha256(bucket_spec_path),
+            "sha256": sha256_file(bucket_spec_path),
         },
         "reach_cache_dir": str(Path(metric_config["reach_cache_dir"]).resolve()),
         "reach_mode": metric_config["reach_mode"],
@@ -561,9 +555,9 @@ def validate_source_pair(job, rollout, committed):
 
 def _source_hashes(job, rollout, committed):
     return {
-        "manifest_row": _record_sha256(job),
-        "rollout_record": _record_sha256(rollout),
-        "metric_record": _record_sha256(committed),
+        "manifest_row": _recordsha256_file(job),
+        "rollout_record": _recordsha256_file(rollout),
+        "metric_record": _recordsha256_file(committed),
     }
 
 
@@ -728,7 +722,7 @@ def run(args):
     )
     if metric_config.get("source_rollout", {}).get("config_sha256") != rollout_config["config_sha256"]:
         raise ValueError("metric config is not bound to the supplied rollout")
-    if metric_config.get("scene_manifest", {}).get("sha256") != _sha256(manifest_path):
+    if metric_config.get("scene_manifest", {}).get("sha256") != sha256_file(manifest_path):
         raise ValueError("metric config scene-manifest hash mismatch")
 
     _, jobs = _read_scene_manifest(manifest_path)
@@ -747,7 +741,7 @@ def run(args):
     }
 
     bucket_spec_path = Path(metric_config["bucket_spec"]["path"]).resolve()
-    if _sha256(bucket_spec_path) != metric_config["bucket_spec"]["sha256"]:
+    if sha256_file(bucket_spec_path) != metric_config["bucket_spec"]["sha256"]:
         raise ValueError("frozen bucket-spec hash differs from the metric config")
     bucket_spec = load_bucket_spec(bucket_spec_path)
     metric_cfg = SeedMetricConfig(**metric_config["metric"])

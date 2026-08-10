@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import argparse
 import csv
-import hashlib
 import io
 import json
 import os
@@ -26,7 +25,14 @@ setup_paths()
 
 from analyze_metric_distribution import _metric_value, read_metric_records
 from lib.metric_buckets import assign_metric_record, load_bucket_spec
-from lib.run_io import CLEARANCE_RESULTS_DIR, Timings, atomic_write_json, atomic_write_text
+from lib.plotting import save_figure_atomic
+from lib.run_io import (
+    CLEARANCE_RESULTS_DIR,
+    Timings,
+    atomic_write_json,
+    atomic_write_text,
+    sha256_file,
+)
 from lib.vla_reporting import read_episode_records, wilson_interval
 
 
@@ -36,12 +42,6 @@ JOIN_SCHEMA = "robopro.task-metric-outcome-join.v1"
 DENSITY_REPORT_ORDER = (6, 10, 15)
 
 
-def _sha256(path):
-    digest = hashlib.sha256()
-    with Path(path).open("rb") as stream:
-        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
 
 
 def read_all_metric_records(paths):
@@ -349,14 +349,6 @@ def summarize(
     return summary
 
 
-def _save_figure(fig, path):
-    path = Path(path)
-    temporary = path.with_name(f".{path.stem}.{os.getpid()}.tmp{path.suffix}")
-    fig.savefig(temporary, dpi=160, bbox_inches="tight")
-    os.replace(temporary, path)
-    plt.close(fig)
-
-
 def plot_bucket_hsr(summary, bucket_spec, path, *, title):
     names = bucket_spec["bucket_order"]
     labels = [name.replace("_clearance", "").replace("_", "\n") for name in names]
@@ -376,7 +368,7 @@ def plot_bucket_hsr(summary, bucket_spec, path, *, title):
     ax.set_xticks(x, [f"{label}\nn={row['n']}" for label, row in zip(labels, rows)])
     ax.set(ylabel="Hard success rate", ylim=(0, 1.04), title=title)
     ax.grid(axis="y", alpha=0.25)
-    _save_figure(fig, path)
+    save_figure_atomic(fig, path, bbox_inches="tight")
 
 
 def plot_metric_by_outcome(joined, path, *, title):
@@ -397,7 +389,7 @@ def plot_metric_by_outcome(joined, path, *, title):
         ax.text(top, 1.18, "+inf", ha="center")
     ax.grid(axis="x", alpha=0.25)
     ax.legend(loc="best")
-    _save_figure(fig, path)
+    save_figure_atomic(fig, path, bbox_inches="tight")
 
 
 def write_joined_records(out_dir, joined):
@@ -548,11 +540,11 @@ def write_correlation_reports(
     summary["source"] = {
         "rollout_run": str(rollout_dir),
         "metric_records": [
-            {"path": str(path), "sha256": _sha256(path)} for path in metric_sources
+            {"path": str(path), "sha256": sha256_file(path)} for path in metric_sources
         ],
         "bucket_spec": {
             "path": str(bucket_spec_path),
-            "sha256": _sha256(bucket_spec_path),
+            "sha256": sha256_file(bucket_spec_path),
         },
     }
     summary["video_index"] = {

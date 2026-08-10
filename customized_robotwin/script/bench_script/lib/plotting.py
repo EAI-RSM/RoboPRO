@@ -1,11 +1,24 @@
 """Shared plotting helpers for benchmark analysis tools."""
 
-import numpy as np
+import os
+from pathlib import Path
 
 import numpy as np
 
 # Four azimuths so the depth ordering of the path vs the box is readable.
 VIEWS = [("iso", 26, -60), ("front", 8, -90), ("side", 8, 0), ("top", 78, -90)]
+
+
+def save_figure_atomic(fig, path, *, bbox_inches=None):
+    """Atomically replace a plot so interruption cannot expose a partial image."""
+    import matplotlib.pyplot as plt
+
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.stem}.{os.getpid()}.tmp{path.suffix}")
+    fig.savefig(temporary, dpi=160, bbox_inches=bbox_inches)
+    os.replace(temporary, path)
+    plt.close(fig)
 
 
 def _box_wireframe(ax, box_p, half, height):

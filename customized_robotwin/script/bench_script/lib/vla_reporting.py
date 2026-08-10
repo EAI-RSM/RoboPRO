@@ -6,7 +6,6 @@ import csv
 import io
 import json
 import math
-import os
 from collections import Counter
 from pathlib import Path
 
@@ -15,6 +14,8 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
+
+from .plotting import save_figure_atomic
 
 from lib.run_io import atomic_write_json, atomic_write_text
 
@@ -271,14 +272,6 @@ def write_records_csv(path, records):
     atomic_write_text(path, output.getvalue())
 
 
-def _save_figure_atomic(fig, path):
-    path = Path(path)
-    temporary = path.with_name(f".{path.stem}.{os.getpid()}.tmp{path.suffix}")
-    fig.savefig(temporary, dpi=160, bbox_inches="tight")
-    os.replace(temporary, path)
-    plt.close(fig)
-
-
 def plot_running_hsr(records, path):
     outcomes = np.asarray([record["hard_success"] for record in records], dtype=int)
     indices = np.arange(1, len(records) + 1)
@@ -299,7 +292,7 @@ def plot_running_hsr(records, path):
     ax.grid(alpha=0.25)
     ax.legend(loc="best")
     ax.set_title(f"Running hard success rate ({int(cumulative[-1])}/{len(records)})")
-    _save_figure_atomic(fig, path)
+    save_figure_atomic(fig, path, bbox_inches="tight")
 
 
 def plot_outcome_diagnostics(records, config, path):
@@ -340,7 +333,7 @@ def plot_outcome_diagnostics(records, config, path):
     axes[1].grid(axis="y", alpha=0.25)
     fig.suptitle(f"Outcome diagnostics after {len(records)} completed rollouts")
     fig.tight_layout()
-    _save_figure_atomic(fig, path)
+    save_figure_atomic(fig, path, bbox_inches="tight")
 
 
 def write_rollout_reports(run_dir):
