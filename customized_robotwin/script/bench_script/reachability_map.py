@@ -41,7 +41,6 @@ from datetime import datetime
 from pathlib import Path
 
 import numpy as np
-import transforms3d as t3d
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
@@ -54,7 +53,7 @@ setup_paths()
 RESULTS_DIR = Path(__file__).resolve().parents[3] / "scripts" / "validation" / "results" / "reachability"
 
 import torch  # noqa: E402  (after setup_paths so curobo's torch is on the path)
-from lib.ik_grid import _build_ik_solver, _solve_grid, _world_gripper_to_curobo
+from lib.ik_grid import _build_ik_solver, _solve_grid
 from lib.scene_build import DR_CLEAN, build_cfg
 from lib.scene_constants import OCC_HALF_FOOTPRINT, PAD_XY
 from task.occluder_task import make_occluder_task  # noqa: E402

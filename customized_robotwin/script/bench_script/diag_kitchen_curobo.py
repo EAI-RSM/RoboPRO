@@ -4,7 +4,6 @@ sys.path.insert(0, os.path.dirname(__file__))
 from setup_paths import setup_paths
 setup_paths()
 
-import numpy as np
 import yaml
 import torch
 from pathlib import Path

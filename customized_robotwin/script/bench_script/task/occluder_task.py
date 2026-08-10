@@ -1,17 +1,9 @@
 """Runtime assembly of the occluder benchmark task."""
 
-import contextlib
-import json
 import os
 import time
-from copy import deepcopy
 
-import numpy as np
-import torch
-import transforms3d as t3d
-from curobo.types.state import JointState
 
-from envs._GLOBAL_CONFIGS import GRASP_DIRECTION_DIC
 from envs.utils import ArmTag, create_actor, create_box, rand_pose
 from lib.occluder_ring import occluder_ring_xy
 from lib.planning_tuning import *  # noqa: F403

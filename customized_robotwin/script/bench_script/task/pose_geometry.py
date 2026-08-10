@@ -1,24 +1,12 @@
 """Methods extracted mechanically from analyze_occluder_visibility.py."""
 
-import contextlib
-import json
 import os
-import time
-from copy import deepcopy
-from pathlib import Path
 
 import numpy as np
-import torch
-import transforms3d as t3d
-from curobo.types.state import JointState
 
 from envs._GLOBAL_CONFIGS import GRASP_DIRECTION_DIC
-from envs.utils import ArmTag
-from lib.ik_grid import _build_ik_solver, grasp_orientation
 from lib.planning_tuning import *  # noqa: F403
-from lib.run_io import CLEARANCE_RESULTS_DIR
 from lib.scene_constants import *  # noqa: F403
-import seed_from_clearance as sfc
 
 
 class PoseGeometryMixin:

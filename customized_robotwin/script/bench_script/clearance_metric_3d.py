@@ -36,60 +36,29 @@ USAGE (from the benchmark folder, env sourced + ROBOTWIN_BENCH_TASK=bench):
 
 import argparse
 import json
-import os
 import time
-from collections import deque
-from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 
 import numpy as np
-from scipy.ndimage import distance_transform_edt
 
 from setup_paths import setup_paths
 setup_paths()
 
 import torch
-from lib.continuity import (
-    _NEIGH8, _pick_nearest, _wrap_linf, warm_start_branches, warm_start_branches_3d,
-)
-from lib.ik_grid import (
-    _build_ik_solver, _build_ik_solver_no_world, _solve_grid, _solve_grid_q,
-    _solve_grid_q_multi, build_grid, grasp_orientation,
-)
-from lib.labeling import (
-    BEYOND, FREE, LABEL_NAMES, OBSTACLE, geometric_envelope, label_volume,
-    load_reach_envelope,
-)
+from lib.continuity import warm_start_branches, warm_start_branches_3d
+from lib.ik_grid import _build_ik_solver, _solve_grid, _solve_grid_q_multi, build_grid, grasp_orientation
+from lib.labeling import FREE, LABEL_NAMES, OBSTACLE, label_volume, load_reach_envelope
 from lib.metric_config import SeedMetricConfig
-from lib.obstacles import (
-    _load_collision_mesh, obstacle_centers, occluder_clearance,
-    occluder_clearance_3d, occluder_footprint_polys, occluder_footprints_3d,
-    occluder_mask_3d, occluder_slice_polys, scene_obstacle_entries,
-    surface_distance_to_occluders,
-)
-from lib.plotting import (
-    _draw_eps_sphere, _draw_occluder_solids_3d, _equal_aspect_3d, _line_axis,
-    _scene_anchor_markers,
-)
+from lib.obstacles import obstacle_centers, occluder_clearance_3d, occluder_footprints_3d
 from lib.run_io import CLEARANCE_RESULTS_DIR as RESULTS_DIR, Timings
 from lib.scene_build import DR_CLEAN, build_cfg
-from lib.scene_constants import OCC_HALF_FOOTPRINT, OCCLUDER_COLLISION, PAD_XY
-from lib.widest_path import (
-    nearest_free_cell, nearest_free_voxel, reconstruct_widest_path,
-    reconstruct_widest_path_3d, widest_path_eps, widest_path_eps_3d,
-)
+from lib.scene_constants import OCC_HALF_FOOTPRINT, PAD_XY
+from lib.widest_path import nearest_free_voxel, reconstruct_widest_path_3d, widest_path_eps_3d
 
 from task.occluder_task import make_occluder_task
-from metric_diagnostics import (
-    phase0_gate_diagnostic, phase1_stack_report, phase2_vertical_report,
-    phase3_clearance_report,
-)
-from metric_viz import (
-    LABEL_COLORS, _metric_path3d, feasibility, phase4_visuals, report,
-)
-import matplotlib.pyplot as plt
-from matplotlib.colors import ListedColormap, BoundaryNorm
+from metric_diagnostics import phase1_stack_report, phase2_vertical_report, phase3_clearance_report
+from metric_viz import _metric_path3d, feasibility, phase4_visuals
 def select_arm(env, args):
     """Resolve which arm the metric runs on and return (arm, planner, grasp_q, grasp_pose, ik),
     with the chosen arm's IK solver already built (so run() doesn't rebuild it).

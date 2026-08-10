@@ -22,7 +22,6 @@ USAGE (env sourced + ROBOTWIN_BENCH_TASK=bench):
 
 import argparse
 import json
-import time
 from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace

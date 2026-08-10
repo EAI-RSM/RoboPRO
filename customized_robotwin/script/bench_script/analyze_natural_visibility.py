@@ -36,10 +36,8 @@ USAGE (run from the benchmark folder):
         --out-dir ./visibility_phase1
 """
 import os
-import sys
 import json
 import argparse
-import shutil
 from pathlib import Path
 
 import numpy as np
@@ -47,14 +45,8 @@ import numpy as np
 from setup_paths import setup_paths
 setup_paths()
 
-from lib.scene_build import (
-    DR_CLEAN, build_cfg, get_embodiment_config, get_env_class,
-)
-from lib.visibility import (
-    BUCKET_BOUNDARIES, BUCKET_COLORS, BUCKET_ORDER, CAMERA, TARGET_ATTRS,
-    _bucket_of, _resolve_target, analyze, analyze_rollout, load_records,
-    run_rollout, save_overlay,
-)
+from lib.scene_build import DR_CLEAN, build_cfg, get_env_class
+from lib.visibility import CAMERA, _resolve_target, analyze, analyze_rollout, run_rollout, save_overlay
 # these analysis scripts are bench-only; default the task mode so build_cfg looks
 # under bench_task_config/ (explicit ROBOTWIN_BENCH_TASK still wins)
 os.environ.setdefault("ROBOTWIN_BENCH_TASK", "bench")
@@ -63,8 +55,6 @@ bench_root = Path(os.environ["BENCH_ROOT"])
 robotwin_root = Path(os.environ["ROBOTWIN_ROOT"])
 os.chdir(robotwin_root)
 
-import yaml
-from envs import CONFIGS_PATH
 
 
 # Bucket taxonomy (must match DEFAULT_VISIBILITY_BUCKETS in envs/_base_task.py):

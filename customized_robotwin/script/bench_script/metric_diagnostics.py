@@ -1,7 +1,6 @@
 """Joint-continuity and clearance diagnostics for the metric pipeline."""
 
 import json
-from pathlib import Path
 
 import numpy as np
 import matplotlib.pyplot as plt

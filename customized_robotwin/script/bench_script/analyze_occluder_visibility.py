@@ -42,14 +42,10 @@ import json
 import time
 import argparse
 import contextlib
-from copy import deepcopy
 from datetime import datetime
 from pathlib import Path
 
 import numpy as np
-import torch
-import transforms3d as t3d
-from curobo.types.state import JointState
 
 from setup_paths import setup_paths
 setup_paths()
@@ -71,14 +67,12 @@ from lib.occluder_ring import (
     draw_ring_config, occluder_ring_xy, parse_count_choices, parse_offset_specs,
 )
 from lib.planning_tuning import *  # noqa: F403
-from lib.run_io import CLEARANCE_RESULTS_DIR, _Tee, _prune_empty_topdirs, effective_out_dir
-from lib.scene_build import DR_CLEAN, build_cfg, dr_measure, get_env_class
+from lib.run_io import _Tee, _prune_empty_topdirs, effective_out_dir
+from lib.scene_build import DR_CLEAN, build_cfg, dr_measure
 from lib.scene_constants import *
 from lib.visibility import (
     CAMERA, _resolve_target, analyze, analyze_rollout, run_rollout, save_overlay,
 )
-from lib.ik_grid import _build_ik_solver, grasp_orientation
-import seed_from_clearance as sfc
 from task.occluder_task import make_occluder_task
 # these analysis scripts are bench-only; default the task mode so build_cfg looks
 # under bench_task_config/ (explicit ROBOTWIN_BENCH_TASK still wins)

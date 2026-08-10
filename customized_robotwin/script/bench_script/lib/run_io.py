@@ -2,10 +2,8 @@
 
 import json
 import os
-import sys
 import time
 from contextlib import contextmanager
-from datetime import datetime
 from pathlib import Path
 
 CLEARANCE_RESULTS_DIR = (

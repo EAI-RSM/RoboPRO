@@ -25,7 +25,6 @@ Images are written to <out-dir> (default ./object_views), one PNG per id, each
 labelled with name/id and its standing height (z_max) and footprint radius.
 """
 import os
-import sys
 import argparse
 from pathlib import Path
 

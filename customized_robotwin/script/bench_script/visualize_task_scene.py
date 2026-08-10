@@ -57,10 +57,8 @@ NOTES:
     - Requires ROBOTWIN_ROOT and BENCH_ROOT environment variables (set via set_env.sh)
     - Close the viewer window to exit the visualization
 """
-import sys
 import os
 import argparse
-import importlib
 import time
 import yaml
 import json

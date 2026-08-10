@@ -1,7 +1,6 @@
 """Scene-obstacle geometry, masks, and clearance fields."""
 
 import os
-from pathlib import Path
 
 import numpy as np
 from scipy.ndimage import distance_transform_edt
