@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Phase 2 of SEED_TRAJECTORY_PLAN.md: build a curobo trajopt seed from the clearance-metric route.
+Phase 2 of plans/SEED_TRAJECTORY_PLAN.md: build a curobo trajopt seed from the clearance-metric route.
 
 This module turns the 3D clearance metric's *gated widest-path* into a joint-space trajectory that
 curobo can be seeded with (idea #5). It reuses clearance_metric_3d.py verbatim as a library -- none
@@ -18,7 +18,7 @@ NOT standalone-runnable: it needs a live scene (env/planner/ik) the caller alrea
 Phase 3, or clearance_metric_3d's own run()). Importing it pulls in clearance_metric_3d -> reachability_map
 -> torch + the env stack, exactly as the metric tool does.
 
-COST NOTE (SEED_TRAJECTORY_PLAN.md sec.5): the default grid is the metric's own (res 0.01, zres 0.03
+COST NOTE (plans/SEED_TRAJECTORY_PLAN.md sec.5): the default grid is the metric's own (res 0.01, zres 0.03
 over z in [0.78,1.4]) -> ~1.7e5 voxels of IK PLUS the multi-branch warm solve. That is expensive
 per call; a coarser SeedMetricConfig (bigger res/zres) is the first knob if per-candidate cost bites.
 """
@@ -137,7 +137,7 @@ def compute_route_configs(env, planner, arm, ik, grasp_q, start_xyz, goal_xyz,
             solver -- exactly the objects clearance_metric_3d.run() builds via select_arm.
         arm: "left" | "right".
         grasp_q: (4,) world grasp quaternion the whole grid is evaluated at (the candidate's grasp
-            orientation -- the orientation coupling from SEED_TRAJECTORY_PLAN.md sec.5).
+            orientation -- the orientation coupling from plans/SEED_TRAJECTORY_PLAN.md sec.5).
         start_xyz, goal_xyz: (3,) world gripper positions for the two widest-path seeds (current
             gripper, grasp). The metric snaps each to the nearest FREE voxel within cfg.seed_snap.
         cfg: SeedMetricConfig (defaults = the metric tool's own knobs).
@@ -288,7 +288,7 @@ def resample_route_to_seed(route_qs, start_q, goal_q, action_horizon=28, eps=1e-
         route_qs: (K, dof) ordered configs current-gripper->grasp (RouteResult.route_qs), or None/empty.
         start_q:  (dof,) the real robot start config (curobo dof order).
         goal_q:   (dof,) curobo's goal config for the grasp (curobo dof order).
-        action_horizon: seed length (28 for this robot -- see SEED_TRAJECTORY_PLAN.md 0a).
+        action_horizon: seed length (28 for this robot -- see plans/SEED_TRAJECTORY_PLAN.md 0a).
 
     Returns:
         (action_horizon, dof) float32, or None if the trajectory is degenerate (zero joint-space
@@ -333,7 +333,7 @@ def route_qs_to_seed_tensor(route_qs, start_q, goal_q, action_horizon=28):
     slots with linear seeds). CPU on purpose: it is picklable across the plan_path multiprocessing pipe
     (communication_flag), and motion_gen re-moves it to CUDA. The dof axis MUST already be in curobo's
     active-joint order (route_qs comes from the IK solver; start_q/goal_q are the caller's job to order
-    identically -- see SEED_TRAJECTORY_PLAN.md 0a: [fl/fr_joint1..6]).
+    identically -- see plans/SEED_TRAJECTORY_PLAN.md 0a: [fl/fr_joint1..6]).
 
     Returns None when 2b is degenerate (caller then supplies no seed -> stock behavior)."""
     row = resample_route_to_seed(route_qs, start_q, goal_q, action_horizon)   # (H, dof) or None

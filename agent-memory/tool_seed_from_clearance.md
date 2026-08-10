@@ -7,7 +7,7 @@ metadata:
 
 Seed curobo's trajopt with the [[tool_clearance_metric]] widest-path route so the expert plans the
 approach around the occluder instead of relying on hand-tuned waypoints. Implemented end-to-end,
-flag-gated. **`customized_robotwin/script/bench_script/SEED_TRAJECTORY_PLAN.md` is the source of
+flag-gated. **`customized_robotwin/script/bench_script/plans/SEED_TRAJECTORY_PLAN.md` is the source of
 truth — read it first.** Current run status is in [[status_current]].
 
 **Interface — two env vars**, both mirroring each other, both stamped per-record:
@@ -98,4 +98,4 @@ structurally TIGHTER than the rollout (sufficient-not-necessary joint gate; sing
 orientation × grasp × arm; reduced IK seeds; grid resolution), so it can false-reject real
 successes. Seeding is robust to that because curobo stays the arbiter. Superset-fix recipe if ever
 revived: ungated eps* + union over orientations/grasps/arms + full seeds + empirical calibration.
-See SEED_TRAJECTORY_PLAN.md §7.
+See customized_robotwin/script/bench_script/plans/SEED_TRAJECTORY_PLAN.md §7.

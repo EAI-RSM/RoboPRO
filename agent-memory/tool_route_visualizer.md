@@ -86,5 +86,5 @@ its GOAL waypoint. Which leg binds depends on where the cup and coaster happened
 "place-only" scene just means the destination was in the crowded region and the pick was not.
 See [[tool_geometric_metric]] for why the bottleneck is the endpoint.
 
-`TASK_METRIC_ROUTE_VISUALIZATION_PLAN.md` §5/§6 still specify minimum-legs-only ("# only when
+`customized_robotwin/script/bench_script/plans/TASK_METRIC_ROUTE_VISUALIZATION_PLAN.md` §5/§6 still specify minimum-legs-only ("# only when
 tied", "every minimum-leg 3D PNG") and are out of sync with the code.

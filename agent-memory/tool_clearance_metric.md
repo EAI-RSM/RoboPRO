@@ -7,7 +7,7 @@ metadata:
 
 A scene-difficulty metric — "how boxed-in is the target." `clearance_metric_3d.py` in
 `customized_robotwin/script/bench_script/` is the live 2.5D pipeline (added `592af56` alongside
-`CLEARANCE_2D_TO_3D.md`, the 2D→2.5D explainer).
+`customized_robotwin/script/bench_script/plans/CLEARANCE_2D_TO_3D.md`, the 2D→2.5D explainer).
 
 **Post-refactor (2026-07-29) most of the compute lives in `lib/`, not in this file** — see
 [[domain_bench_script_layout]]. The 2D predecessor `clearance_metric.py` was **DELETED** (10 of its

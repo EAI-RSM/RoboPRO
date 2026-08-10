@@ -6,7 +6,7 @@ metadata:
 ---
 
 **User scope directive (2026-07-31): visibility is a separate artifact, not part of
-`TASK_METRIC_CORRELATION_PLAN.md`.** Do not measure it, add it to task-metric records, or use it as
+`customized_robotwin/script/bench_script/plans/TASK_METRIC_CORRELATION_PLAN.md`.** Do not measure it, add it to task-metric records, or use it as
 an association covariate unless the user explicitly brings visibility back into scope. Preserve
 the existing visibility tooling and findings; this directive defers their use rather than deleting
 them.

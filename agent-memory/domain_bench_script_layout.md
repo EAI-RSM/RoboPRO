@@ -6,8 +6,8 @@ metadata:
 ---
 
 Codex refactored `customized_robotwin/script/bench_script/` on 2026-07-29 (branch
-`codex/bench-script-refactor`, commits `ea31499`..`abb917a`, following `REFACTOR_PLAN.md` which is
-still in that directory). **Structural only — no behaviour or algorithm changes**, deliberately, so
+`codex/bench-script-refactor`, commits `ea31499`..`abb917a`, following `customized_robotwin/script/bench_script/plans/REFACTOR_PLAN.md`, which is
+kept as the historical execution record). **Structural only — no behaviour or algorithm changes**, deliberately, so
 already-collected A/B data stays comparable. Net ≈ −6800/+5700 lines.
 
 **THE RULE, and the most important outcome: library code must never import from a CLI script.**
@@ -35,6 +35,10 @@ these mixins**, not in `analyze_occluder_visibility.py`.
 `metric_viz.py`. The 2026-08-10 cleanup also moved `reachability_view.py` and
 `carry_object_spheres.py` under `lib/`; their runnable forms are
 `python -m lib.reachability_view` and `python -m lib.carry_object_spheres`.
+
+**Internal execution/design documents live under `bench_script/plans/`.** Keep top-level
+`bench_script/` for runnable entry points, tests, and support files; do not move these plans into
+the published `docs/` site.
 
 **Deleted outright — do not go looking for them:** `clearance_metric.py` (the 2D tool; 10 of its 14
 shared functions were byte-identical to the 3D file and nothing imported it), plus

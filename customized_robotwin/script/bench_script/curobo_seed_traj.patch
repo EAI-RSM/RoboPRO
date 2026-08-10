@@ -12,7 +12,7 @@ index c2b3d97..c9ac356 100644
 +    #: unhelpful external seed can only be ignored -- never cause a false rejection. Shape
 +    #: ``(k, action_horizon, dof)`` or ``(k, 1, action_horizon, dof)`` with ``k <= num_trajopt_seeds
 +    #: * noisy_trajopt_seeds``. Used only on the ``plan_single`` path with ``enable_opt`` and when no
-+    #: graph seed was produced. Leave None for stock behavior. See SEED_TRAJECTORY_PLAN.md.
++    #: graph seed was produced. Leave None for stock behavior. See plans/SEED_TRAJECTORY_PLAN.md.
 +    seed_traj: Optional[torch.Tensor] = None
 +
      def __post_init__(self):
@@ -35,7 +35,7 @@ index c2b3d97..c9ac356 100644
 +        # SAME format the internal graph planner uses: our k rows become the first k of the trajopt
 +        # seed batch and get_seed_set() fills the remaining slots with curobo's own linear seeds.
 +        # Only when enable_opt and no graph seed was produced (trajopt_seed_traj still None). See
-+        # SEED_TRAJECTORY_PLAN.md.
++        # plans/SEED_TRAJECTORY_PLAN.md.
 +        if (
 +            getattr(plan_config, "seed_traj", None) is not None
 +            and plan_config.enable_opt
@@ -77,7 +77,7 @@ index c2b3d97..c9ac356 100644
 +            # --- ROBOPRO SEED DUMP (Phase 0a, temporary, revertible) -------------------
 +            # Env-guarded, dumps the FINAL trajopt seed format ONCE so the clearance-route
 +            # seed builder can match it exactly. Zero-impact when ROBOPRO_SEED_DUMP is unset.
-+            # Remove this whole block after Phase 0. See SEED_TRAJECTORY_PLAN.md.
++            # Remove this whole block after Phase 0. See plans/SEED_TRAJECTORY_PLAN.md.
 +            import os as _rp_os
 +            if _rp_os.environ.get("ROBOPRO_SEED_DUMP") and not getattr(type(self), "_robopro_seed_dumped", False):
 +                try:

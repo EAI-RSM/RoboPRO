@@ -56,7 +56,7 @@ orientation: right false-keeps = 39,051 / 93,878 kept (41.60%; 28.41% of the who
 38,299 / 100,230 (38.21%; 27.86%). The looseness is present across the height stack and rises at
 the top slices. This does not answer whether envelope-only geometric eps* preserves scene rank;
 the saved per-voxel `false_keep_mask.npz` artifacts exist specifically for the Stage 3 route
-cross-reference in `GEOMETRIC_EPS_VALIDATION_PLAN.md`.
+cross-reference in `customized_robotwin/script/bench_script/plans/GEOMETRIC_EPS_VALIDATION_PLAN.md`.
 
 **Workflow gotchas:**
 - After changing ANY `--occ-*` / `--reach-*` / grid arg you MUST re-run the PRODUCER; the validator

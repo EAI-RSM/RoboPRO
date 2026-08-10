@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Compare envelope-only geometric eps* with the gated IK metric on identical scenes.
 
-This is Stage 3 of GEOMETRIC_EPS_VALIDATION_PLAN.md.  Each seed builds one occluder scene, then
+This is Stage 3 of plans/GEOMETRIC_EPS_VALIDATION_PLAN.md.  Each seed builds one occluder scene, then
 measures the same grasp-to-pad leg with:
 
 * the gated graph (scene IK volume plus the joint-continuity gate), and
