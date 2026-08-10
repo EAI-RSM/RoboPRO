@@ -368,7 +368,7 @@ def test_prepare_instruction_preserves_visual_only_and_fits_graph(tmp_path):
     state["held_by_valid"] = np.ones_like(held)
     placement = prepare_instruction(
         task, model, observation, InputCondition.VISUAL_RETRIEVED_GRAPH,
-        RetrievalContract(), previous_phase=grasp.prompt_phase,
+        RetrievalContract(), previous_phase="placement",
     )
     assert placement.prompt_phase == "placement"
     assert placement.selected_fact_count == 1

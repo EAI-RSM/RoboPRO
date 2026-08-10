@@ -137,8 +137,10 @@ class RetrievalContract:
 
 
 PROTOCOL_INVARIANTS = (
-    "Both conditions use identical images, state, instruction, seeds, checkpoint, and action chunking.",
-    "The only treatment difference is retrieved graph text appended to the instruction.",
+    "Both conditions use identical tasks, seeds, images, robot state, checkpoint, action representation, nominal chunk horizon, and evaluation criteria.",
+    "The graph-aware treatment may use graph-derived phase instructions, task-relevant event-triggered replanning, and active-gripper protection.",
+    "Prompt phases, executed chunk lengths, and chunk-interruption counts are treatment outputs and must be logged rather than claimed as controlled variables.",
+    "Reported effects compare the complete graph-aware planning system with visual-only rollout; they do not isolate graph prose alone.",
     "Future expert action nodes and outcomes are never policy inputs.",
     "Only true facts with valid evidence are serialized.",
     "Retrieval and serialization are deterministic for a fixed frame and contract.",

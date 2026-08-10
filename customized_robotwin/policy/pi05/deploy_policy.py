@@ -10,9 +10,13 @@ if str(repository_root) not in sys.path:
 
 from experiments.graph_conditioned_pi05.contract import InputCondition, RetrievalContract
 from experiments.graph_conditioned_pi05.live_adapter import (
+    action_graph_state,
     keep_active_gripper_closed,
-    live_task_state,
     prepare_instruction,
+)
+from experiments.graph_conditioned_pi05.graph_replanning import (
+    GraphControllerState,
+    PromptPhase,
 )
 
 parent_directory = os.path.dirname(os.path.abspath(__file__))
@@ -54,78 +58,103 @@ def get_model(usr_args):
     )
 
 
+def _controller(task_env):
+    controller = getattr(task_env, "_graph_controller", None)
+    if controller is None:
+        controller = GraphControllerState()
+        task_env._graph_controller = controller
+    return controller
+
+
+def _prepare_graph_prompt(task_env, model, observation, controller):
+    prepared = prepare_instruction(
+        task_env, model, observation, _GRAPH_CONDITION, _GRAPH_CONTRACT,
+        previous_phase=controller.phase.value,
+    )
+    active_prompt = getattr(task_env, "_graph_active_prompt", None)
+    prompt_updated = prepared.instruction != active_prompt
+    if model.observation_window is None or prompt_updated:
+        model.set_language(prepared.instruction)
+        task_env._graph_active_prompt = prepared.instruction
+    task_env._graph_prompt_phase = controller.phase.value
+    task_env._graph_held_arm = controller.held_arm
+    stats = getattr(task_env, "_graph_conditioning_stats", None)
+    if stats is None:
+        stats = []
+        task_env._graph_conditioning_stats = stats
+    stats.append(
+        {
+            "retrieved": prepared.retrieved_fact_count,
+            "selected": prepared.selected_fact_count,
+            "dropped": prepared.dropped_fact_count,
+            "graph_tokens": prepared.graph_token_count,
+            "full_prompt_tokens_estimate": prepared.full_prompt_token_count_estimate,
+            "destination_seed_available": prepared.destination_seed_available,
+            "prompt_phase": controller.phase.value,
+            "prompt_updated": prompt_updated,
+        }
+    )
+
+
+def _record_graph_observation(task_env, controller, state, remaining_actions):
+    decision, record = controller.observe(state, remaining_actions)
+    events = getattr(task_env, "_graph_delta_events", None)
+    if events is None:
+        events = []
+        task_env._graph_delta_events = events
+    if record["events"] or record["persistence"] or record["requires_replan"]:
+        events.append(record)
+    task_env._graph_prompt_phase = controller.phase.value
+    task_env._graph_held_arm = controller.held_arm
+    if decision.requires_replan:
+        task_env._graph_chunk_interrupts += 1
+    return decision.requires_replan
+
+
+def _execute_action_chunk(task_env, model, observation, actions, controller):
+    for index, action in enumerate(actions):
+        executed_action = (
+            keep_active_gripper_closed(action, controller.held_arm)
+            if controller.phase is PromptPhase.PLACEMENT
+            else action
+        )
+        task_env.take_action(executed_action)
+        controller.actions_since_replan += 1
+        observation = task_env.get_obs()
+        input_rgb_arr, input_state = encode_obs(observation)
+        model.update_observation_window(input_rgb_arr, input_state)
+        state = action_graph_state(task_env, observation, _GRAPH_CONTRACT)
+        if _record_graph_observation(
+            task_env, controller, state, len(actions) - index - 1
+        ):
+            break
+
+
 def eval(TASK_ENV, model, observation):
+    controller = None
     if _GRAPH_CONDITION is InputCondition.VISUAL_RETRIEVED_GRAPH:
-        previous_phase = getattr(TASK_ENV, "_graph_prompt_phase", "grasp")
-        prepared = prepare_instruction(
-            TASK_ENV, model, observation, _GRAPH_CONDITION, _GRAPH_CONTRACT,
-            previous_phase=previous_phase,
-        )
-        TASK_ENV._graph_prompt_phase = prepared.prompt_phase
-        active_prompt = getattr(TASK_ENV, "_graph_active_prompt", None)
-        if model.observation_window is None or prepared.instruction != active_prompt:
-            model.set_language(prepared.instruction)
-            TASK_ENV._graph_active_prompt = prepared.instruction
-        stats = getattr(TASK_ENV, "_graph_conditioning_stats", None)
-        if stats is None:
-            stats = []
-            TASK_ENV._graph_conditioning_stats = stats
-        stats.append(
-            {
-                "retrieved": prepared.retrieved_fact_count,
-                "selected": prepared.selected_fact_count,
-                "dropped": prepared.dropped_fact_count,
-                "graph_tokens": prepared.graph_token_count,
-                "full_prompt_tokens_estimate": prepared.full_prompt_token_count_estimate,
-                "destination_seed_available": prepared.destination_seed_available,
-                "prompt_phase": prepared.prompt_phase,
-                "prompt_updated": prepared.instruction != active_prompt,
-            }
-        )
+        controller = _controller(TASK_ENV)
+        if controller.frame == 0:
+            _record_graph_observation(
+                TASK_ENV,
+                controller,
+                action_graph_state(TASK_ENV, observation, _GRAPH_CONTRACT),
+                0,
+            )
+        _prepare_graph_prompt(TASK_ENV, model, observation, controller)
     elif model.observation_window is None:
         model.set_language(TASK_ENV.get_instruction())
-
     input_rgb_arr, input_state = encode_obs(observation)
     model.update_observation_window(input_rgb_arr, input_state)
     actions = model.get_action()[:model.pi0_step]
-
+    if controller is not None:
+        _execute_action_chunk(TASK_ENV, model, observation, actions, controller)
+        return
     for action in actions:
-        phase = getattr(TASK_ENV, "_graph_prompt_phase", "grasp")
-        held_arm = getattr(TASK_ENV, "_graph_held_arm", None)
-        executed_action = (
-            keep_active_gripper_closed(action, held_arm)
-            if _GRAPH_CONDITION is InputCondition.VISUAL_RETRIEVED_GRAPH
-            and phase == "placement"
-            else action
-        )
-        TASK_ENV.take_action(executed_action)
+        TASK_ENV.take_action(action)
         observation = TASK_ENV.get_obs()
         input_rgb_arr, input_state = encode_obs(observation)
         model.update_observation_window(input_rgb_arr, input_state)
-        if _GRAPH_CONDITION is not InputCondition.VISUAL_RETRIEVED_GRAPH:
-            continue
-
-        event = live_task_state(TASK_ENV, observation, _GRAPH_CONTRACT)
-        if phase == "grasp" and event.target_held:
-            TASK_ENV._graph_prompt_phase = "placement"
-            TASK_ENV._graph_held_arm = event.held_arm
-            TASK_ENV._graph_chunk_interrupts += 1
-            break
-        if phase == "placement":
-            if event.target_held:
-                TASK_ENV._graph_held_arm = event.held_arm
-                TASK_ENV._graph_held_loss_count = 0
-            else:
-                TASK_ENV._graph_held_loss_count += 1
-                if TASK_ENV._graph_held_loss_count >= 2:
-                    TASK_ENV._graph_prompt_phase = "grasp"
-                    TASK_ENV._graph_held_arm = None
-                    TASK_ENV._graph_chunk_interrupts += 1
-                    break
-            if event.target_inside_destination or event.release_ready:
-                TASK_ENV._graph_prompt_phase = "release"
-                TASK_ENV._graph_chunk_interrupts += 1
-                break
 
 
 def reset_model(model):

@@ -648,6 +648,8 @@ def eval_policy(task_name,
         # "Prompt is required" on the first get_action.
         model.reset_model()
         TASK_ENV._graph_conditioning_stats = []
+        TASK_ENV._graph_delta_events = []
+        TASK_ENV._graph_controller = None
         TASK_ENV._graph_prompt_phase = "grasp"
         TASK_ENV._graph_active_prompt = None
         TASK_ENV._graph_held_arm = None
@@ -705,6 +707,7 @@ def eval_policy(task_name,
                         item["prompt_updated"] for item in graph_stats
                     )),
                     "chunk_interrupt_count": int(TASK_ENV._graph_chunk_interrupts),
+                    "delta_events": list(TASK_ENV._graph_delta_events),
                 }
             if collision_metrics_active:
                 col = TASK_ENV.get_collision_metrics()

@@ -20,6 +20,7 @@ from .contract import (
     stable_aliases,
 )
 from .graph_serializer import PackedItem
+from .graph_replanning import ActionGraphState, Evidence, TaskGoal
 
 
 RELEASE_READY_VERTICAL_CLEARANCE_M = 0.10
@@ -55,6 +56,123 @@ class LiveTaskState:
     held_arm: str | None
     target_inside_destination: bool
     release_ready: bool
+
+
+def _aggregate_evidence(values: np.ndarray, valid: np.ndarray) -> Evidence:
+    """Reduce a relevant relation slice without converting unknown to false."""
+    values = np.asarray(values, dtype=np.bool_)
+    valid = np.asarray(valid, dtype=np.bool_)
+    if values.shape != valid.shape:
+        raise ValueError("relation values and validity mask are not aligned")
+    if not np.any(valid):
+        return Evidence.UNKNOWN
+    return Evidence.TRUE if np.any(values & valid) else Evidence.FALSE
+
+
+def task_goal_from_env(task_env: Any, catalog: Iterable[dict[str, Any]]) -> TaskGoal:
+    """Resolve explicit object IDs and the placement relation for control."""
+    catalog = tuple(catalog)
+    roles = task_env.get_role_names() if hasattr(task_env, "get_role_names") else {}
+    roles = roles if isinstance(roles, dict) else {}
+    target_ids = set()
+    if roles.get("target_id") is not None:
+        target_ids.add(int(roles["target_id"]))
+    target_ids.update(int(value) for value in roles.get("target_ids", ()))
+    if not target_ids:
+        target_ids.update(
+            int(entry["object_id"]) for entry in catalog if bool(entry.get("is_target"))
+        )
+    destination_ids = destination_ids_from_task(task_env, catalog)
+    relation = roles.get("goal_relation") or getattr(
+        task_env, "benchmark_goal_relation", None
+    )
+    if relation is None:
+        instruction = str(task_env.get_instruction()).lower()
+        relation = "on" if re.search(r"\b(?:on|onto)\b", instruction) else "in"
+    return TaskGoal(tuple(sorted(target_ids)), destination_ids, str(relation).lower())
+
+
+def action_graph_state(
+    task_env: Any,
+    observation: dict[str, Any],
+    contract: RetrievalContract,
+) -> ActionGraphState:
+    """Extract action-relevant graph predicates with three-valued validity."""
+    support = observation.get("benchmark_support") or {}
+    relation_state = support.get("relation_state")
+    object_state = support.get("object_state")
+    if relation_state is None or object_state is None:
+        raise ValueError("Live observation is missing benchmark graph support")
+    catalog = task_env._get_benchmark_object_catalog()
+    retriever = LiveGraphRetriever(catalog, relation_state, object_state, contract)
+    goal = task_goal_from_env(task_env, catalog)
+    index_by_id = {
+        int(object_id): index for index, object_id in enumerate(retriever.object_ids)
+    }
+    target_indices = [index_by_id[value] for value in goal.target_ids if value in index_by_id]
+    destination_indices = [
+        index_by_id[value] for value in goal.destination_ids if value in index_by_id
+    ]
+    if not target_indices or not destination_indices:
+        raise ValueError("task goal IDs are absent from the live relation state")
+
+    held = np.asarray(relation_state.get("held_by", ()), dtype=np.bool_)
+    held_valid = retriever._valid("held_by", held) if held.ndim == 2 else np.zeros_like(held)
+    held_evidence = _aggregate_evidence(held[target_indices], held_valid[target_indices])
+    held_arm = None
+    if held_evidence is Evidence.TRUE:
+        for target_index in target_indices:
+            active = np.flatnonzero(held[target_index] & held_valid[target_index])
+            if len(active):
+                name = retriever.effector_names[int(active[0])].lower()
+                held_arm = "left" if "left" in name else "right" if "right" in name else None
+                break
+
+    goal_values = np.asarray(relation_state.get(goal.relation, ()), dtype=np.bool_)
+    if goal_values.ndim == 2:
+        goal_valid = retriever._valid(goal.relation, goal_values)
+        selection = np.ix_(target_indices, destination_indices)
+        goal_evidence = _aggregate_evidence(goal_values[selection], goal_valid[selection])
+    else:
+        goal_evidence = Evidence.UNKNOWN
+
+    reachable = np.asarray(relation_state.get("reachable_by", ()), dtype=np.bool_)
+    reachable_evidence = Evidence.UNKNOWN
+    if reachable.ndim == 2:
+        reachable_valid = retriever._valid("reachable_by", reachable)
+        reachable_evidence = _aggregate_evidence(
+            reachable[target_indices], reachable_valid[target_indices]
+        )
+
+    visible = np.asarray(relation_state.get("visible_to", ()), dtype=np.bool_)
+    visible_evidence = Evidence.UNKNOWN
+    if visible.ndim == 2 and contract.default_camera in retriever.camera_names:
+        camera_index = retriever.camera_names.index(contract.default_camera)
+        visible_valid = retriever._valid("visible_to", visible)
+        visible_evidence = _aggregate_evidence(
+            visible[target_indices, camera_index],
+            visible_valid[target_indices, camera_index],
+        )
+
+    blocks = np.asarray(relation_state.get("blocks", ()), dtype=np.bool_)
+    blocked_evidence = Evidence.UNKNOWN
+    if blocks.ndim == 2:
+        blocks_valid = retriever._valid("blocks", blocks)
+        blocked_evidence = _aggregate_evidence(
+            blocks[:, target_indices], blocks_valid[:, target_indices]
+        )
+
+    legacy = live_task_state(task_env, observation, contract)
+    if legacy.release_ready or legacy.target_inside_destination:
+        goal_evidence = Evidence.TRUE
+    return ActionGraphState(
+        held=held_evidence,
+        goal_satisfied=goal_evidence,
+        path_blocked=blocked_evidence,
+        reachable=reachable_evidence,
+        visible=visible_evidence,
+        held_arm=held_arm,
+    )
 
 
 def _round1(value: float) -> float:
@@ -184,8 +302,10 @@ def live_task_state(
     if relation_state is None or object_state is None:
         raise ValueError("Live observation is missing benchmark graph support")
     catalog = task_env._get_benchmark_object_catalog()
-    destination_ids = destination_ids_from_task(task_env, catalog)
+    goal = task_goal_from_env(task_env, catalog)
+    destination_ids = goal.destination_ids
     retriever = LiveGraphRetriever(catalog, relation_state, object_state, contract)
+    retriever.is_target = np.isin(retriever.object_ids, goal.target_ids)
 
     held = np.asarray(relation_state.get("held_by", ()), dtype=np.bool_)
     held_valid = retriever._valid("held_by", held) if held.ndim == 2 else held
@@ -290,7 +410,9 @@ def keep_active_gripper_closed(action: np.ndarray, held_arm: str | None) -> np.n
 
 
 def compact_placement_hint(
-    retriever: "LiveGraphRetriever", destination_object_ids: Iterable[int]
+    retriever: "LiveGraphRetriever",
+    destination_object_ids: Iterable[int],
+    relation: str = "in",
 ) -> str:
     """Describe target-to-destination motion in short instruction-like language."""
     destination_ids = tuple(map(int, destination_object_ids))
@@ -319,9 +441,10 @@ def compact_placement_hint(
         directions.append("left" if left > 0 else "right")
     motion = " and ".join(directions)
     destination_label = retriever._label_by_id.get(destination_id, "destination")
+    preposition = "onto" if relation == "on" else "into"
     if motion:
-        return f"Move the held object {motion} into the {destination_label}."
-    return f"Place the held object into the {destination_label}."
+        return f"Move the held object {motion} {preposition} the {destination_label}."
+    return f"Place the held object {preposition} the {destination_label}."
 
 
 class LiveGraphRetriever:
@@ -761,8 +884,10 @@ def prepare_instruction(
     if object_state is None:
         raise ValueError("Live observation is missing benchmark_support/object_state")
     catalog = task_env._get_benchmark_object_catalog()
-    destination_ids = destination_ids_from_task(task_env, catalog)
+    goal = task_goal_from_env(task_env, catalog)
+    destination_ids = goal.destination_ids
     retriever = LiveGraphRetriever(catalog, relation_state, object_state, contract)
+    retriever.is_target = np.isin(retriever.object_ids, goal.target_ids)
     nodes, facts = retriever.retrieve(destination_ids)
     if previous_phase not in {"grasp", "placement", "release"}:
         raise ValueError(f"unknown graph prompt phase: {previous_phase}")
@@ -771,8 +896,6 @@ def prepare_instruction(
     prompt_phase = previous_phase
     if not guidance_supported:
         prompt_phase = "grasp"
-    elif prompt_phase == "grasp" and target_is_held(retriever):
-        prompt_phase = "placement"
     # During grasping, preserve the exact fine-tuning-style task instruction.
     # Once valid held_by evidence appears, switch monotonically to one compact,
     # categorical placement cue. The caller holds this prompt for the complete
@@ -781,8 +904,13 @@ def prepare_instruction(
     if prompt_phase in {"placement", "release"}:
         destination_label = retriever._label_by_id[destination_ids[0]]
         guidance = {
-            "placement": compact_placement_hint(retriever, destination_ids),
-            "release": f"Release the held object in the {destination_label}.",
+            "placement": compact_placement_hint(
+                retriever, destination_ids, relation=goal.relation
+            ),
+            "release": (
+                f"Release the held object "
+                f"{'on' if goal.relation == 'on' else 'in'} the {destination_label}."
+            ),
         }[prompt_phase]
         guidance_items.append(
             PackedItem(

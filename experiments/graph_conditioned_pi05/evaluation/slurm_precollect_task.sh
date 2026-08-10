@@ -14,14 +14,16 @@ if [[ -z "$task" || -z "$config" ]]; then
 fi
 
 echo "precollecting: $label ($task/$config)"
-export EVAL_SEED_TARGET=10
 export PROJECT_ROOT="${PROJECT_ROOT:-$ROOT_DIR}"
 export IMAGE="${IMAGE:-robopro:gb10}"
 export PULL_IMAGE="${PULL_IMAGE:-0}"
 export IMAGE_TAR="${IMAGE_TAR:-$ROOT_DIR/docker/gb10/robopro-gb10.tar}"
 
 "$ROOT_DIR/scripts/slurm/slurm_docker_gb10.sh" \
-  make precollect-seeds "TASK_NAME=$task" "TASK_CONFIG=$config"
+  make precollect-seeds \
+  "TASK_NAME=$task" \
+  "TASK_CONFIG=$config" \
+  EVAL_SEED_TARGET=10
 
 seed_file="$ROOT_DIR/benchmark/eval_seeds/$task/$config.txt"
 seed_count=0

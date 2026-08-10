@@ -1,13 +1,13 @@
 # Graph-conditioned pi0.5 proof of concept
 
-This isolated experiment compares two policy-input conditions while preserving the existing RoboTwin policy and evaluation pipeline:
+This experiment compares two rollout systems while preserving the fixed RoboTwin task and evaluation protocol:
 
 - `visual_only`: the original instruction, images, and robot state.
-- `visual_retrieved_graph`: the same inputs plus a deterministic, compact current-frame scene subgraph appended to the instruction.
+- `visual_retrieved_graph`: a graph-aware hierarchical rollout that uses deterministic current-frame task state to issue compact phase instructions, protect a held object, and interrupt stale action chunks when task-relevant relations change.
 
 ## Frozen protocol
 
-Both conditions must use the same episode/task split, seeds, pi0.5 checkpoint, images, state, instruction, action chunking, and evaluation settings. The only treatment difference is the graph text. Report the repository's existing success, hard-success, collision, and collision count/category metrics.
+Both conditions must use the same task configuration, episode seeds, pi0.5 checkpoint, camera images, robot state, action representation, nominal action-chunk horizon, and evaluation criteria. The graph-aware treatment is intentionally a system-level intervention: it may derive compact instructions from current graph state, interrupt the unused remainder of a nominal chunk after a task-relevant graph event, replan at that event boundary, and clamp the active gripper closed while transporting an object known to be held. These mechanisms are part of the treatment, not controlled variables. Results therefore estimate the utility of the complete graph-aware planning system relative to the standard visual-only rollout; they do not isolate the causal effect of graph prose alone. Report success, hard-success, collision, and collision count/category metrics, together with prompt phases and chunk-interruption counts.
 
 Retrieval is one-hop from target objects and robot effectors. It includes only true relations whose evidence-validity mask is true, uses `countertop_camera` for camera-conditioned facts, and excludes redundant inverse edges by default.
 
@@ -18,6 +18,8 @@ The live model server still uses the checkpoint tokenizer and enforces the compl
 Submit the paired 10-seed control/treatment array with `evaluation/submit_paired_10.sh`. When an unchanged visual-only baseline does not need to be rerun, submit only the same 10 graph-conditioned seeds with `evaluation/submit_graph_10.sh`. The graph-only wrapper creates ten array tasks indexed `0-9`, records `condition_mode=graph_only`, writes `pi05-graph_<job>_<index>.out` logs, and stores results only under `visual_retrieved_graph` in a timestamped `*-graph-only` batch directory.
 
 For the diverse benchmark campaign, run `evaluation/submit_diverse_5x10.sh`. It covers d10 clutter in office (`put_mouse_on_pad`, `put_book_on_book`), study (`put_cup_in_box`), kitchens (`put_spoon_on_plate_ks`), and kitchen-large (`put_sauce_can_in_basket`). If any task has fewer than ten expert-validated seeds, a five-task precollection array expands its task-specific bank first; an `afterok` coordinator then submits five paired arrays, for 100 policy episodes total. Pairing is exact within each task. Seed banks are task-specific because a simulator seed that admits a valid expert plan for one task need not admit one for another.
+
+After the paired visual-only baseline has been established, use `evaluation/submit_diverse_graph_5x10.sh` for graph-only iterations. It uses the same five tasks and validated seeds but submits five 10-task graph arrays (50 episodes total), stores `condition_mode=graph_only` in the campaign job table, and does not rerun visual-only.
 
 Expert action nodes, action outcomes, and future annotations are prohibited policy inputs. Current pi0.5 rollouts do not create equivalent online high-level action nodes, so action history is disabled in both conditions. Exported action nodes may be used only for offline analysis or labels after rollout.
 
@@ -39,7 +41,9 @@ The validator checks schema and frame alignment, repeats retrieval to detect non
 
 ## Phase 3 live pi0.5 adapter
 
-The dual-environment evaluator now retrieves from each live observation immediately before an action-chunk inference. `visual_only` keeps the original instruction path. `visual_retrieved_graph` assigns deterministic episode-level aliases from the complete catalog (`T1...` targets, `D1...` destinations, `O1...` other objects, and `L`/`R` end effectors), declares each selected node once, then refers to those aliases in natural-language relations. For example: `Nodes: T1 = sauce can at (0.4, -0.2, 0.8), size (0.1, 0.1, 0.2). Relations: T1 is reachable by L.` The model server packs this text with the checkpoint's PaliGemma SentencePiece tokenizer. Relation dependencies are atomic: a fact can only be selected when every alias it references is declared, and shared declarations are charged once. The policy implementation, images, state, action chunking, and existing evaluation metrics are unchanged.
+The dual-environment evaluator reads graph state from every live observation. `visual_only` executes the standard pi0.5 action chunks with the original task instruction. `visual_retrieved_graph` currently preserves that instruction during grasping, then uses valid `held_by`, containment, and target/destination geometry as an oracle task-state interface for the `grasp → placement → release` controller. A relevant state transition may discard the unused actions in the current nominal chunk and request a new chunk with a compact phase instruction. During placement, the active gripper channel is latched closed; only the release phase permits the model to open it. Thus prompt selection, executed chunk length, replanning frequency, and gripper protection may differ between conditions by design. Images, robot state, checkpoint, action representation, nominal chunk horizon, seeds, simulator configuration, and evaluation metrics remain controlled.
+
+The dependency-aware node/relation serializer and deterministic aliases (`T1...`, `D1...`, `O1...`, `L`, and `R`) remain available for offline analysis and future prompt ablations. The current live treatment sends compact graph-derived phase guidance rather than the general serialized `Nodes:` and `Relations:` sections. Any future treatment that restores general relation prose must be recorded as a distinct treatment version.
 
 Node labels prefer an explicit catalog `semantic_label`. When the semantic label merely repeats the simulator name, known infrastructure prefixes (`task_`, `target_`, `object_`, `model_`) and trailing numeric instance IDs are removed, separators become spaces, and meaningful descriptors such as direction and color remain. Object identity never depends on this display label: stable aliases distinguish duplicate labels.
 
