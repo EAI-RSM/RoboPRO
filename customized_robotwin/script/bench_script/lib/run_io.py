@@ -21,16 +21,6 @@ def sha256_file(path):
     return digest.hexdigest()
 
 
-def effective_out_dir(args):
-    """Resolve this run's output directory. main() has already rewritten
-    args.out_dir to <out-dir>/<type>/<timestamp> for a live run (or left it as the
-    user-supplied folder for --plot-only), so this is now a plain passthrough that
-    every downstream helper (run() + the analysis pass) shares to hit the SAME
-    folder. Shadows the analyze_natural_visibility helper of the same name, which
-    used a `_rollout` sibling-suffix scheme instead."""
-    return Path(args.out_dir)
-
-
 class _Tee:
     """Fan writes out to several streams at once, so a rollout's stdout/stderr lands
     in its per-episode log file while STILL showing up live on the console."""

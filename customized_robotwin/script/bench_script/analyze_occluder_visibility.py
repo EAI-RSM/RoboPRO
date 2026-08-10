@@ -67,7 +67,7 @@ from lib.occluder_ring import (
     draw_ring_config, occluder_ring_xy, parse_count_choices, parse_offset_specs,
 )
 from lib.planning_tuning import *  # noqa: F403
-from lib.run_io import _Tee, _prune_empty_topdirs, effective_out_dir
+from lib.run_io import _Tee, _prune_empty_topdirs
 from lib.scene_build import DR_CLEAN, build_cfg, dr_measure
 from lib.scene_constants import *
 from lib.visibility import (
@@ -82,7 +82,7 @@ robotwin_root = Path(os.environ["ROBOTWIN_ROOT"])
 os.chdir(robotwin_root)
 
 def run(args):
-    out_dir = effective_out_dir(args)
+    out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     img_dir = out_dir / "images"
     if args.save_images:
@@ -433,7 +433,7 @@ def main():
         run(args)
     group_label = {"offset": "occluder offset (m)",
                    "clutter_density": "table clutter density"}[args.group_by]
-    out_dir = effective_out_dir(args)
+    out_dir = Path(args.out_dir)
     analyze_kwargs = dict(group_key=args.group_by, group_label=group_label,
                           suptitle="Visibility with one olive-oil occluder (countertop)",
                           bar_title=f"Bucket proportions vs {group_label}")
