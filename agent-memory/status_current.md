@@ -12,10 +12,18 @@ metadata:
 Branch: `peng-training-branch` (the previous entry naming `codex/bench-script-refactor` was stale;
 that branch is 1 commit behind this one and the same line of work). Tip `e3a09ce`.
 
-- **64 of this branch's 82 commits exist only on this machine.** No remote contains them
-  (`git branch -r --contains HEAD` is empty) and there is no tracking branch. Tag
-  `pre-rehaul-2026-08-11` marks `e3a09ce`. **Pushing a backup ref is the first unfinished action.**
-- Untracked: `customized_robotwin/script/bench_script/plans/REHAUL_PLAN.md`. Nothing else is dirty.
+- **S1 IS DONE (2026-08-11). All local-only work is backed up off-machine.** Before it,
+  `git rev-list --all --not --remotes` was **71**; it is now **0**, verified against a fresh bare
+  clone rather than local tracking state. Five archive refs on `origin`:
+  `backup/peng-training-branch` (`0d7df5c`), `backup/occluder-testbench` (`91b2d26`),
+  `backup/pre-merge-35-occluder` (`35801cb`),
+  `backup/reachability-motion-validated-placement` (`585d307`),
+  `backup/visibility-constraint-experiments` (`41ee00f`), plus tag `pre-rehaul-2026-08-11` on
+  `e3a09ce`. The `backup/` prefix marks these as archives, not review requests — no PR was opened.
+- Scope note: pushing `peng-training-branch` alone would have saved only 64 of the 71 commits. Four
+  other branches held unique work, including `585d307`, the vanilla `--plan-algo` baseline that
+  [[domain_expert_baseline]] calls "recoverable from that commit."
+- Working tree clean. Tip is `0d7df5c` (rehaul plan + memory corrections); `e3a09ce` is its parent.
 - Against `origin/dev` (`64840ce`): **82 ahead, 60 behind**, merge base `aabeff4` (2026-06-25).
   See [[repo_env_and_git]] for the full divergence numbers and the stale-local-`dev` trap.
 
@@ -71,10 +79,13 @@ without reading the rest of the document. **Numbering is stable; do not renumber
 carries in-scope / out-of-scope / a done-when gate / verification commands, and the ones that must
 not change behaviour are marked NO-BEHAVIOUR-CHANGE.
 
-Order: **S1** (push backup ref — the 64 local-only commits are the largest standing risk), then
-**S2** (pytest harness, run on `peng-training-branch` *before* the move, so the port has a passing
-baseline to diff against), then S3/S4 (branch, port, make it run). S5 is parallelisable. S10 needs a
-user GPU run mid-section — schedule it early.
+Order: ~~S1~~ **done**, then **S2** (pytest harness — run it on `peng-training-branch` *before* the
+move, so the port has a passing baseline to diff against), then S3/S4 (branch, port, make it run).
+S5 is parallelisable. S10 needs a user GPU run mid-section — schedule it early.
+
+**Next up: S2.** Note one wrinkle recorded in its section — `pyproject.toml` is SHARED and
+byte-identical to `origin/dev`, so adding pytest to it is best sent as a one-line PR to dev rather
+than carried as a branch diff.
 
 One open question: whether to add §4e, the entry-point collapse (14 → ~4 subcommands). It is
 deliberately unsectioned because it renames every command and breaks Makefile targets,

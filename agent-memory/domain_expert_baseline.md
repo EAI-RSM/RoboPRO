@@ -199,3 +199,10 @@ reframe the seed becomes an honest negative result inside a positive paper. **Th
 `off` cell existing.** Also: `585d307` (2026-07-09) once added a true vanilla `--plan-algo` baseline
 (dev's grasp→lift→place); it is GONE from the tree, recoverable from that commit if a three-cell
 vanilla → direct → seed design is wanted.
+
+**Where `585d307` lives (backed up 2026-08-11).** It is the tip of
+`origin/backup/reachability-motion-validated-placement`. Until that push it existed **only on the
+local disk** — this note pointed at a commit one disk failure from being unrecoverable. Restore with
+`git show 585d307` or `git checkout origin/backup/reachability-motion-validated-placement`.
+Hamid's expert, vendored as a 5th `--plan-algo`, is likewise at
+`origin/backup/occluder-testbench` (`91b2d26`).
