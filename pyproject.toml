@@ -33,6 +33,9 @@ dependencies = [
     "pytorch3d",
 ]
 
+[dependency-groups]
+dev = ["pytest>=8"]
+
 [tool.uv]
 package = false
 
