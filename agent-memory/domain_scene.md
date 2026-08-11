@@ -33,9 +33,9 @@ The scene built by `analyze_occluder_visibility.py` (office `put_mouse_on_pad` h
     which COPIES the constants, so the asset must be known before those imports run. The flag value
     is consumed by an argv pre-scan at the top of the file that sets the env var; argparse registers
     it only for `--help` and typo rejection. Do not "simplify" that away.
-  - The original scene is reproduced by `--num-occluders 1 --no-random-ring-rotation --offsets 0.2`.
-    Asserted that `occluder_ring_xy(n=1, angle0=0)` returns exactly `(target_x, target_y - offset)`,
-    the same point the old hardcoded `oy = mp[1] - occluder_offset` produced.
+  - Since S3 (2026-08-11), `--offsets 0.2` means a **20 cm closest-surface gap**, not the old
+    20 cm center offset. `--num-occluders 1 --no-random-ring-rotation` still places the object on
+    the front (−y) ray, but its center is farther away by the two yaw-aware footprint supports.
   - Per-occluder random YAW stays on (`rotate_lim=[0, 3.14, 0]`) because the original had it too.
     Faithful, but a rectangular carton presents a different silhouette per seed in a way the round
     bottle never did — a real difference in variance between the two assets.
@@ -62,8 +62,13 @@ Use the true posed collision mesh per z (see [[tool_clearance_metric]] `--occ-sh
 asserts the formation is byte-identical per (seed, offset-spec) — that identity is what guarantees
 the measured scene equals the rolled-out scene, so run it after any change there.
 Occluders spawn as a **RING**, controlled by env attrs set BEFORE `setup_demo`:
-`spawn_occluder`, `occluder_offset` (ring RADIUS), `num_occluders`, `occluder_angle0` (radians;
-0 = bottle 0 in front at −y). Off-table ring positions are silently dropped. Destination pad is
+`spawn_occluder`, `occluder_offset` (**edge-to-edge gap**, despite the legacy name),
+`num_occluders`, `occluder_angle0` (radians; 0 = bottle 0 in front at −y). The legacy
+`occluder_radii` attribute now carries per-occluder requested gaps for compatibility. S3 moved the
+yaw-aware rectangle solver from dev commit `cf966f7` into `lib/footprint_geometry.py`; actor yaws
+are drawn before center placement so every realized gap is solved against the actual rotations.
+Off-table ring positions are silently dropped. The Makefile's `OCC_DISTANCE_CM` is converted to
+metres by the analyzer compatibility argument. Destination pad is
 parked at `PAD_XY=(0,−0.28)`. `SPAWN_BACK_FURNITURE` (default True, experiments set False) removes
 shelf/cabinet/wooden-box/file-holder for gripper workspace — the only core-repo edit, flag-gated;
 drawer/shelf/file-holder tasks must keep it True.

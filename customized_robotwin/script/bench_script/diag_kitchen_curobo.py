@@ -1,4 +1,5 @@
 """Diagnostic: reproduce INVALID_START_STATE_WORLD_COLLISION in kitchen-S tasks."""
+import argparse
 import sys, os
 sys.path.insert(0, os.path.dirname(__file__))
 from setup_paths import setup_paths
@@ -93,12 +94,17 @@ def test_start_state_collision(env, label):
             valid, status = gen.check_start_state(start_js)
             print(f"  {gen_name}.check_start_state: valid={valid}, status={status}")
 
-if __name__ == "__main__":
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--seeds", default="0,1,2",
+                        help="comma-separated kitchen scene seeds (default: 0,1,2)")
+    args = parser.parse_args()
+
     from bench_envs.kitchens.put_spoon_on_plate_ks import put_spoon_on_plate_ks
 
     TASK_ENV = put_spoon_on_plate_ks()
 
-    for seed in [0, 1, 2]:
+    for seed in [int(value.strip()) for value in args.seeds.split(",") if value.strip()]:
         print(f"\n{'='*60}")
         print(f"SEED {seed}")
         print(f"{'='*60}")
@@ -129,3 +135,7 @@ if __name__ == "__main__":
         print(f"check_success: {TASK_ENV.check_success()}")
         TASK_ENV.close_env()
         print(f"Closed seed {seed}")
+
+
+if __name__ == "__main__":
+    main()

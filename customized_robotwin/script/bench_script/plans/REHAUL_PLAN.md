@@ -269,10 +269,10 @@ cd customized_robotwin/script/bench_script && ../../../.venv/bin/python -m pytes
 ---
 
 ### S3 — Branch and port
-**SHARED files — highest care in the whole plan. Depends on: S1, S2.**
+**DONE 2026-08-11. SHARED files — highest care in the whole plan. Depends on: S1, S2.**
 
 📄 **Detailed technical plan: [S3_BRANCH_AND_PORT_PLAN.md](S3_BRANCH_AND_PORT_PLAN.md)** — approved,
-not started. Read that to execute; the summary below is orientation only.
+executed. The summary below is orientation only.
 
 ⚠️ **This summary was incomplete and the detailed plan corrects it.** Two gaps found during
 planning:
@@ -310,6 +310,13 @@ Do not set `action_noise_var: 0.001` — dev set it to 0 deliberately in `1f4a5f
 
 **Done when** `--help` passes on every top-level command and S2's pytest reports the same pass rate
 as the baseline.
+
+**Completion:** `peng-dev-new` was created from `origin/dev@64840ce`; all 106 retained exclusive
+files were ported byte-identically before shared carry-over, and `swept_volume_3d.py` remained
+excluded. The five omitted shared `bench_script/` files were resolved explicitly. Final CPU result:
+**49 passed, 1 skipped**; all top-level help commands and the `lib/task` layering gate pass. The
+edge-to-edge geometry is isolated in its own commit and its ring baseline was reviewed. Runtime/GPU
+reconciliation remains S4.
 
 **Verify with**
 ```bash

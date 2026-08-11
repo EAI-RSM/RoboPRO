@@ -4,9 +4,14 @@ Technical plan for section **S3** of [REHAUL_PLAN.md](REHAUL_PLAN.md).
 Starts on `peng-training-branch`, creates and switches to `peng-dev-new`.
 ~1 day. **SHARED files — highest care in the whole rehaul.**
 
-**Status: approved, not started. For Codex to execute** — see
-`agent-memory/feedback_role_boundary.md`: Claude plans, Codex implements, and approving a plan is
-not approving execution.
+**Status: complete (2026-08-11).** Implemented on `peng-dev-new` from `origin/dev@64840ce`.
+The Step 4 and final gates both report **49 passed, 1 skipped**; every top-level `--help`, the
+legacy ring entry point, and the layering check pass.
+
+Execution notes: the retained exclusive count was the corrected 106; `swept_volume_3d.py` was not
+ported. Dev already contained the Makefile's `OCC_DISTANCE_CM` rename, so no Makefile diff was
+needed; the refactored analyzer gained a centimetre-to-metre compatibility path for that existing
+entry point. The edge-to-edge baseline was deliberately reviewed in `test_ring_config`.
 
 ---
 

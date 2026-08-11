@@ -51,8 +51,7 @@ from setup_paths import setup_paths
 setup_paths()
 
 import torch  # noqa: E402
-from analyze_occluder_visibility import (make_occluder_task, PAD_XY, OCC_HALF_FOOTPRINT,  # noqa: E402
-                                         save_rollout_video)
+from analyze_occluder_visibility import make_occluder_task, PAD_XY, OCC_HALF_FOOTPRINT  # noqa: E402
 from analyze_natural_visibility import build_cfg, DR_CLEAN  # noqa: E402
 # IK machinery (fresh cuda-graph-off solver, frame transform, chunked batch solve)
 from reachability_map import _build_ik_solver, _solve_grid  # noqa: E402
@@ -261,7 +260,7 @@ def run(args):
         if not log:
             _safe_close(env)
             if args.save_video:
-                save_rollout_video(env, args.out_dir, seed)   # merge after close_env()
+                _save_rollout_video(env)
             continue
 
         # one consistent (table-on) world for all grids; one solver per arm for this seed
@@ -316,7 +315,7 @@ def run(args):
         torch.cuda.empty_cache()
         _safe_close(env)
         if args.save_video:
-            save_rollout_video(env, args.out_dir, seed)   # merge after close_env()
+            _save_rollout_video(env)
 
     if produced < len(requested):
         print(f"WARNING: only produced {produced}/{len(requested)} stable rollouts "
@@ -328,6 +327,16 @@ def _safe_close(env):
         env.close_env()
     except Exception:
         pass
+
+
+def _save_rollout_video(env):
+    """Merge frames after `_safe_close`; setup_demo already selected the output path."""
+    try:
+        if getattr(env, "FRAME_IDX", 0) > 0:
+            env.merge_pkl_to_hdf5_video()
+            env.remove_data_cache()
+    except Exception as exc:
+        print(f"[video] merge failed ({type(exc).__name__}: {exc}); figures are unaffected")
 
 
 def main():
