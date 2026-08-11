@@ -14,14 +14,14 @@ the reasoning behind decisions that look arbitrary from the diff.
 - Record what was surprising, not what the code already says. Delete what turns out to be wrong.
 
 **Working with the user**
-- [Role boundary](feedback_role_boundary.md) — CRITICAL: user is the scientist, agent is the engineer — but engineering must SERVE the science; classify validity/power/scope/quality; ask when unsure
+- [Role boundary](feedback_role_boundary.md) — CRITICAL: user is the scientist, agent is the engineer — but engineering must SERVE the science; classify validity/power/scope/quality; ask when unsure. **Codex implements, Claude plans; approving a plan is NOT approving execution. Explain the work before presenting decisions.**
 - [Scientific rigor](feedback_scientific_rigor.md) — faithful controls, scene-specific mechanisms OFF (test: can you construct a scene that breaks it?), **verify the treatment actually fired**, don't harden a claim ahead of its measurement
 - [Minimal changes](feedback_minimal_changes.md) — smallest diff; no frameworks; over-engineering is the WORST failure mode; "turn X off" never licenses building a replacement
 - [Script conventions](feedback_script_conventions.md) — timestamped folder + timings.json + legible results
 - [Math background](user_math_background.md) — strong stats/algebra, weak 3D geometry
 
 **Repo invariants**
-- [Env and git](repo_env_and_git.md) — required exports, remote URL, PR base branch
+- [Env and git](repo_env_and_git.md) — required exports, remote URL, PR base branch, the stale-local-`dev` trap, **commit-per-phase: every plan names its `→ COMMIT` points; shared-file changes get their own commit**
 - [SAPIEN gotchas](repo_sapien_gotchas.md) — 3.x API breaks, viewer unusable in VSCode
 - [Task assets](repo_task_assets.md) — task_objects.yml traps, OOD IDs, expert-first eval gate
 

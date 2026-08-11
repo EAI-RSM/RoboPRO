@@ -271,11 +271,31 @@ cd customized_robotwin/script/bench_script && ../../../.venv/bin/python -m pytes
 ### S3 — Branch and port
 **SHARED files — highest care in the whole plan. Depends on: S1, S2.**
 
+📄 **Detailed technical plan: [S3_BRANCH_AND_PORT_PLAN.md](S3_BRANCH_AND_PORT_PLAN.md)** — approved,
+not started. Read that to execute; the summary below is orientation only.
+
+⚠️ **This summary was incomplete and the detailed plan corrects it.** Two gaps found during
+planning:
+
+- **Five files inside `bench_script/` are SHARED with dev and cannot be bulk-copied** — each needs
+  an explicit decision: `analyze_occluder_visibility.py` (ours 447 L vs dev's 2,736 L),
+  `reachability_map.py` (351 vs 416), `visualize_task_scene.py`, `diag_kitchen_curobo.py`,
+  `setup_paths.py`. The first two are **add/add** conflicts where neither side is takeable whole.
+- **The edge-to-edge occluder fix (`cf966f7`) lives inside dev's `analyze_occluder_visibility.py`
+  and exists on our branch in no form at all.** Taking "ours" silently discards it. The detailed
+  plan adds a dedicated step to lift the ~127 lines of footprint geometry into `lib/`, isolated in
+  its own commit because it is the only part of S3 that changes scene semantics.
+
+The raw source-only count becomes **107** when this S3 plan is committed, not 102 (the earlier figure
+counted only files *changed since the fork*). S3 deliberately excludes `swept_volume_3d.py`, leaving
+**106 retained files** to port, including `agent-memory/`, `plans/`, and S2's `conftest.py` /
+`pytest.ini`.
+
 **In scope.**
 - Branch `peng-dev-new` off **`origin/dev` @ `64840ce`** — not local `dev`, which is two months
-  stale at `4b57b67`.
-- Bulk-copy the 102 exclusive files from `peng-training-branch` (no conflicts are possible; they
-  exist on no other branch).
+  stale at `4b57b67`. Cherry-pick `18abd2e` so the pytest gate can run.
+- Bulk-copy the 106 exclusive files from `peng-training-branch` (no conflicts are possible; they
+  exist on no other branch), then resolve the five shared ones above by decision.
 - Apply the shared carry-over listed in Part 2: `Robot.build_planner`, `seed_traj` +
   `attempts`/`trajopt_attempts`/`seeded`, `pi05_robopro_top_cam_jax` TrainConfig, `eval.sh` arg
   passing, `put_mouse_on_pad: 600`, the `include_collision` typo shim, two `.gitignore` lines.

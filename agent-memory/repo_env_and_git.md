@@ -25,6 +25,18 @@ ROBOTWIN_BENCH_TASK=bench. Every other script still needs the exports.
 `HaccerKat/EAI-RSM/RoboPRO`, which is invalid (three path segments) and fails push with "not a
 valid repository name". Fix with `git remote set-url origin git@github.com:EAI-RSM/RoboPRO.git`.
 
+**COMMIT PER PHASE (stated 2026-08-11).** Every plan must name its commit points explicitly as
+`→ COMMIT` markers between steps; never leave the count to the implementing agent. Rules:
+
+- one commit minimum per section, at the end, once the done-when gate passes;
+- **isolate shared-file changes in their own commit** — that is what makes the hunk cherry-pickable
+  for the upstream PR the fork policy requires;
+- commit *before* any step with an unpredictable outcome (iterative fix-and-rerun loops, GPU runs),
+  so that if it has to be abandoned the earlier steps survive.
+
+The reason is granular rollback and bisectable history across a 17,000-line restructure: when
+something breaks three sections later, the commit boundaries are what let you locate it.
+
 **PRs target `8-research-branch`, not `dev`** — `dev` is only the GitHub default. Use
 `gh pr create --base 8-research-branch`. The team uses stacked PRs: each sub-issue gets its own
 branch, PR'd into its *dependency's* branch rather than straight into `8-research-branch`; merge
