@@ -121,17 +121,29 @@ middle, so schedule it early rather than discovering it late.
 
 ---
 
-### S1 — Safety net
+### S1 — Safety net ✅ DONE 2026-08-11
 **Owner: user. Depends on: nothing.**
 
-64 of this branch's 82 commits exist only on this machine; `git branch -r --contains HEAD` is empty.
+`git rev-list --all --not --remotes` went **71 → 0**, verified against a fresh bare clone rather than
+local tracking state. Five archive refs on `origin`:
 
-- Push `peng-training-branch` to origin as a backup ref.
-- Tag `pre-rehaul-2026-08-11` already exists on `e3a09ce` (created 2026-08-11).
+| Remote ref | Tip | Holds |
+|---|---|---|
+| `backup/peng-training-branch` | `8dc44cb` | the main line |
+| `backup/occluder-testbench` | `91b2d26` | Hamid's expert vendored as a 5th `--plan-algo` |
+| `backup/pre-merge-35-occluder` | `35801cb` | reachability-path revert |
+| `backup/reachability-motion-validated-placement` | `585d307` | the vanilla `--plan-algo` baseline |
+| `backup/visibility-constraint-experiments` | `41ee00f` | free-target reachability experiment |
+
+Plus tag `pre-rehaul-2026-08-11` on `e3a09ce`. No PR opened — the `backup/` prefix marks these as
+archives.
+
+**Scope correction found during execution.** The original scope ("push `peng-training-branch`") would
+have saved only 64 of 71 commits. Four other local branches held unique work, including `585d307` —
+the vanilla baseline `agent-memory/domain_expert_baseline.md` calls *"recoverable from that commit"*,
+which until this push existed on one disk.
 
 **Out of scope.** Touching `scripts/validation/results/` — 13 GB, untracked, unregenerable.
-
-**Done when** a remote ref contains `e3a09ce`.
 
 ---
 
