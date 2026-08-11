@@ -35,7 +35,7 @@ the reasoning behind decisions that look arbitrary from the diff.
 
 **Tools**
 - [Clearance metric](tool_clearance_metric.md) — eps*, the 2.5D pipeline, known inaccuracies
-- [Geometric metric](tool_geometric_metric.md) — CPU-only envelope relaxation, target mask, Stage 3 gate, **study furniture IS in the obstacle set**, eps* is endpoint clearance
+- [Geometric metric](tool_geometric_metric.md) — **LIVE, not retired** (a 2026-08-10 sweep was over-broad and was reversed); CPU-only envelope relaxation, target mask, Stage 3 measured at rho=1.0 but gate-unpassed on n=6, **study furniture IS in the obstacle set**, eps* is endpoint clearance
 - [Route visualizer](tool_route_visualizer.md) — the "shifted figures" false alarm (refuted twice, don't redo), the 0.12 m tool-offset gap, config-hash forces a fresh `--out-dir` on every edit
 - [Task-metric validity](tool_task_metric_validity.md) — **MEASURED 2026-08-07**: eps is endpoint-pinned 800/800, the 12 cm wrist offset makes it uncorrelated (rho=0.078) with real grasp tightness, 72/100 buckets flip on a legal grasp choice; plus the CPU offline-rebuild trick
 - [Seed from clearance](tool_seed_from_clearance.md) — APPROACH_MODE/PLACEMENT_MODE, seed format, A/B design
@@ -43,6 +43,6 @@ the reasoning behind decisions that look arbitrary from the diff.
 - [VLA / pi05 port](tool_vla_pi05_port.md) — runs end to end no-expert; ONE GPU is enough, MEM_FRACTION is a ceiling, planner-free mode moves no arms silently
 
 **State**
-- [Current status](status_current.md) — branch, uncommitted, unverified, next steps + the 2026-07-30 finding that pre_grasp has NO headroom and carry_transit has all of it
+- [Current status](status_current.md) — branch, uncommitted, unverified, next steps, and the live rehaul decisions. VOLATILE ONLY — durable findings must not live here (the pre_grasp/carry_transit headroom finding was once advertised here and is correctly held by [feedback_scientific_rigor](feedback_scientific_rigor.md) and [domain_expert_baseline](domain_expert_baseline.md))
 - [Archive: planner comparison](archive_planner_comparison.md) — dead multi-planner line + its lessons
 - [Artifacts](reference_artifacts.md) — published Artifact URLs and their caveats

@@ -5,9 +5,24 @@ metadata:
   type: project
 ---
 
-**Retired 2026-08-10.** The source described here is preserved for inspection at
-`research_archive/bench_script_task_metric_2026/lib/geometric_metric.py`; it is intentionally not
-an importable or supported live module. `geometric_eps` was the additive CPU-only relaxation of
+**LIVE — the "Retired 2026-08-10" header this file used to carry was WRONG and is deleted
+(corrected 2026-08-11).** `lib/geometric_metric.py` is active under `bench_script/lib/` and imported
+by `task_metric.py`, `visualize_task_metric_routes.py`, `checks/test_geometric_metric.py` and
+`checks/test_task_metric_route_visualization.py`. The archive path this file used to name
+(`research_archive/bench_script_task_metric_2026/lib/geometric_metric.py`) **does not exist**.
+
+What happened: `7f759f4` swept the whole metric-generation and analysis pipeline into the archive.
+That was **broader than intended** — only the geometric-vs-gated *methodology validation* was meant
+to go — and it was reversed in `e3a09ce`. `research_archive/bench_script_task_metric_2026/README.md`
+records the reversal correctly and is the authority; this file lagged and misled a later session.
+The archive holds exactly four files: `README.md`, `compare_geometric_vs_gated.py`,
+`validate_task_geometric_ranking.py`, `validate_bucket_spec.py`.
+
+**The correlation research question is LIVE.** `analyze_metric_correlation.py` (metric ↔ VLA
+outcome) was never meant to be retired; only `compare_geometric_vs_gated.py` (geometric ↔ gated
+implementation agreement) was. Do not conflate the two again.
+
+`geometric_eps` is the additive CPU-only relaxation of
 [[tool_clearance_metric]]. It builds one endpoint-independent volume per `(scene, arm, cfg)` call
 and reuses it across an ordered list of world-space legs. Reachability comes only from the
 validated precomputed [[tool_reach_envelope]]; it imports no torch/curobo and constructs no IK
@@ -39,9 +54,17 @@ the unchanged `FREE & edt>=eps*` component. Physical anisotropic edge length is 
 clearance. This prevents the old BFS tie-break from selecting a short `zmin`-hugging route while
 leaving eps* unchanged; it is reporting-only and never enters `compute_route_configs` or a seed.
 
-The deleted `test_geometric_metric.py` formerly verified CPU-only imports, label-only target
-masking, and shared-volume `LegResult` behavior. It remains recoverable from Git history at
-`3dc788a`.
+`checks/test_geometric_metric.py` verifies CPU-only imports, label-only target masking, and
+shared-volume `LegResult` behaviour. (An earlier revision of this note called it "deleted" — that
+was part of the same over-broad sweep; the file is live.)
+
+**Stage 3 verdict, MEASURED (`results/geometric_vs_gated/20260731-110834`, 10 seeds):**
+`spearman_all = 1.0`, p = 0.0, against a `rank_threshold` of 0.8 — but **`rank_gate_pass: false`**,
+because only 6 of 10 scenes completed (seeds 4, 7, 8, 9 were `not_alignable`: the grid/EDT-equality
+and FREE-inclusion preconditions failed) and the runner judged n = 6 insufficient. So
+"geometric ≈ gated" is **concluded-but-under-powered**, not ratified. More seeds would settle it,
+and the geometric half is CPU-side. Do not state this as "geometric eps* has been validated";
+equally, do not state Stage 3 failed — the correlation was perfect where it could be computed.
 
 The archived `research_archive/bench_script_task_metric_2026/compare_geometric_vs_gated.py` was the
 Stage 3 runner. It rebuilds the same live scene once per

@@ -5,53 +5,78 @@ metadata:
   type: project
 ---
 
-**This is the only memory allowed to hold volatile state.** Last rewritten 2026-08-10.
+**This is the only memory allowed to hold volatile state.** Last rewritten 2026-08-11.
 
 ## Branch and worktree
 
-Branch: `codex/bench-script-refactor`.
+Branch: `peng-training-branch` (the previous entry naming `codex/bench-script-refactor` was stale;
+that branch is 1 commit behind this one and the same line of work). Tip `e3a09ce`.
 
-- The corrected second-pass plan is commit `20b7f80` at
-  `customized_robotwin/script/bench_script/plans/PRUNE_PLAN.md`.
-- Prune §1 is commit `3dc788a`: four confirmed orphan entry points were removed.
-- Prune §2 is commit `7f759f4`: the invalidated task-metric implementation is cold source under
-  `research_archive/bench_script_task_metric_2026/`; its six obsolete tests and three plans are
-  deleted, and the optional VLA metric post-process hook is detached.
-- Prune §3 is committed: seven surviving checks now live under
-  `customized_robotwin/script/bench_script/checks/` and run as modules.
-- Concurrent changes to `agent-memory/MEMORY.md` and the untracked
-  `agent-memory/domain_seed_conventions.md` are unrelated and must remain unstaged.
+- **64 of this branch's 82 commits exist only on this machine.** No remote contains them
+  (`git branch -r --contains HEAD` is empty) and there is no tracking branch. Tag
+  `pre-rehaul-2026-08-11` marks `e3a09ce`. **Pushing a backup ref is the first unfinished action.**
+- Untracked: `customized_robotwin/script/bench_script/plans/REHAUL_PLAN.md`. Nothing else is dirty.
+- Against `origin/dev` (`64840ce`): **82 ahead, 60 behind**, merge base `aabeff4` (2026-06-25).
+  See [[repo_env_and_git]] for the full divergence numbers and the stale-local-`dev` trap.
+
+## The rehaul plan (2026-08-11)
+
+`plans/REHAUL_PLAN.md` scopes a fresh `peng-dev-new` off **`origin/dev`**, with the research layer
+ported and consolidated rather than rewritten. Parts 0–3 (safety net, branch, ~150 lines of shared
+carry-over, the scripted 84-file cleanup) are ~2 days; Part 4 (research layer) is the bulk.
+
+Decisions taken this session, so they are not relitigated:
+
+- Goals: cheap future merges, clean architecture, dead-weight removal. Budget 1–2 weeks. Data
+  continuity **partial** — results stay readable, not re-runnable. Fork policy: track dev weekly.
+- **Task-metric line stays LIVE** — the correlation question is the research programme. Reach/
+  clearance tools port. `task/` is ported, instrumented, then pruned by measurement.
+- **`swept_volume_3d.py` is NOT ported** (412 L; last run 2026-07-15, the one real staleness
+  outlier). Its 285 MB of results stay on disk.
+- **Nothing under `scripts/` is dropped.** An earlier draft proposed deleting `scripts/upload/`,
+  `scripts/slurm/` and the five June OOD scripts (~1,142 L); all three **exist on `origin/dev`
+  unmodified by us**, so deleting them would be a shared-file edit — the exact merge tax the rehaul
+  exists to remove.
+- `phase4_approach_mode` `off` cell: **deferred, optional** (Part 6b). See [[domain_expert_baseline]]
+  for the pooling deadline that makes deferral non-free.
+- Entry-point collapse (14 → ~4 subcommands) is **flagged but NOT in scope** — awaiting an explicit
+  yes, because it renames every command and breaks Makefile targets and `run_approach_mode_ab.sh`.
 
 ## Preserved research state
 
-- The source rollout campaign remains complete at 3000 episodes with all source videos.
-- Metric post-processing remains partial at **620/3000**. All 620 episode JSONs remain under
-  `scripts/validation/results/task_metric_vla_full/association_d6_d10_d15/20260731-182037/metric_postprocess/`.
-- The independent route audit remains complete at 50 episodes and 200 figures.
-- No result directory was deleted or rewritten, and no metric process is active.
+- Source rollout campaign complete at 3000 episodes with all source videos.
+- Metric post-processing partial at **620/3000**, under
+  `results/task_metric_vla_full/association_d6_d10_d15/20260731-182037/metric_postprocess/`.
+  Not resumable (stored code hash matches no commit), and moot — any fingertip-clearance remedy
+  recomputes all of them.
+- Route audit complete at 50 episodes / 200 figures. No result directory deleted or rewritten.
+- `results/` totals ~13 GB, untracked and unregenerable. Rollouts are non-deterministic by design.
 
 ## Verification state
 
-Final CPU gates passed with the RoboTwin interpreter:
+Unchanged from the 2026-08-10 prune gates: all active/archive Python parses; CPU-safe top-level
+commands pass `--help`; CPU-safe checks pass as `python -m checks.<module>`; the lib/task→top-level
+dependency count is zero. `checks.smoke_test_seed_2a` and `diag_kitchen_curobo.py` remain **unrun
+(CUDA-only)** — do not claim those gates passed.
 
-- all 59 active/archive Python files parse;
-- all eight CPU-safe top-level commands pass `--help`;
-- all six CPU-safe checks pass as `python -m checks.<module>`;
-- the lib/task-to-top-level dependency count and active retired-module reference count are zero;
-- the top level contains exactly ten intended Python commands/bootstrap files and no checks;
-- the cold archive contains exactly ten source/spec files plus README and no `__init__.py`;
-- preservation receipts still report 620 metric records and 200 route figures;
-- `git diff --check` passes and `graphify update .` completed.
-
-Measured active-tree size is **13,033 Python lines** including checks and **11,715** excluding
-checks, down from the 20,152-line baseline. The cold archive holds 4,832 tracked lines and is not a
-repository-wide deletion.
-
-`checks.smoke_test_seed_2a` and `diag_kitchen_curobo.py` remain unrun because they require CUDA;
-do not claim those GPU gates passed.
+**Nothing has executed in this repo since 2026-07-31.** All of August has been prune/refactor work.
 
 ## Next action
 
-The approved pruning plan is complete. No further deletion or result processing is pending;
-preserve the two unrelated worktree changes noted above. The only unverified cleanup gates are the
-two explicitly CUDA-only commands.
+Not started — the rehaul is scoped, not begun.
+
+`plans/REHAUL_PLAN.md` now opens with a **Work breakdown** of twelve executable sections, S1–S12,
+each self-contained enough to prompt an agent with "write a technical plan for S6" or "execute S8"
+without reading the rest of the document. **Numbering is stable; do not renumber.** Each section
+carries in-scope / out-of-scope / a done-when gate / verification commands, and the ones that must
+not change behaviour are marked NO-BEHAVIOUR-CHANGE.
+
+Order: **S1** (push backup ref — the 64 local-only commits are the largest standing risk), then
+**S2** (pytest harness, run on `peng-training-branch` *before* the move, so the port has a passing
+baseline to diff against), then S3/S4 (branch, port, make it run). S5 is parallelisable. S10 needs a
+user GPU run mid-section — schedule it early.
+
+One open question: whether to add §4e, the entry-point collapse (14 → ~4 subcommands). It is
+deliberately unsectioned because it renames every command and breaks Makefile targets,
+`run_approach_mode_ab.sh:220`, and command strings recorded across `agent-memory/` and `plans/`.
+The `checks/` fixture consolidation is resolved — it is folded into S2.

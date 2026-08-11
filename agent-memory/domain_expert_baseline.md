@@ -124,8 +124,13 @@ unexplained; and the whole table is ONE task family (this bottle, this pad, this
 
 **Zero `off`-mode records existed as of 2026-07-30** (182 `direct`, 81 `seed`, 0 `off`). Superseded
 2026-07-31: `results/phase4_approach_mode/20260731-143654/` has an `off` cell with
-`placement_mode="scripted"` (n=2, 1 success) — so `off:scripted` DOES run. Still far too small to
-compare. The only
+`placement_mode="scripted"` (n=2, 1 success) — so `off:scripted` DOES run.
+
+**Counted 2026-08-11: the `off` cell now holds 5 episodes total** (2 at `20260731-143654`, 3 at
+`20260731-151143`), against plentiful `direct` and 13 `seed`. `20260731-151143` is an `off`-only run
+that produced 3 records and stopped — and it is **the most recent thing that has run in this repo at
+all**; nothing has executed since 2026-07-31. The ablation is parked mid-flight, on exactly the cell
+the headline claim needs. Still far too small to compare. The only
 comparison available is across code versions, matched on scene config (4 occluders, radius 0.2):
 
 - waypoints ON (pre-flag runs, Jul 17–27): **6/9 = 67%**, zero grasp failures
@@ -141,6 +146,15 @@ speed (~70 s/rollout), roughly 18 extra minutes. `off → direct` is the general
 Caveat on `off` as a control: the around-box waypoint is a one-occluder-in-front heuristic, so on a
 rotated multi-occluder ring it is arguably solving a different problem. Weak scientific control,
 but it is exactly the historical configuration, so it does answer "what did we have before".
+
+**POOLING DEADLINE — finishing `off` gets harder after the next `origin/dev` merge.** Every existing
+`direct` and `seed` record was collected under **centre-to-centre** occluder spacing. Dev's
+`cf966f7` reinterprets `occluder_offset` as a true **edge-to-edge** gap (yaw-aware), so after
+merging, the same nominal offset describes physically different scenes and new records **cannot be
+pooled with what is on disk**. Run `off` before the merge (~70 s/rollout, 20–30 min for a cell) and
+the ablation closes under shared semantics; run it after and the 5 existing `off` records are
+stranded and `direct`/`seed` need re-running too. **Deferred by user decision 2026-08-11** — recorded
+so the trade-off is not rediscovered. If the ablation is ever resumed, resume it *before* merging.
 
 ## PATH QUALITY is a second criterion, and the ablation was never scored on it (2026-07-31)
 

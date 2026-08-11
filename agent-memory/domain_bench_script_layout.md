@@ -65,5 +65,25 @@ formation is byte-identical per (seed, offset-spec), which is what guarantees th
 equals the rolled-out scene). `checks.smoke_test_seed_2a` needs a GPU and is the only check that the
 seed pipeline still produces a correctly shaped tensor. Nothing may exceed 1000 lines.
 
+**There are TWO eps\* quantities, not three (corrected 2026-08-11 — a structural sweep miscounted
+and the user caught it).** The two quantities are **gated** (IK + joint-continuity gate, GPU) and
+**geometric** (`lib/geometric_metric.py`, CPU envelope-relaxed). `geometric_metric` calls only
+`build_grid` + `widest_path_eps_3d` — 2 of the 5 steps, no IK solver — so it is a *shorter*
+pipeline, not a third copy.
+
+The real duplication is that **`clearance_metric_3d.py` and `lib/seed_from_clearance.py`
+independently drive the same full 5-step gated sequence**: `build_grid` → `label_volume` →
+`warm_start_branches_3d` → `widest_path_eps_3d` → `reconstruct_widest_path_3d`. Same quantity, two
+implementations, different purposes (measurement vs seeding). Not identical — the seed path adds a
+tau bisection the metric path lacks.
+
+**`lib/seed_from_clearance.py`'s docstring is STALE and hides this.** It claims *"It reuses
+clearance_metric_3d.py verbatim as a library — none of the metric maths is re-implemented here."*
+False since this refactor: enforcing "library code must never import from a CLI script" forced it
+off `clearance_metric_3d` and onto the `lib/` primitives directly (`.continuity`, `.ik_grid`,
+`.labeling`, `.widest_path`), and the header was never updated. **Worth a general check when
+touching `lib/`: does each module's docstring still name the modules it actually imports?** This one
+survived both a refactor and a prune pass.
+
 **Note on citing code in these notes:** prefer symbol names over `file:line`. The refactor moved
 almost every line number in the older memories, and grep-able names survive.
