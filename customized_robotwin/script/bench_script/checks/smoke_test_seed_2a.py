@@ -27,13 +27,14 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
+import pytest
 
 import clearance_metric_3d as cm
 from lib.ik_grid import select_arm
 from lib import seed_from_clearance as sfc
 
 
-def main():
+def main(argv=None):
     ap = argparse.ArgumentParser(description="Phase 2a smoke test (build_seed on a real scene)")
     ap.add_argument("--seed", type=int, default=1)
     ap.add_argument("--arm", choices=["left", "right", "auto"], default="auto")
@@ -48,7 +49,7 @@ def main():
     ap.add_argument("--zres", type=float, default=0.06, help="vertical slice spacing (m); coarse for speed")
     ap.add_argument("--ik-seeds", type=int, default=20)
     ap.add_argument("--out-dir", default=str(cm.RESULTS_DIR / "seed_smoke_2a"))
-    args = ap.parse_args()
+    args = ap.parse_args(argv)
 
     out_dir = Path(args.out_dir) / datetime.now().strftime("%Y%m%d-%H%M%S")
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -173,6 +174,11 @@ def main():
         print("        - 'could not connect': the joint gate disconnects gripper->grasp")
         print("          -> the climb-over has a real branch seam (raise --gate-tau or inspect the scene)")
         print("        Wrote smoke_result.json + timings.json")
+
+
+@pytest.mark.gpu
+def test_seed_2a_smoke():
+    main([])
 
 
 if __name__ == "__main__":
