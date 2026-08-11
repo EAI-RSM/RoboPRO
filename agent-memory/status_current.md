@@ -84,10 +84,12 @@ pytest's import path; this keeps CPU collection valid without pretending the GPU
 
 ## Next action
 
-S1 and S2 are done. Before S3 creates `peng-dev-new`, cherry-pick the atomic pytest dependency
-commit (`pyproject.toml` + `uv.lock`) onto an upstream PR branch targeting `8-research-branch`; S3
-must inherit both files together because `bootstrap_uv.sh` uses `uv sync --locked`. Then execute S3
-from `peng-training-branch` and compare its port against the 49-pass/1-skip baseline above.
+S1 and S2 are done. The atomic pytest dependency commit (`pyproject.toml` + `uv.lock`) was
+cherry-picked onto clean branch `s2-pytest-dev-dependency` at `18abd2e` and pushed to `origin`, based
+on `origin/8-research-branch`. GitHub CLI authentication is expired, so the PR itself is not open;
+create it with base `8-research-branch` before S3. S3 must inherit both dependency files together
+because `bootstrap_uv.sh` uses `uv sync --locked`. Then execute S3 from `peng-training-branch` and
+compare its port against the 49-pass/1-skip baseline above.
 
 `plans/REHAUL_PLAN.md` now opens with a **Work breakdown** of twelve executable sections, S1–S12,
 each self-contained enough to prompt an agent with "write a technical plan for S6" or "execute S8"
