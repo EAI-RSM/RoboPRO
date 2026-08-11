@@ -29,6 +29,9 @@ class Robot:
 
         self.left_js = None
         self.right_js = None
+        # Policy rollouts execute joint targets directly and do not use motion
+        # planning. Existing callers keep planner construction by default.
+        self.build_planner = kwargs.get("build_planner", True)
 
         left_embodiment_args = kwargs["left_embodiment_config"]
         right_embodiment_args = kwargs["right_embodiment_config"]
@@ -125,6 +128,13 @@ class Robot:
 
     def reset(self, scene, need_topp=False, **kwargs):
         self._init_robot_(scene, need_topp, **kwargs)
+
+        if not self.build_planner:
+            self.communication_flag = False
+            self.left_planner = None
+            self.right_planner = None
+            self.init_joints()
+            return
 
         if self.communication_flag:
             if hasattr(self, "left_conn") and self.left_conn:
@@ -263,6 +273,11 @@ class Robot:
         abs_right_curobo_yml_path = os.path.join(CONFIGS.ROOT_PATH, self.right_curobo_yml_path)
 
         self.communication_flag = (abs_left_curobo_yml_path != abs_right_curobo_yml_path)
+        if not self.build_planner:
+            self.communication_flag = False
+            self.left_planner = None
+            self.right_planner = None
+            return
 
         if self.is_dual_arm:
             abs_left_curobo_yml_path = abs_left_curobo_yml_path.replace("curobo.yml", "curobo_left.yml")
@@ -326,6 +341,8 @@ class Robot:
             )
 
     def update_world_pcd(self, world_pcd):
+        if not self.build_planner:
+            return
         try:
             self.left_planner.update_point_cloud(world_pcd, resolution=0.02)
             self.right_planner.update_point_cloud(world_pcd, resolution=0.02)
@@ -333,6 +350,8 @@ class Robot:
             print("Update world pointcloud wrong!")
     
     def update_world(self, collision_dict):
+        if not self.build_planner:
+            return
         self.left_planner.update_world(collision_dict, arms_tag="left")
         self.right_planner.update_world(collision_dict, arms_tag="right")
 
@@ -348,6 +367,8 @@ class Robot:
         return sapien.Pose(gripper_pose_pos, gripper_pose_quat)
 
     def left_plan_grippers(self, now_val, target_val):
+        if not self.build_planner:
+            return self._linear_gripper_plan(now_val, target_val)
         if self.communication_flag:
             self.left_conn.send({"cmd": "plan_grippers", "now_val": now_val, "target_val": target_val})
             return self.left_conn.recv()
@@ -355,11 +376,23 @@ class Robot:
             return self.left_planner.plan_grippers(now_val, target_val)
 
     def right_plan_grippers(self, now_val, target_val):
+        if not self.build_planner:
+            return self._linear_gripper_plan(now_val, target_val)
         if self.communication_flag:
             self.right_conn.send({"cmd": "plan_grippers", "now_val": now_val, "target_val": target_val})
             return self.right_conn.recv()
         else:
             return self.right_planner.plan_grippers(now_val, target_val)
+
+    @staticmethod
+    def _linear_gripper_plan(now_val, target_val):
+        """Planner-free equivalent of CuroboPlanner.plan_grippers()."""
+        num_step = 200
+        return {
+            "num_step": num_step,
+            "per_step": (target_val - now_val) / num_step,
+            "result": np.linspace(now_val, target_val, num_step),
+        }
 
     def left_plan_multi_path(
         self,
@@ -481,9 +514,12 @@ class Robot:
         approach_offset=0.05,
         tstep_fraction=0.8,
         near_contact=False,
+        seed_traj=None,
     ):
         if constraint_pose is not None:
             constraint_pose = self.get_constraint_pose(constraint_pose, arm_tag="left")
+        if seed_traj is not None and hasattr(seed_traj, "detach"):
+            seed_traj = seed_traj.detach().cpu()
         if last_qpos is None:
             now_qpos = self.left_entity.get_qpos()
         else:
@@ -503,6 +539,7 @@ class Robot:
                 "approach_offset": approach_offset,
                 "tstep_fraction": tstep_fraction,
                 "near_contact": near_contact,
+                "seed_traj": seed_traj,
             })
             return self.left_conn.recv()
         else:
@@ -516,6 +553,7 @@ class Robot:
                 approach_offset=approach_offset,
                 tstep_fraction=tstep_fraction,
                 near_contact=near_contact,
+                seed_traj=seed_traj,
             )
 
     def right_plan_path(
@@ -530,9 +568,12 @@ class Robot:
         approach_offset=0.05,
         tstep_fraction=0.8,
         near_contact=False,
+        seed_traj=None,
     ):
         if constraint_pose is not None:
             constraint_pose = self.get_constraint_pose(constraint_pose, arm_tag="right")
+        if seed_traj is not None and hasattr(seed_traj, "detach"):
+            seed_traj = seed_traj.detach().cpu()
         if last_qpos is None:
             now_qpos = self.right_entity.get_qpos()
         else:
@@ -551,6 +592,7 @@ class Robot:
                 "approach_offset": approach_offset,
                 "tstep_fraction": tstep_fraction,
                 "near_contact": near_contact,
+                "seed_traj": seed_traj,
             })
             return self.right_conn.recv()
         else:
@@ -564,6 +606,7 @@ class Robot:
                 approach_offset=approach_offset,
                 tstep_fraction=tstep_fraction,
                 near_contact=near_contact,
+                seed_traj=seed_traj,
             )
 
     # The data of gripper has been normalized
@@ -802,6 +845,7 @@ def planner_process_worker(conn, args):
                     approach_offset=msg.get("approach_offset", 0.05),
                     tstep_fraction=msg.get("tstep_fraction", 0.8),
                     near_contact=msg.get("near_contact", False),
+                    seed_traj=msg.get("seed_traj", None),
                 )
                 conn.send(result)
 

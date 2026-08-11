@@ -1,9 +1,8 @@
 #!/bin/bash
-# Eval pi05 (step 20000) on RoboPRO benchmark: office / put_mouse_on_pad.
+# Eval RoboPRO pi05 (step 30000) on RoboPRO benchmark: office / put_mouse_on_pad.
 #
-# Checkpoint lives at /home/apexs/xuan/models/pi05/20000 and is symlinked into
-# the loader's expected layout:
-#   policy/pi05/checkpoints/<train_config>/<model_name>/<ckpt_id>/
+# Checkpoint: mzxuan/robopro_jax_30000, staged by scripts/download_robopro_jax.py
+# into policy/pi05/checkpoints/pi05_robopro_top_cam_jax/robopro/30000/.
 #
 # Dual-env: jax/openpi server (policy/pi05/.venv) + sapien client (robopro conda env),
 # talking over a free socket. Server on GPU 0, sim client on GPU 1 by default.
@@ -18,9 +17,9 @@ set -euo pipefail
 
 # ---- Fixed for this experiment ----
 TASK_NAME=put_mouse_on_pad
-TRAIN_CONFIG=pi05_aloha_full_base   # matches ckpt step 20000 (num_train_steps)
-MODEL_NAME=roboreal_all_80tasks     # subdir under checkpoints/<train_config>/
-CHECKPOINT_ID=20000
+TRAIN_CONFIG=pi05_robopro_top_cam_jax
+MODEL_NAME=robopro
+CHECKPOINT_ID=30000
 
 # ---- Overridable args ----
 TASK_CONFIG=${1:-bench_demo_office_clean}
@@ -40,7 +39,7 @@ export ROBOTWIN_BENCH_TASK=bench
 CKPT_LINK="policy/pi05/checkpoints/${TRAIN_CONFIG}/${MODEL_NAME}/${CHECKPOINT_ID}"
 if [[ ! -e "${CKPT_LINK}/params" ]]; then
     echo -e "\033[31m[error] checkpoint not found at ${CKPT_LINK} (params/ missing)\033[0m" >&2
-    echo "  expected the symlink -> /home/apexs/xuan/models/pi05/${CHECKPOINT_ID}" >&2
+    echo "  run: policy/pi05/.venv/bin/python policy/pi05/scripts/download_robopro_jax.py" >&2
     exit 1
 fi
 

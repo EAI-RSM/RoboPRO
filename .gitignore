@@ -76,7 +76,11 @@ presentation_material/
 
 # Validation outputs (generated, not tracked)
 scripts/validation/results/
+customized_robotwin/visibility_validation/
 docs/objaverse_preview/
+
+# Generated codebase knowledge graphs
+graphify-out/
 docs/references/
 usecase_roadmap.tex
 

@@ -580,6 +580,37 @@ _CONFIGS = [
         batch_size=64,
         fsdp_devices=1,
     ),
+    # RoboPRO top-cam pi05 checkpoint (mzxuan/robopro_jax_30000, step 30000).
+    # cam_high is fed from the countertop camera; arm joints were trained as
+    # delta actions and grippers as absolute actions.
+    TrainConfig(
+        name="pi05_robopro_top_cam_jax",
+        model=pi0_config.Pi0Config(pi05=True),
+        data=LeRobotAlohaDataConfig(
+            repo_id="roboreal_lerobot",
+            repack_transforms=_transforms.Group(inputs=[
+                _transforms.RepackTransform({
+                    "images": {
+                        "cam_high": "observation.images.countertop",
+                        "cam_left_wrist": "observation.images.left",
+                        "cam_right_wrist": "observation.images.right",
+                    },
+                    "state": "observation.state",
+                    "actions": "action",
+                    "prompt": "prompt",
+                })
+            ]),
+            base_config=DataConfig(
+                prompt_from_task=True,
+            ),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+        lr_schedule=_optimizer.CosineDecaySchedule(decay_steps=30_000),
+        num_train_steps=30_000,
+        batch_size=192,
+        num_workers=16,
+        fsdp_devices=1,
+    ),
     # pi05_base by full
     TrainConfig(
         name="pi05_aloha_full_base",

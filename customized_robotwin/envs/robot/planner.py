@@ -214,6 +214,7 @@ try:
             approach_offset=0.05,
             tstep_fraction=0.8,
             near_contact=False,
+            seed_traj=None,
         ):
             world_base_pose = np.concatenate([
                 np.array(self.robot_origion_pose.p),
@@ -304,6 +305,10 @@ try:
                     print("[plan_path] using relax_orientation pose_cost_metric")
                 plan_config.pose_cost_metric = self._position_only_pose_cost_metric(motion_gen.tensor_args)
 
+            # Optional externally supplied trajopt seed. None preserves CuRobo's
+            # stock seed generation behavior.
+            plan_config.seed_traj = seed_traj
+
             result = motion_gen.plan_single(start_joint_states, goal_pose_of_ee, plan_config)
 
             # ------------------------------------------
@@ -317,6 +322,9 @@ try:
 
             # output
             res_result = dict()
+            res_result["attempts"] = int(getattr(result, "attempts", 0) or 0)
+            res_result["trajopt_attempts"] = int(getattr(result, "trajopt_attempts", 0) or 0)
+            res_result["seeded"] = seed_traj is not None
             # Diagnostic: MotionGen sets position_error/rotation_error/interpolated_plan
             # UNCONDITIONALLY in _plan_from_solve_state's trajopt/finetune branch, on both
             # success and failure (e.g. FINETUNE_TRAJOPT_FAIL) -- the optimizer converged to

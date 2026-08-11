@@ -92,6 +92,10 @@ class Bench_base_task(Base_Task):
     def _init_task_env_(self, table_xy_bias=[0, 0], table_height_bias=0, **kwags):
         pass
 
+    def setup_demo(self, is_test=False, **kwargs):
+        kwargs["collision_cache"] = {"mesh": 100, "obb": 3}
+        self._init_task_env_(**kwargs)
+
 
     def setup_scene(self, **kwargs):
         """
@@ -1791,37 +1795,46 @@ class Bench_base_task(Base_Task):
             # TODO
             topp_left_flag, topp_right_flag = True, True
 
-            try:
-                times, left_pos, left_vel, acc, duration = (self.robot.left_mplib_planner.TOPP(left_path,
-                                                                                            1 / 250,
-                                                                                            verbose=True))
-                left_result = dict()
-                left_result["position"], left_result["velocity"] = left_pos, left_vel
-                left_n_step = left_result["position"].shape[0]
-            except Exception as e:
-                # print("left arm TOPP error: ", e)
-                topp_left_flag = False
-                left_n_step = 50  # fixed
-
-            if left_n_step == 0:
-                topp_left_flag = False
-                left_n_step = 50  # fixed
-
-            try:
-                times, right_pos, right_vel, acc, duration = (self.robot.right_mplib_planner.TOPP(right_path,
+            if not self.robot.build_planner:
+                left_n_step = right_n_step = 50
+                left_result = {
+                    "position": np.linspace(left_current_qpos, left_arm_actions[0], left_n_step),
+                    "velocity": np.zeros((left_n_step, left_arm_dim)),
+                }
+                right_result = {
+                    "position": np.linspace(right_current_qpos, right_arm_actions[0], right_n_step),
+                    "velocity": np.zeros((right_n_step, right_arm_dim)),
+                }
+            else:
+                try:
+                    times, left_pos, left_vel, acc, duration = (self.robot.left_mplib_planner.TOPP(left_path,
                                                                                                 1 / 250,
                                                                                                 verbose=True))
-                right_result = dict()
-                right_result["position"], right_result["velocity"] = right_pos, right_vel
-                right_n_step = right_result["position"].shape[0]
-            except Exception as e:
-                # print("right arm TOPP error: ", e)
-                topp_right_flag = False
-                right_n_step = 50  # fixed
+                    left_result = dict()
+                    left_result["position"], left_result["velocity"] = left_pos, left_vel
+                    left_n_step = left_result["position"].shape[0]
+                except Exception as e:
+                    topp_left_flag = False
+                    left_n_step = 50
 
-            if right_n_step == 0:
-                topp_right_flag = False
-                right_n_step = 50  # fixed
+                if left_n_step == 0:
+                    topp_left_flag = False
+                    left_n_step = 50
+
+                try:
+                    times, right_pos, right_vel, acc, duration = (self.robot.right_mplib_planner.TOPP(right_path,
+                                                                                                    1 / 250,
+                                                                                                    verbose=True))
+                    right_result = dict()
+                    right_result["position"], right_result["velocity"] = right_pos, right_vel
+                    right_n_step = right_result["position"].shape[0]
+                except Exception as e:
+                    topp_right_flag = False
+                    right_n_step = 50
+
+                if right_n_step == 0:
+                    topp_right_flag = False
+                    right_n_step = 50
         
         elif action_type == 'ee':
 
@@ -1987,6 +2000,11 @@ class Bench_base_task(Base_Task):
             if _collision_active:
                 self._snapshot_static_object_poses()
             self.scene.step()
+
+            # Optional tooling observer; absent during normal data collection.
+            step_hook = getattr(self, "step_hook", None)
+            if step_hook is not None:
+                step_hook(control_idx)
 
             if self.render_freq and control_idx % self.render_freq == 0:
                 self._update_render()
