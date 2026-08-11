@@ -163,10 +163,11 @@ def action_graph_state(
         )
 
     legacy = live_task_state(task_env, observation, contract)
-    if legacy.release_ready or legacy.target_inside_destination:
-        goal_evidence = Evidence.TRUE
     return ActionGraphState(
         held=held_evidence,
+        release_ready=(
+            Evidence.TRUE if legacy.release_ready else Evidence.FALSE
+        ),
         goal_satisfied=goal_evidence,
         path_blocked=blocked_evidence,
         reachable=reachable_evidence,

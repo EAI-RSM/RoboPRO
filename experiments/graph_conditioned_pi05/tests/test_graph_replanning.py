@@ -13,6 +13,7 @@ from experiments.graph_conditioned_pi05.graph_replanning import (
 def state(**values):
     defaults = {
         "held": Evidence.FALSE,
+        "release_ready": Evidence.FALSE,
         "goal_satisfied": Evidence.FALSE,
         "path_blocked": Evidence.FALSE,
         "reachable": Evidence.TRUE,
@@ -81,3 +82,46 @@ def test_goal_has_priority_over_grasp_loss_during_placement():
     decision = policy.evaluate(PromptPhase.PLACEMENT, delta, 20)
     assert decision.event is GraphEvent.GOAL_REACHED
     assert decision.next_phase is PromptPhase.RELEASE
+
+
+def test_releasing_does_not_turn_release_readiness_into_goal_loss():
+    detector = GraphDeltaDetector()
+    detector.observe(state(held=Evidence.TRUE))
+    assert detector.observe(
+        state(held=Evidence.TRUE, release_ready=Evidence.TRUE)
+    ).events == ()
+    ready = detector.observe(
+        state(held=Evidence.TRUE, release_ready=Evidence.TRUE)
+    )
+    assert ready.events == (GraphEvent.RELEASE_READY,)
+    decision = ReplanPolicy().evaluate(PromptPhase.PLACEMENT, ready, 20)
+    assert decision.requires_replan
+    assert decision.next_phase is PromptPhase.RELEASE
+
+    # Opening the gripper necessarily makes release_ready false. Since the
+    # strict in/on relation remained false throughout, this must not be
+    # misreported as GOAL_LOST or trigger an immediate re-grasp.
+    detector.observe(state(held=Evidence.FALSE, release_ready=Evidence.FALSE))
+    after_open = detector.observe(
+        state(held=Evidence.FALSE, release_ready=Evidence.FALSE)
+    )
+    assert GraphEvent.GOAL_LOST not in after_open.events
+    assert not ReplanPolicy().evaluate(
+        PromptPhase.RELEASE, after_open, 2,
+        state=state(held=Evidence.FALSE),
+    ).requires_replan
+
+
+def test_controller_accepts_one_way_release_ready_event():
+    controller = GraphControllerState(phase=PromptPhase.PLACEMENT)
+    controller.observe(state(held=Evidence.TRUE), 0)
+    controller.actions_since_replan = 20
+    controller.observe(
+        state(held=Evidence.TRUE, release_ready=Evidence.TRUE), 10
+    )
+    decision, record = controller.observe(
+        state(held=Evidence.TRUE, release_ready=Evidence.TRUE), 9
+    )
+    assert decision.event is GraphEvent.RELEASE_READY
+    assert controller.phase is PromptPhase.RELEASE
+    assert record["trigger_event"] == "release_ready"

@@ -35,6 +35,7 @@ class TaskGoal:
 class GraphEvent(str, Enum):
     GRASP_ACQUIRED = "grasp_acquired"
     GRASP_LOST = "grasp_lost"
+    RELEASE_READY = "release_ready"
     GOAL_REACHED = "goal_reached"
     GOAL_LOST = "goal_lost"
     PATH_BLOCKED = "path_blocked"
@@ -48,6 +49,7 @@ class GraphEvent(str, Enum):
 @dataclass(frozen=True)
 class ActionGraphState:
     held: Evidence = Evidence.UNKNOWN
+    release_ready: Evidence = Evidence.UNKNOWN
     goal_satisfied: Evidence = Evidence.UNKNOWN
     path_blocked: Evidence = Evidence.UNKNOWN
     reachable: Evidence = Evidence.UNKNOWN
@@ -57,6 +59,7 @@ class ActionGraphState:
     def predicates(self) -> Mapping[str, Evidence]:
         return {
             "held_by": self.held,
+            "release_ready": self.release_ready,
             "goal_relation": self.goal_satisfied,
             "blocks": self.path_blocked,
             "reachable_by": self.reachable,
@@ -82,6 +85,7 @@ class ReplanDecision:
 _TRANSITIONS = {
     ("held_by", Evidence.FALSE, Evidence.TRUE): GraphEvent.GRASP_ACQUIRED,
     ("held_by", Evidence.TRUE, Evidence.FALSE): GraphEvent.GRASP_LOST,
+    ("release_ready", Evidence.FALSE, Evidence.TRUE): GraphEvent.RELEASE_READY,
     ("goal_relation", Evidence.FALSE, Evidence.TRUE): GraphEvent.GOAL_REACHED,
     ("goal_relation", Evidence.TRUE, Evidence.FALSE): GraphEvent.GOAL_LOST,
     ("blocks", Evidence.FALSE, Evidence.TRUE): GraphEvent.PATH_BLOCKED,
@@ -100,6 +104,7 @@ class GraphDeltaDetector:
         defaults = {
             GraphEvent.GRASP_ACQUIRED: 1,
             GraphEvent.GRASP_LOST: 2,
+            GraphEvent.RELEASE_READY: 2,
             GraphEvent.GOAL_REACHED: 2,
             GraphEvent.GOAL_LOST: 2,
             GraphEvent.PATH_BLOCKED: 3,
@@ -153,6 +158,7 @@ class ReplanPolicy:
 
     _PRIORITY = (
         GraphEvent.GOAL_REACHED,
+        GraphEvent.RELEASE_READY,
         GraphEvent.GRASP_LOST,
         GraphEvent.GRASP_ACQUIRED,
         GraphEvent.GOAL_LOST,
@@ -166,6 +172,7 @@ class ReplanPolicy:
     _SAFETY_EVENTS = {
         GraphEvent.GRASP_ACQUIRED,
         GraphEvent.GRASP_LOST,
+        GraphEvent.RELEASE_READY,
         GraphEvent.GOAL_REACHED,
     }
 
@@ -208,6 +215,8 @@ class ReplanPolicy:
         if event is GraphEvent.GRASP_LOST and phase is PromptPhase.PLACEMENT:
             return PromptPhase.GRASP
         if event is GraphEvent.GOAL_REACHED and phase is PromptPhase.PLACEMENT:
+            return PromptPhase.RELEASE
+        if event is GraphEvent.RELEASE_READY and phase is PromptPhase.PLACEMENT:
             return PromptPhase.RELEASE
         if event is GraphEvent.GOAL_LOST and phase is PromptPhase.RELEASE:
             return PromptPhase.PLACEMENT
@@ -254,7 +263,9 @@ class GraphControllerState:
             GraphEvent.GRASP_LOST: GraphEvent.GRASP_ACQUIRED,
         }
         for event in delta.events:
-            self.pending_events.discard(opposites[event])
+            opposite = opposites.get(event)
+            if opposite is not None:
+                self.pending_events.discard(opposite)
             self.pending_events.add(event)
         effective_delta = GraphDelta(
             tuple(self.pending_events), delta.changed_relations, delta.persistence
