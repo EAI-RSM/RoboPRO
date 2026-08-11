@@ -164,8 +164,13 @@ class ModelClient:
 
     def _connect(self):
         attempts = 0
-        max_attempts = 1000
-        retry_delay = 5
+        max_attempts = int(os.environ.get("MODEL_SERVER_CONNECT_ATTEMPTS", "12"))
+        retry_delay = float(os.environ.get("MODEL_SERVER_RETRY_DELAY", "5"))
+        if max_attempts < 1 or retry_delay < 0:
+            raise ValueError(
+                "MODEL_SERVER_CONNECT_ATTEMPTS must be >= 1 and "
+                "MODEL_SERVER_RETRY_DELAY must be >= 0"
+            )
         
         while attempts < max_attempts:
             try:
@@ -284,7 +289,15 @@ class ModelClient:
 
 
 def main(usr_args):
-    current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    current_time = datetime.now().strftime("%Y-%m-%d-%H-%M-%S")
+    run_tag = os.getenv("EVAL_RUN_TAG", "").strip()
+    if run_tag:
+        allowed = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_.-"
+        if any(character not in allowed for character in run_tag):
+            raise ValueError(
+                "EVAL_RUN_TAG may contain only letters, digits, '_', '-', and '.'"
+            )
+        current_time = f"{current_time}-{run_tag}"
     task_name = usr_args["task_name"]
     task_config = usr_args["task_config"]
     ckpt_setting = usr_args["ckpt_setting"]
@@ -310,6 +323,13 @@ def main(usr_args):
     args['task_name'] = task_name
     args["task_config"] = task_config
     args["ckpt_setting"] = ckpt_setting
+    args["graph_input_condition"] = usr_args.get(
+        "graph_input_condition", "visual_only"
+    )
+    args["graph_token_budget"] = int(usr_args.get("graph_token_budget", 120))
+    args["graph_default_camera"] = usr_args.get(
+        "graph_default_camera", "countertop_camera"
+    )
 
     embodiment_type = args.get("embodiment")
     embodiment_config_path = os.path.join(CONFIGS_PATH, "_embodiment_config.yml")
@@ -388,7 +408,12 @@ def main(usr_args):
 
     seed = usr_args["seed"]
 
-    st_seed = 100000 * (1 + seed)
+    start_seed_override = os.environ.get("EVAL_START_SEED", "").strip()
+    st_seed = (
+        int(start_seed_override)
+        if start_seed_override
+        else 100000 * (1 + seed)
+    )
     suc_nums = []
     seed_list = resolve_eval_seeds(task_name, task_config, usr_args)
     test_num = resolve_test_num(usr_args, seed_list, default=100)
@@ -474,6 +499,10 @@ def eval_policy(task_name,
 
     policy_name = args["policy_name"]
     eval_func = eval_function_decorator(policy_name, "eval", conda_env=policy_conda_env)
+    policy_module = importlib.import_module(policy_name)
+    configure_func = getattr(policy_module, "configure", None)
+    if callable(configure_func):
+        configure_func(args)
 
     now_seed = st_seed
     task_total_reward = 0
@@ -618,6 +647,14 @@ def eval_policy(task_name,
         # is skipped from episode 2 onward and the server raises
         # "Prompt is required" on the first get_action.
         model.reset_model()
+        TASK_ENV._graph_conditioning_stats = []
+        TASK_ENV._graph_delta_events = []
+        TASK_ENV._graph_controller = None
+        TASK_ENV._graph_prompt_phase = "grasp"
+        TASK_ENV._graph_active_prompt = None
+        TASK_ENV._graph_held_arm = None
+        TASK_ENV._graph_held_loss_count = 0
+        TASK_ENV._graph_chunk_interrupts = 0
         while TASK_ENV.take_action_cnt < TASK_ENV.step_lim:
             observation = TASK_ENV.get_obs()
             eval_func(TASK_ENV, model, observation)
@@ -635,11 +672,43 @@ def eval_policy(task_name,
             print("\033[91mFail!\033[0m")
 
         if episode_log_path is not None:
+            graph_stats = getattr(TASK_ENV, "_graph_conditioning_stats", [])
             record = {
                 "episode": TASK_ENV.test_num,
                 "seed": now_seed,
                 "success": bool(succ),
+                "graph_input_condition": args.get("graph_input_condition", "visual_only"),
             }
+            if graph_stats:
+                record["graph_conditioning"] = {
+                    "inference_count": len(graph_stats),
+                    "mean_retrieved_facts": float(np.mean([
+                        item["retrieved"] for item in graph_stats
+                    ])),
+                    "mean_selected_facts": float(np.mean([
+                        item["selected"] for item in graph_stats
+                    ])),
+                    "mean_dropped_facts": float(np.mean([
+                        item["dropped"] for item in graph_stats
+                    ])),
+                    "max_graph_tokens": int(max(
+                        item["graph_tokens"] for item in graph_stats
+                    )),
+                    "max_full_prompt_tokens_estimate": int(max(
+                        item["full_prompt_tokens_estimate"] for item in graph_stats
+                    )),
+                    "destination_seed_available": bool(any(
+                        item["destination_seed_available"] for item in graph_stats
+                    )),
+                    "prompt_phases": [
+                        item["prompt_phase"] for item in graph_stats
+                    ],
+                    "prompt_update_count": int(sum(
+                        item["prompt_updated"] for item in graph_stats
+                    )),
+                    "chunk_interrupt_count": int(TASK_ENV._graph_chunk_interrupts),
+                    "delta_events": list(TASK_ENV._graph_delta_events),
+                }
             if collision_metrics_active:
                 col = TASK_ENV.get_collision_metrics()
                 record["collision"] = bool(col["is_collision"])

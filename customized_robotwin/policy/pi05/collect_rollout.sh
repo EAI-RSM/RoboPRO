@@ -9,7 +9,7 @@
 # Env vars (override defaults):
 #   COLLECT_NUM              — total episodes to save (default 100)
 #   COLLECT_START_SEED       — starting seed override
-#   ACTION_NOISE_VAR         — Gaussian action noise variance for rollout diversity (default 0)
+#   ACTION_NOISE_VAR         — Gaussian action noise variance for rollout diversity (default 0.001)
 #   COLLECT_FIXED_SEED       — if set, skip expert check
 
 set -euo pipefail
@@ -33,8 +33,6 @@ fi
 echo -e "\033[33mserver gpu: ${server_gpu}, client gpu: ${client_gpu}\033[0m"
 
 # ── Env vars (with defaults) ──────────────────────────────────────────────
-export ACTION_NOISE_VAR="${ACTION_NOISE_VAR:-0.0}"
-
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 export ROBOTWIN_ROOT="${ROBOTWIN_ROOT:-$(cd "${SCRIPT_DIR}/../.." && pwd)}"
 export BENCH_ROOT="${BENCH_ROOT:-$(cd "${ROBOTWIN_ROOT}/../benchmark" && pwd)}"

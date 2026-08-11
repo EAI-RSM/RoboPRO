@@ -1,0 +1,47 @@
+schema_version: "1.9.0"
+task_config: relation_validation_d14
+
+tasks:
+  - id: fixed_right_arm
+    task_name: put_sauce_can_in_cabinet
+    episodes: 1
+    acceptance:
+      required_arms: [right]
+      required_action_types: [approach, grasp, lift, release, verify_success]
+      final_relation:
+        relation: in
+        source_name: task_sauce_can
+        destination_name: cabinet
+
+  - id: articulated_destination
+    task_name: put_rubikscube_in_drawer
+    episodes: 1
+    acceptance:
+      required_action_types: [approach, grasp, place, release, verify_success]
+      require_articulated_destination: true
+
+  - id: sequential_multi_arm
+    task_name: set_up_table
+    episodes: 1
+    environment:
+      ROBOPRO_OFFICE_ARRANGEMENT: "1"
+    acceptance:
+      required_arms: [left, right]
+      require_same_episode_arms: [left, right]
+      required_action_types: [approach, grasp, place, release, verify_success]
+      simultaneous_dual_arm_expected: false
+
+  - id: recovery_continuation
+    task_name: chain_heat_hamburger_ks
+    episodes: 1
+    acceptance:
+      required_arms: [left]
+      allowed_failed_action_types: [retreat]
+      max_failed_executed_actions: 1
+      required_action_types: [approach, grasp, place, release, approach_handle, grasp_handle, close_articulation, verify_success]
+      require_articulated_target_actions: [approach_handle, grasp_handle, close_articulation]
+      require_interaction_part_actions: [approach_handle, grasp_handle, close_articulation]
+      require_articulation_joint_effect:
+        action_type: close_articulation
+        direction: decrease
+        min_abs_delta: 0.001

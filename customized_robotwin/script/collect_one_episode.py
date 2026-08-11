@@ -105,6 +105,10 @@ def main():
     init_state = None
     try:
         task.setup_demo(now_ep_num=TEMP, seed=seed, **args)
+        if hasattr(task, "set_benchmark_export_context"):
+            task.set_benchmark_export_context(
+                task_config=args["task_config"], config_snapshot=args, bench_subdir=None,
+            )
         if hasattr(task, "_maybe_apply_language_perturbation"):
             task._maybe_apply_language_perturbation()
         # capture the t=0 scene state (before play_once mutates it) so this
@@ -165,6 +169,10 @@ def main():
     tmp_scene = os.path.join(args["save_path"], "scene", f"episode{TEMP}")
     try:
         task.setup_demo(now_ep_num=TEMP, seed=seed, **args)
+        if hasattr(task, "set_benchmark_export_context"):
+            task.set_benchmark_export_context(
+                task_config=args["task_config"], config_snapshot=args, bench_subdir=None,
+            )
         if hasattr(task, "_maybe_apply_language_perturbation"):
             task._maybe_apply_language_perturbation()
 
@@ -193,6 +201,8 @@ def main():
             info["collision_metrics"] = task.get_collision_metrics()
 
         success = bool(task.check_success())
+        if hasattr(task, "build_benchmark_episode_record"):
+            task.build_benchmark_episode_record(success=success)
         cache_dir = os.path.join(args["save_path"], ".cache", f"episode{TEMP}")
         has_frames = os.path.isdir(cache_dir) and any(
             fn.endswith(".pkl") for fn in os.listdir(cache_dir))

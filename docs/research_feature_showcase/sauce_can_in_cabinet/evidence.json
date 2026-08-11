@@ -1,0 +1,351 @@
+{
+  "claim": "Unified physics- and action-aware graph",
+  "source_hdf5": "customized_robotwin/data/action_validation_suite_v6/put_sauce_can_in_cabinet/relation_validation_d14/data/episode0.hdf5",
+  "source_video": "customized_robotwin/data/action_validation_suite_v6/put_sauce_can_in_cabinet/relation_validation_d14/video/episode0.mp4",
+  "camera": "countertop_camera",
+  "keyframes": [
+    {
+      "frame": 0,
+      "title": "Initial state",
+      "caption": "The expert begins an approach; target, destination, camera, and end effector are grounded.",
+      "active_action": {
+        "id": 12,
+        "type": "approach",
+        "phase": "forward_grasp",
+        "arm": "right",
+        "start_frame": 0,
+        "end_frame": 38,
+        "status": "succeeded",
+        "tool_call": {
+          "contract_version": "1.0.0",
+          "decision": "ACT",
+          "provenance": "expert_executed_action",
+          "provider": "rule_based",
+          "result": {
+            "end_frame": 38,
+            "observed_effects": [],
+            "start_frame": 0,
+            "status": "succeeded"
+          },
+          "tool": {
+            "arguments": {
+              "action_type": "approach",
+              "arm": "right",
+              "destination_object_id": null,
+              "effector_object_id": -3,
+              "parameters": {
+                "primitive": "move",
+                "target_pose": [
+                  0,
+                  0,
+                  0,
+                  0,
+                  0,
+                  0,
+                  0
+                ]
+              },
+              "target_object_id": 92
+            },
+            "name": "execute_high_level_action"
+          }
+        },
+        "observed_effects": []
+      },
+      "relations": [
+        {
+          "relation": "reachable_by",
+          "source": "task_sauce_can",
+          "destination": "left_ee"
+        },
+        {
+          "relation": "reachable_by",
+          "source": "task_sauce_can",
+          "destination": "right_ee"
+        },
+        {
+          "relation": "visible_to",
+          "source": "task_sauce_can",
+          "destination": "countertop_camera"
+        }
+      ],
+      "graph_outputs": {
+        "full_scene_graph": "graphs/full_scene_graph/graph_0000.png",
+        "action_relevant_subgraph": "graphs/action_relevant_subgraph/graph_0000.png"
+      }
+    },
+    {
+      "frame": 72,
+      "title": "Active grasp",
+      "caption": "held_by becomes true: the target is physically associated with the right end effector.",
+      "active_action": {
+        "id": 14,
+        "type": "grasp",
+        "phase": "forward_grasp",
+        "arm": "right",
+        "start_frame": 60,
+        "end_frame": 81,
+        "status": "succeeded",
+        "tool_call": {
+          "contract_version": "1.0.0",
+          "decision": "ACT",
+          "provenance": "expert_executed_action",
+          "provider": "rule_based",
+          "result": {
+            "end_frame": 81,
+            "observed_effects": [
+              {
+                "after": true,
+                "before": false,
+                "destination": -3,
+                "relation": "held_by",
+                "source": 92
+              }
+            ],
+            "start_frame": 60,
+            "status": "succeeded"
+          },
+          "tool": {
+            "arguments": {
+              "action_type": "grasp",
+              "arm": "right",
+              "destination_object_id": null,
+              "effector_object_id": -3,
+              "parameters": {
+                "primitive": "gripper",
+                "target_gripper_pos": 0.0
+              },
+              "target_object_id": 92
+            },
+            "name": "execute_high_level_action"
+          }
+        },
+        "observed_effects": [
+          {
+            "after": true,
+            "before": false,
+            "destination": -3,
+            "relation": "held_by",
+            "source": 92
+          }
+        ]
+      },
+      "relations": [
+        {
+          "relation": "held_by",
+          "source": "task_sauce_can",
+          "destination": "right_ee"
+        },
+        {
+          "relation": "visible_to",
+          "source": "task_sauce_can",
+          "destination": "countertop_camera"
+        }
+      ],
+      "graph_outputs": {
+        "full_scene_graph": "graphs/full_scene_graph/graph_0072.png",
+        "action_relevant_subgraph": "graphs/action_relevant_subgraph/graph_0072.png"
+      }
+    },
+    {
+      "frame": 152,
+      "title": "Physical change",
+      "caption": "in(target, cabinet) and inverse contains(cabinet, target) become true.",
+      "active_action": {
+        "id": 17,
+        "type": "lift",
+        "phase": "transition",
+        "arm": "right",
+        "start_frame": 132,
+        "end_frame": 164,
+        "status": "succeeded",
+        "tool_call": {
+          "contract_version": "1.0.0",
+          "decision": "ACT",
+          "provenance": "expert_executed_action",
+          "provider": "rule_based",
+          "result": {
+            "end_frame": 164,
+            "observed_effects": [],
+            "start_frame": 132,
+            "status": "succeeded"
+          },
+          "tool": {
+            "arguments": {
+              "action_type": "lift",
+              "arm": "right",
+              "destination_object_id": null,
+              "effector_object_id": -3,
+              "parameters": {
+                "displacement": {
+                  "move_axis": "world",
+                  "x": -0.05,
+                  "y": 0.14,
+                  "z": 0.37
+                },
+                "primitive": "move",
+                "target_pose": [
+                  0.2559869706630707,
+                  -0.17262367963790892,
+                  1.3113003325462342,
+                  0.7014960699063101,
+                  -0.00028785486863806023,
+                  0.0007246047695388391,
+                  0.7126728955092254
+                ]
+              },
+              "target_object_id": 92
+            },
+            "name": "execute_high_level_action"
+          }
+        },
+        "observed_effects": []
+      },
+      "relations": [
+        {
+          "relation": "in",
+          "source": "task_sauce_can",
+          "destination": "cabinet"
+        },
+        {
+          "relation": "contains",
+          "source": "cabinet",
+          "destination": "task_sauce_can"
+        },
+        {
+          "relation": "held_by",
+          "source": "task_sauce_can",
+          "destination": "right_ee"
+        },
+        {
+          "relation": "visible_to",
+          "source": "task_sauce_can",
+          "destination": "countertop_camera"
+        }
+      ],
+      "graph_outputs": {
+        "full_scene_graph": "graphs/full_scene_graph/graph_0152.png",
+        "action_relevant_subgraph": "graphs/action_relevant_subgraph/graph_0152.png"
+      }
+    },
+    {
+      "frame": 205,
+      "title": "Verified result",
+      "caption": "Containment persists after release while verify_success checks the resulting state.",
+      "active_action": {
+        "id": 20,
+        "type": "verify_success",
+        "phase": "success_check",
+        "arm": "none",
+        "start_frame": 205,
+        "end_frame": 205,
+        "status": "succeeded",
+        "tool_call": {
+          "contract_version": "1.0.0",
+          "decision": "ACT",
+          "provenance": "task_success_check",
+          "provider": "rule_based",
+          "result": {
+            "end_frame": 205,
+            "observed_effects": [],
+            "start_frame": 205,
+            "status": "succeeded"
+          },
+          "tool": {
+            "arguments": {
+              "action_type": "verify_success",
+              "arm": "none",
+              "destination_object_id": null,
+              "effector_object_id": null,
+              "parameters": {},
+              "target_object_id": null
+            },
+            "name": "execute_high_level_action"
+          }
+        },
+        "observed_effects": []
+      },
+      "relations": [
+        {
+          "relation": "in",
+          "source": "task_sauce_can",
+          "destination": "cabinet"
+        },
+        {
+          "relation": "contains",
+          "source": "cabinet",
+          "destination": "task_sauce_can"
+        },
+        {
+          "relation": "visible_to",
+          "source": "task_sauce_can",
+          "destination": "countertop_camera"
+        }
+      ],
+      "graph_outputs": {
+        "full_scene_graph": "graphs/full_scene_graph/graph_0205.png",
+        "action_relevant_subgraph": "graphs/action_relevant_subgraph/graph_0205.png"
+      }
+    }
+  ],
+  "tool_call_example": {
+    "contract_version": "1.0.0",
+    "decision": "ACT",
+    "provenance": "expert_executed_action",
+    "provider": "rule_based",
+    "result": {
+      "end_frame": 81,
+      "observed_effects": [
+        {
+          "after": true,
+          "before": false,
+          "destination": -3,
+          "relation": "held_by",
+          "source": 92
+        }
+      ],
+      "start_frame": 60,
+      "status": "succeeded"
+    },
+    "tool": {
+      "arguments": {
+        "action_type": "grasp",
+        "arm": "right",
+        "destination_object_id": null,
+        "effector_object_id": -3,
+        "parameters": {
+          "primitive": "gripper",
+          "target_gripper_pos": 0.0
+        },
+        "target_object_id": 92
+      },
+      "name": "execute_high_level_action"
+    }
+  },
+  "selection_method": "Exported action boundaries and relation transition frames",
+  "graph_views": {
+    "full_scene_graph": {
+      "definition": "All present entities and all implemented relations at the selected frame, positioned from exported world coordinates"
+    },
+    "action_relevant_subgraph": {
+      "definition": "One-hop action-centered projection over target, destination, effector, and selected camera",
+      "seed_nodes": [
+        "active_action",
+        "task_sauce_can",
+        "cabinet",
+        "right_ee",
+        "countertop_camera"
+      ],
+      "relations": [
+        "target",
+        "agent",
+        "destination",
+        "in",
+        "contains",
+        "held_by",
+        "reachable_by",
+        "visible_to"
+      ]
+    }
+  }
+}

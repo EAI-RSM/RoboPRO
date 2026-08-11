@@ -1,0 +1,12 @@
+protocol: graph_conditioned_pi05_poc_v1
+condition: visual_only
+policy_family: pi_0.5
+policy_adapter: existing_rule_based_compatible
+inputs:
+  images: [countertop_camera, left_camera, right_camera]
+  robot_state: true
+  instruction: true
+  retrieved_graph: false
+evaluation:
+  paired_seeds: true
+  metrics: [success, hard_success, collision, collision_count, collision_category]

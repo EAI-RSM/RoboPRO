@@ -39,6 +39,69 @@ ROLLOUT ?= 1
 SAVE_DATA ?= 1
 SAVE_PLAN_FAIL_DIR ?=
 PLAN_FAIL_CAMERA ?= demo_camera
+HDF5_FILE ?=
+HDF5_CAMERA ?=
+HDF5_FRAME ?= 0
+HDF5_PREVIEW_PATH ?=
+SHOW_TREE ?= 0
+DUMP_JSON ?= 0
+VIZ_HDF5_FILE ?=
+VIZ_OUTPUT_VIDEO ?=
+VIZ_WIDTH ?= 1280
+VIZ_HEIGHT ?= 720
+VIZ_FPS ?= 20
+VIZ_TRAIL ?= 25
+REL_HDF5_FILE ?=
+REL_FRAME ?= 0
+REL_OUTPUT_IMAGE ?=
+REL_OUTPUT_DIR ?=
+REL_SAMPLE_FRAMES ?= 0,74,124,182,191
+REL_WIDTH ?= 1600
+REL_HEIGHT ?= 1000
+REL_SHOW_EDGE_LABELS ?= 1
+REL_EXCLUDED_EDGES ?=
+REL_INCLUDED_EDGES ?=
+REL_ABSTRACT_LAYOUT ?= 0
+REL_OCCLUSION_CAMERA ?=
+
+# Graph-rich relation validation flags. REACHABLE_BY_INTERVAL is measured in
+# exported frames; 1 evaluates every changed frame, 10 evaluates every tenth.
+REACHABLE_BY_ENABLED ?= 1
+REACHABLE_BY_INTERVAL ?= 10
+REACHABLE_BY_MOVABLE_ONLY ?= 1
+REACHABLE_BY_CACHE_UNCHANGED ?= 1
+REACHABLE_BY_POSE_DECIMALS ?= 3
+NEAR_HORIZONTAL_THRESHOLD_M ?= 0.10
+NEAR_VERTICAL_MARGIN_M ?= 0.08
+NEAR_MIN_GEOMETRY_EXTENT_M ?= 0.000001
+ON_SUPPORTS_MAX_VERTICAL_PENETRATION_M ?= 0.03
+ON_SUPPORTS_MAX_VERTICAL_SEPARATION_M ?= 0.06
+ON_SUPPORTS_MIN_XY_OVERLAP_RATIO ?= 0.20
+ON_SUPPORTS_MIN_XY_AREA_M2 ?= 0.00000001
+HELD_BY_MAX_OBJECT_TCP_DISTANCE_M ?= 0.16
+VISIBLE_TO_MIN_VISIBLE_PIXEL_COUNT ?= 1
+OCCLUDES_MIN_OVERLAP_PIXEL_COUNT ?= 1
+OCCLUDES_MIN_DEPTH_MARGIN_M ?= 0.001
+OCCLUDES_MIN_OVERLAP_FRACTION ?= 0.01
+OCCLUDES_MOVABLE_TARGETS_ONLY ?= 1
+BLOCKS_CORRIDOR_CLEARANCE_M ?= 0.04
+BLOCKS_ENDPOINT_MARGIN_M ?= 0.02
+BLOCKS_MOVABLE_SOURCES_ONLY ?= 1
+BLOCKS_MOVABLE_TARGETS_ONLY ?= 1
+IN_CONTAINS_CENTER_TOLERANCE_M ?= 0.0001
+RELATION_OBSTACLE_DENSITY ?= 14
+RELATION_EPISODE_NUM ?= 1
+RELATION_SAVE_PATH ?= ./data/relation_validation_d14_actions_v2
+ACTION_VALIDATION_MATRIX ?= $(ROOT_DIR)/benchmark/bench_task_config/action_validation_suite.yml
+ACTION_VALIDATION_OUTPUT_ROOT ?= $(CUSTOMIZED_ROOT)/data/action_validation_suite_v1
+ACTION_VALIDATION_MODE ?= all
+ACTION_VALIDATION_TASKS ?=
+ACTION_VALIDATION_START_SEED ?= 0
+ACTION_VALIDATION_TASK_TIMEOUT ?= 1800
+ACTION_VALIDATION_DRY_RUN ?= 0
+ACTION_VALIDATION_OBSTACLE_DENSITY ?= 10
+POLICY_ACTION_PROVIDER ?= rule_based
+POLICY_ACTION_PROVIDER_CONFIG ?=
 
 # Asset / install flags
 PYTHON_VERSION ?= 3.10
@@ -56,7 +119,12 @@ CHECKPOINT_ID ?= 30000
 CKPT_SETTING ?= $(TRAIN_CONFIG_NAME)_$(MODEL_NAME)_$(CHECKPOINT_ID)
 INSTRUCTION_TYPE ?= seen
 TEST_NUM ?= 1
+EVAL_START_SEED ?=
+EVAL_SEED_FILE ?=
 PORT ?= 5555
+GRAPH_INPUT_CONDITION ?= visual_only
+GRAPH_TOKEN_BUDGET ?= 120
+GRAPH_DEFAULT_CAMERA ?= countertop_camera
 
 # pi05 rollout collection flags
 COLLECT_NUM ?= 100
@@ -89,8 +157,10 @@ endef
 
 .PHONY: help check-prereqs bootstrap sync download-assets link-assets configure-curobo-assets \
 	patch-curobo-config setup render-test verify-scene verify-rollout collect-data \
+	relation-validation action-validation-suite check-action-validation-suite \
 	precollect-seeds eval-direct eval-client policy-server eval-pi05-single eval-pi05-double \
-	collect-rollout-pi05 diag-kitchen-curobo occluder-visibility reachability-map \
+	collect-rollout-pi05 diag-kitchen-curobo inspect-benchmark-hdf5 visualize-benchmark-rollout \
+	visualize-relation-frame visualize-relation-samples occluder-visibility reachability-map \
 	pickup-reachability analyze-occluder-rollout show-config
 
 help:
@@ -115,6 +185,14 @@ help:
 	'  make verify-rollout           Headless rollout smoke test; saves video by default.' \
 	'  make precollect-seeds         Generate eval seeds without saving demos.' \
 	'  make diag-kitchen-curobo      Kitchen collision diagnostic script.' \
+	'  make inspect-benchmark-hdf5   Inspect a benchmark HDF5 export and optional preview frame.' \
+	'    Vars: HDF5_FILE=/abs/path/to/file.hdf5 HDF5_CAMERA=demo_camera HDF5_FRAME=0 HDF5_PREVIEW_PATH=/tmp/frame.png SHOW_TREE=1 DUMP_JSON=1' \
+	'  make visualize-benchmark-rollout  Render a top-down verification MP4 from a benchmark HDF5 export.' \
+	'    Vars: VIZ_HDF5_FILE=path/to/file.hdf5 VIZ_OUTPUT_VIDEO=/tmp/rollout.mp4 VIZ_WIDTH=1280 VIZ_HEIGHT=720 VIZ_FPS=20 VIZ_TRAIL=25' \
+	'  make visualize-relation-frame Render one frame of canonical relation edges from a benchmark HDF5 export.' \
+	'    Vars: REL_HDF5_FILE=path/to/file.hdf5 REL_FRAME=0 REL_OUTPUT_IMAGE= (default: <episode>/visualizations/scene_graph/) REL_WIDTH=1600 REL_HEIGHT=1000 REL_SHOW_EDGE_LABELS=1|0 REL_EXCLUDED_EDGES=[visible_to,near] REL_INCLUDED_EDGES=[in,held_by] REL_ABSTRACT_LAYOUT=1|0 REL_OCCLUSION_CAMERA=countertop_camera' \
+	'  make visualize-relation-samples Render several graph-rich scene/action snapshots with node and edge legends.' \
+	'    Vars: REL_HDF5_FILE=path/to/file.hdf5 REL_SAMPLE_FRAMES=0,74,124,182,191 REL_OUTPUT_DIR= (default: <episode>/visualizations/scene_graph/) REL_SHOW_EDGE_LABELS=1|0 REL_EXCLUDED_EDGES=[visible_to,near] REL_INCLUDED_EDGES=[in,held_by] REL_ABSTRACT_LAYOUT=1|0 REL_OCCLUSION_CAMERA=countertop_camera' \
 	'' \
 	'Occluder / reachability analysis (issue #35):' \
 	'  make occluder-visibility      Occluder visibility sweep (+rollout with ROLLOUT=1).' \
@@ -129,6 +207,23 @@ help:
 	'' \
 	'Data collection:' \
 	'  make collect-data             Run collect_data.sh for one task/config.' \
+	'  make relation-validation      Collect graph-rich dense-scene validation data.' \
+	'    Vars: TASK_NAME=put_sauce_can_in_basket GPU_ID=0 RELATION_EPISODE_NUM=1 RELATION_OBSTACLE_DENSITY=14 RELATION_SAVE_PATH=./data/relation_validation_d14_actions_v2' \
+	'      REACHABLE_BY_ENABLED=1 REACHABLE_BY_INTERVAL=10 REACHABLE_BY_MOVABLE_ONLY=1' \
+	'      REACHABLE_BY_CACHE_UNCHANGED=1 REACHABLE_BY_POSE_DECIMALS=3 NEAR_HORIZONTAL_THRESHOLD_M=0.10 NEAR_VERTICAL_MARGIN_M=0.08 NEAR_MIN_GEOMETRY_EXTENT_M=0.000001' \
+	'      ON_SUPPORTS_MAX_VERTICAL_PENETRATION_M=0.03 ON_SUPPORTS_MAX_VERTICAL_SEPARATION_M=0.06 ON_SUPPORTS_MIN_XY_OVERLAP_RATIO=0.20 ON_SUPPORTS_MIN_XY_AREA_M2=0.00000001' \
+	'      IN_CONTAINS_CENTER_TOLERANCE_M=0.0001' \
+	'      HELD_BY_MAX_OBJECT_TCP_DISTANCE_M=0.16 VISIBLE_TO_MIN_VISIBLE_PIXEL_COUNT=1 OCCLUDES_MIN_OVERLAP_PIXEL_COUNT=1 OCCLUDES_MIN_DEPTH_MARGIN_M=0.001 OCCLUDES_MIN_OVERLAP_FRACTION=0.01 OCCLUDES_MOVABLE_TARGETS_ONLY=1' \
+	'  make action-validation-suite  Collect and check the schema-1.8 cross-task matrix.' \
+	'    Vars: GPU_ID=0 ACTION_VALIDATION_MODE=collect|check|all ACTION_VALIDATION_TASKS=id1,id2' \
+	'      ACTION_VALIDATION_OUTPUT_ROOT=customized_robotwin/data/action_validation_suite_v1' \
+	'      ACTION_VALIDATION_START_SEED=0 ACTION_VALIDATION_DRY_RUN=0|1 REACHABLE_BY_INTERVAL=10 ACTION_VALIDATION_OBSTACLE_DENSITY=10' \
+	'      NEAR_HORIZONTAL_THRESHOLD_M=0.10 NEAR_VERTICAL_MARGIN_M=0.08 NEAR_MIN_GEOMETRY_EXTENT_M=0.000001' \
+	'      ON_SUPPORTS_MAX_VERTICAL_PENETRATION_M=0.03 ON_SUPPORTS_MAX_VERTICAL_SEPARATION_M=0.06 ON_SUPPORTS_MIN_XY_OVERLAP_RATIO=0.20 ON_SUPPORTS_MIN_XY_AREA_M2=0.00000001' \
+	'      IN_CONTAINS_CENTER_TOLERANCE_M=0.0001' \
+	'      HELD_BY_MAX_OBJECT_TCP_DISTANCE_M=0.16 VISIBLE_TO_MIN_VISIBLE_PIXEL_COUNT=1 OCCLUDES_MIN_OVERLAP_PIXEL_COUNT=1 OCCLUDES_MIN_DEPTH_MARGIN_M=0.001 OCCLUDES_MIN_OVERLAP_FRACTION=0.01 OCCLUDES_MOVABLE_TARGETS_ONLY=1' \
+	'      POLICY_ACTION_PROVIDER=rule_based POLICY_ACTION_PROVIDER_CONFIG=' \
+	'  make check-action-validation-suite  Check existing suite outputs without collecting.' \
 	'  make collect-rollout-pi05     Dual-env pi05 rollout collection.' \
 	'' \
 	'Policy eval:' \
@@ -241,7 +336,56 @@ verify-rollout:
 		eval "$$cmd")
 
 collect-data:
-	$(call RUN_IN_CUSTOMIZED,bash collect_data.sh "$(TASK_NAME)" "$(TASK_CONFIG)" "$(GPU_ID)")
+	$(call RUN_IN_CUSTOMIZED,export ROBOPRO_ACTION_PROVIDER="$(POLICY_ACTION_PROVIDER)"; export ROBOPRO_ACTION_PROVIDER_CONFIG="$(POLICY_ACTION_PROVIDER_CONFIG)"; bash collect_data.sh "$(TASK_NAME)" "$(TASK_CONFIG)" "$(GPU_ID)")
+
+relation-validation: TASK_NAME = put_sauce_can_in_basket
+relation-validation: TASK_CONFIG = relation_validation_d14
+relation-validation:
+	$(call RUN_IN_CUSTOMIZED,\
+		export ROBOPRO_ACTION_PROVIDER="$(POLICY_ACTION_PROVIDER)"; \
+		export ROBOPRO_ACTION_PROVIDER_CONFIG="$(POLICY_ACTION_PROVIDER_CONFIG)"; \
+		export ROBOPRO_REACHABLE_BY_ENABLED="$(REACHABLE_BY_ENABLED)"; \
+		export ROBOPRO_REACHABLE_BY_FRAME_STRIDE="$(REACHABLE_BY_INTERVAL)"; \
+		export ROBOPRO_REACHABLE_BY_MOVABLE_ONLY="$(REACHABLE_BY_MOVABLE_ONLY)"; \
+		export ROBOPRO_REACHABLE_BY_CACHE_UNCHANGED="$(REACHABLE_BY_CACHE_UNCHANGED)"; \
+		export ROBOPRO_REACHABLE_BY_POSE_DECIMALS="$(REACHABLE_BY_POSE_DECIMALS)"; \
+		export ROBOPRO_NEAR_HORIZONTAL_THRESHOLD_M="$(NEAR_HORIZONTAL_THRESHOLD_M)"; \
+		export ROBOPRO_NEAR_VERTICAL_MARGIN_M="$(NEAR_VERTICAL_MARGIN_M)"; \
+		export ROBOPRO_NEAR_MIN_GEOMETRY_EXTENT_M="$(NEAR_MIN_GEOMETRY_EXTENT_M)"; \
+		export ROBOPRO_ON_SUPPORTS_MAX_VERTICAL_PENETRATION_M="$(ON_SUPPORTS_MAX_VERTICAL_PENETRATION_M)"; \
+		export ROBOPRO_ON_SUPPORTS_MAX_VERTICAL_SEPARATION_M="$(ON_SUPPORTS_MAX_VERTICAL_SEPARATION_M)"; \
+		export ROBOPRO_ON_SUPPORTS_MIN_XY_OVERLAP_RATIO="$(ON_SUPPORTS_MIN_XY_OVERLAP_RATIO)"; \
+		export ROBOPRO_ON_SUPPORTS_MIN_XY_AREA_M2="$(ON_SUPPORTS_MIN_XY_AREA_M2)"; \
+		export ROBOPRO_IN_CONTAINS_CENTER_TOLERANCE_M="$(IN_CONTAINS_CENTER_TOLERANCE_M)"; \
+		export ROBOPRO_HELD_BY_MAX_OBJECT_TCP_DISTANCE_M="$(HELD_BY_MAX_OBJECT_TCP_DISTANCE_M)"; \
+		export ROBOPRO_VISIBLE_TO_MIN_VISIBLE_PIXEL_COUNT="$(VISIBLE_TO_MIN_VISIBLE_PIXEL_COUNT)"; \
+		export ROBOPRO_OCCLUDES_MIN_OVERLAP_PIXEL_COUNT="$(OCCLUDES_MIN_OVERLAP_PIXEL_COUNT)"; \
+		export ROBOPRO_OCCLUDES_MIN_DEPTH_MARGIN_M="$(OCCLUDES_MIN_DEPTH_MARGIN_M)"; \
+		export ROBOPRO_OCCLUDES_MIN_OVERLAP_FRACTION="$(OCCLUDES_MIN_OVERLAP_FRACTION)"; \
+		export ROBOPRO_OCCLUDES_MOVABLE_TARGETS_ONLY="$(OCCLUDES_MOVABLE_TARGETS_ONLY)"; \
+		export ROBOPRO_BLOCKS_CORRIDOR_CLEARANCE_M="$(BLOCKS_CORRIDOR_CLEARANCE_M)"; \
+		export ROBOPRO_BLOCKS_ENDPOINT_MARGIN_M="$(BLOCKS_ENDPOINT_MARGIN_M)"; \
+		export ROBOPRO_BLOCKS_MOVABLE_SOURCES_ONLY="$(BLOCKS_MOVABLE_SOURCES_ONLY)"; \
+		export ROBOPRO_BLOCKS_MOVABLE_TARGETS_ONLY="$(BLOCKS_MOVABLE_TARGETS_ONLY)"; \
+		export ROBOPRO_RELATION_OBSTACLE_DENSITY="$(RELATION_OBSTACLE_DENSITY)"; \
+		export ROBOPRO_RELATION_EPISODE_NUM="$(RELATION_EPISODE_NUM)"; \
+		export ROBOPRO_RELATION_SAVE_PATH="$(RELATION_SAVE_PATH)"; \
+		bash collect_data.sh "$(TASK_NAME)" "$(TASK_CONFIG)" "$(GPU_ID)")
+
+action-validation-suite:
+	$(call RUN_IN_CUSTOMIZED,\
+		export ROBOPRO_ACTION_PROVIDER="$(POLICY_ACTION_PROVIDER)"; \
+		export ROBOPRO_ACTION_PROVIDER_CONFIG="$(POLICY_ACTION_PROVIDER_CONFIG)"; \
+		cmd='$(PYTHON) ../benchmark/bench_script/run_action_validation_suite.py "$(ACTION_VALIDATION_MODE)" --matrix "$(ACTION_VALIDATION_MATRIX)" --output-root "$(abspath $(ACTION_VALIDATION_OUTPUT_ROOT))" --gpu "$(GPU_ID)" --start-seed "$(ACTION_VALIDATION_START_SEED)" --task-timeout "$(ACTION_VALIDATION_TASK_TIMEOUT)" --reachability-interval "$(REACHABLE_BY_INTERVAL)" --near-horizontal-threshold "$(NEAR_HORIZONTAL_THRESHOLD_M)" --near-vertical-margin "$(NEAR_VERTICAL_MARGIN_M)" --near-min-geometry-extent "$(NEAR_MIN_GEOMETRY_EXTENT_M)" --on-supports-max-vertical-penetration "$(ON_SUPPORTS_MAX_VERTICAL_PENETRATION_M)" --on-supports-max-vertical-separation "$(ON_SUPPORTS_MAX_VERTICAL_SEPARATION_M)" --on-supports-min-xy-overlap-ratio "$(ON_SUPPORTS_MIN_XY_OVERLAP_RATIO)" --on-supports-min-xy-area "$(ON_SUPPORTS_MIN_XY_AREA_M2)" --in-contains-center-tolerance "$(IN_CONTAINS_CENTER_TOLERANCE_M)" --held-by-max-object-tcp-distance "$(HELD_BY_MAX_OBJECT_TCP_DISTANCE_M)" --visible-to-min-visible-pixel-count "$(VISIBLE_TO_MIN_VISIBLE_PIXEL_COUNT)" --occludes-min-overlap-pixel-count "$(OCCLUDES_MIN_OVERLAP_PIXEL_COUNT)" --occludes-min-depth-margin "$(OCCLUDES_MIN_DEPTH_MARGIN_M)" --occludes-min-overlap-fraction "$(OCCLUDES_MIN_OVERLAP_FRACTION)" --occludes-movable-targets-only "$(OCCLUDES_MOVABLE_TARGETS_ONLY)" --blocks-corridor-clearance "$(BLOCKS_CORRIDOR_CLEARANCE_M)" --blocks-endpoint-margin "$(BLOCKS_ENDPOINT_MARGIN_M)" --blocks-movable-sources-only "$(BLOCKS_MOVABLE_SOURCES_ONLY)" --blocks-movable-targets-only "$(BLOCKS_MOVABLE_TARGETS_ONLY)" --obstacle-density "$(ACTION_VALIDATION_OBSTACLE_DENSITY)"'; \
+		if [[ -n "$(ACTION_VALIDATION_TASKS)" ]]; then cmd+=" --tasks $(ACTION_VALIDATION_TASKS)"; fi; \
+		if [[ "$(ACTION_VALIDATION_DRY_RUN)" == "1" ]]; then cmd+=" --dry-run"; fi; \
+		eval "$$cmd")
+
+check-action-validation-suite:
+	$(call RUN_IN_CUSTOMIZED,\
+		cmd='$(PYTHON) ../benchmark/bench_script/run_action_validation_suite.py check --matrix "$(ACTION_VALIDATION_MATRIX)" --output-root "$(abspath $(ACTION_VALIDATION_OUTPUT_ROOT))"'; \
+		if [[ -n "$(ACTION_VALIDATION_TASKS)" ]]; then cmd+=" --tasks $(ACTION_VALIDATION_TASKS)"; fi; \
+		eval "$$cmd")
 
 precollect-seeds:
 	$(call RUN_IN_CUSTOMIZED,$(PYTHON) script/precollect_eval_seeds.py "$(TASK_NAME)" "$(TASK_CONFIG)")
@@ -292,13 +436,16 @@ eval-client:
 			--policy_name "$(POLICY_NAME)" \
 			--seed "$(SEED)" \
 			--instruction_type "$(INSTRUCTION_TYPE)" \
-			--test_num "$(TEST_NUM)")
+			--test_num "$(TEST_NUM)" \
+			--graph_input_condition "$(GRAPH_INPUT_CONDITION)" \
+			--graph_token_budget "$(GRAPH_TOKEN_BUDGET)" \
+			--graph_default_camera "$(GRAPH_DEFAULT_CAMERA)")
 
 eval-pi05-single:
 	$(call RUN_IN_CUSTOMIZED,bash policy/pi05/eval.sh "$(TASK_NAME)" "$(TASK_CONFIG)" "$(TRAIN_CONFIG_NAME)" "$(MODEL_NAME)" "$(CHECKPOINT_ID)" "$(CKPT_SETTING)" "$(SEED)" "$(GPU_ID)")
 
 eval-pi05-double:
-	$(call RUN_IN_CUSTOMIZED,bash policy/pi05/eval_double_env.sh "$(TASK_NAME)" "$(TASK_CONFIG)" "$(TRAIN_CONFIG_NAME)" "$(MODEL_NAME)" "$(CHECKPOINT_ID)" "$(SEED)" "$(GPU_SPEC)")
+	$(call RUN_IN_CUSTOMIZED,EVAL_START_SEED="$(EVAL_START_SEED)" EVAL_SEED_FILE="$(EVAL_SEED_FILE)" CLIENT_PYTHON="$(PYTHON)" TEST_NUM="$(TEST_NUM)" GRAPH_INPUT_CONDITION="$(GRAPH_INPUT_CONDITION)" GRAPH_TOKEN_BUDGET="$(GRAPH_TOKEN_BUDGET)" GRAPH_DEFAULT_CAMERA="$(GRAPH_DEFAULT_CAMERA)" bash policy/pi05/eval_double_env.sh "$(TASK_NAME)" "$(TASK_CONFIG)" "$(TRAIN_CONFIG_NAME)" "$(MODEL_NAME)" "$(CHECKPOINT_ID)" "$(SEED)" "$(GPU_SPEC)")
 
 collect-rollout-pi05:
 	$(call RUN_IN_CUSTOMIZED,\
@@ -313,6 +460,79 @@ collect-rollout-pi05:
 
 diag-kitchen-curobo:
 	$(call RUN_IN_CUSTOMIZED,$(PYTHON) script/bench_script/diag_kitchen_curobo.py)
+
+inspect-benchmark-hdf5:
+	@if [[ -z "$(HDF5_FILE)" ]]; then \
+		printf 'Set HDF5_FILE=/abs/path/to/episode.hdf5\n' >&2; \
+		exit 1; \
+	fi
+	hdf5_file="$(HDF5_FILE)"; \
+	if [[ "$$hdf5_file" != /* ]]; then hdf5_file="$(ROOT_DIR)/$$hdf5_file"; fi; \
+	preview_path="$(HDF5_PREVIEW_PATH)"; \
+	if [[ -n "$$preview_path" && "$$preview_path" != /* ]]; then preview_path="$(ROOT_DIR)/$$preview_path"; fi; \
+	cmd='$(PYTHON) ../benchmark/bench_script/inspect_benchmark_hdf5.py --file "'"$$hdf5_file"'"'; \
+	if [[ "$(SHOW_TREE)" == "1" ]]; then cmd+=" --show-tree"; fi; \
+	if [[ "$(DUMP_JSON)" == "1" ]]; then cmd+=" --dump-json"; fi; \
+	if [[ -n "$(HDF5_CAMERA)" ]]; then cmd+=" --camera $(HDF5_CAMERA)"; fi; \
+	if [[ -n "$$preview_path" ]]; then cmd+=' --save-preview "'"$$preview_path"'"'; fi; \
+	cmd+=" --frame $(HDF5_FRAME)"; \
+	$(call RUN_IN_CUSTOMIZED,eval "$$cmd")
+
+visualize-benchmark-rollout:
+	@if [[ -z "$(VIZ_HDF5_FILE)" ]]; then \
+		printf 'Set VIZ_HDF5_FILE=/abs/path/to/episode.hdf5\n' >&2; \
+		exit 1; \
+	fi
+	hdf5_file="$(VIZ_HDF5_FILE)"; \
+	if [[ "$$hdf5_file" != /* ]]; then hdf5_file="$(ROOT_DIR)/$$hdf5_file"; fi; \
+	output_video="$(VIZ_OUTPUT_VIDEO)"; \
+	if [[ -z "$$output_video" ]]; then \
+		stem="$$(basename "$$hdf5_file" .hdf5)"; \
+		output_video="$(ROOT_DIR)/tmp/$${stem}_benchmark_debug.mp4"; \
+	fi; \
+	if [[ "$$output_video" != /* ]]; then output_video="$(ROOT_DIR)/$$output_video"; fi; \
+	cmd='$(PYTHON) ../benchmark/bench_script/visualize_benchmark_rollout.py --file "'"$$hdf5_file"'" --output "'"$$output_video"'"'; \
+	cmd+=" --width $(VIZ_WIDTH) --height $(VIZ_HEIGHT) --fps $(VIZ_FPS) --trail $(VIZ_TRAIL)"; \
+	$(call RUN_IN_CUSTOMIZED,eval "$$cmd")
+
+visualize-relation-frame:
+	@if [[ -z "$(REL_HDF5_FILE)" ]]; then \
+		printf 'Set REL_HDF5_FILE=/abs/path/to/episode.hdf5\n' >&2; \
+		exit 1; \
+	fi
+	hdf5_file="$(REL_HDF5_FILE)"; \
+	if [[ "$$hdf5_file" != /* ]]; then hdf5_file="$(ROOT_DIR)/$$hdf5_file"; fi; \
+	output_image="$(REL_OUTPUT_IMAGE)"; \
+	if [[ -z "$$output_image" ]]; then \
+		stem="$$(basename "$$hdf5_file" .hdf5)"; \
+		episode_dir="$$(dirname "$$(dirname "$$hdf5_file")")"; \
+		output_image="$$episode_dir/visualizations/scene_graph/$${stem}_frame_$$(printf '%04d' $(REL_FRAME)).png"; \
+	fi; \
+	if [[ "$$output_image" != /* ]]; then output_image="$(ROOT_DIR)/$$output_image"; fi; \
+	cmd='$(PYTHON) ../benchmark/bench_script/visualize_relation_frame.py --file "'"$$hdf5_file"'" --frame "$(REL_FRAME)" --output "'"$$output_image"'"'; \
+	cmd+=" --width $(REL_WIDTH) --height $(REL_HEIGHT) --show-edge-labels $(REL_SHOW_EDGE_LABELS) --excluded-edges '$(REL_EXCLUDED_EDGES)' --included-edges '$(REL_INCLUDED_EDGES)' --abstract-layout $(REL_ABSTRACT_LAYOUT)"; \
+	if [[ -n "$(REL_OCCLUSION_CAMERA)" ]]; then cmd+=" --occlusion-camera $(REL_OCCLUSION_CAMERA)"; fi; \
+	$(call RUN_IN_CUSTOMIZED,eval "$$cmd")
+
+visualize-relation-samples:
+	@if [[ -z "$(REL_HDF5_FILE)" ]]; then \
+		printf 'Set REL_HDF5_FILE=/abs/path/to/episode.hdf5\n' >&2; \
+		exit 1; \
+	fi
+	hdf5_file="$(REL_HDF5_FILE)"; \
+	if [[ "$$hdf5_file" != /* ]]; then hdf5_file="$(ROOT_DIR)/$$hdf5_file"; fi; \
+	output_dir="$(REL_OUTPUT_DIR)"; \
+	if [[ -z "$$output_dir" ]]; then output_dir="$$(dirname "$$(dirname "$$hdf5_file")")/visualizations/scene_graph"; fi; \
+	if [[ "$$output_dir" != /* ]]; then output_dir="$(ROOT_DIR)/$$output_dir"; fi; \
+	mkdir -p "$$output_dir"; \
+	IFS=',' read -ra frames <<< "$(REL_SAMPLE_FRAMES)"; \
+	for frame in "$${frames[@]}"; do \
+		output_image="$$output_dir/$$(basename "$$hdf5_file" .hdf5)_frame_$$(printf '%04d' "$$frame").png"; \
+		cmd='$(PYTHON) ../benchmark/bench_script/visualize_relation_frame.py --file "'"$$hdf5_file"'" --frame '"$$frame"' --output "'"$$output_image"'"'; \
+		cmd+=" --width $(REL_WIDTH) --height $(REL_HEIGHT) --show-edge-labels $(REL_SHOW_EDGE_LABELS) --excluded-edges '$(REL_EXCLUDED_EDGES)' --included-edges '$(REL_INCLUDED_EDGES)' --abstract-layout $(REL_ABSTRACT_LAYOUT)"; \
+	if [[ -n "$(REL_OCCLUSION_CAMERA)" ]]; then cmd+=" --occlusion-camera $(REL_OCCLUSION_CAMERA)"; fi; \
+		$(call RUN_IN_CUSTOMIZED,eval "$$cmd") || exit $$?; \
+	done
 
 occluder-visibility:
 	$(call RUN_IN_CUSTOMIZED,\

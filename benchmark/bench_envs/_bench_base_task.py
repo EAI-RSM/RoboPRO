@@ -1010,7 +1010,7 @@ class Bench_base_task(Base_Task):
                         # print(f"[Collision] robot_to_furniture: {robot_link} -> {furniture_name}")
                         self.collision_metrics["robot_to_furniture"] += 1
                         self._counted_furniture_names.add(furniture_name)
-                    count_furniture = True
+                        count_furniture = True
 
             # Static objects: contacts only RECORD the most recent toucher —
             # counting is displacement-driven (sweep after the loop). Gripper
@@ -1143,19 +1143,51 @@ class Bench_base_task(Base_Task):
                     impulse = float(np.linalg.norm(pt.impulse))
                     # Log furniture contacts by impulse; log static contacts regardless
                     if count_furniture and impulse > self.collision_impulse_threshold:
-                        self.filtered_contacts_for_log.append({
+                        event = {
                             "body0": name0,
                             "body1": name1,
                             "impulse": impulse,
                             "position": [float(x) for x in pt.position],
-                        })
+                        }
+                        self.filtered_contacts_for_log.append(event)
+                        if hasattr(self, "_record_benchmark_contact_event"):
+                            self._record_benchmark_contact_event(
+                                contact_step=self._metric_step,
+                                body0_name=name0,
+                                body1_name=name1,
+                                body0_id=getattr(entity0, "per_scene_id", None),
+                                body1_id=getattr(entity1, "per_scene_id", None),
+                                impulse=impulse,
+                                position=event["position"],
+                                event_type="robot_to_furniture",
+                                counted_by_metric=True,
+                            )
                     elif (count_static or count_target_static or count_intended_static) and impulse > 0:
-                        self.filtered_contacts_for_log.append({
+                        if count_static:
+                            event_type = "robot_to_static_object"
+                        elif count_target_static:
+                            event_type = "target_to_static_object"
+                        else:
+                            event_type = "intended_to_static_object"
+                        event = {
                             "body0": name0,
                             "body1": name1,
                             "impulse": impulse,
                             "position": [float(x) for x in pt.position],
-                        })
+                        }
+                        self.filtered_contacts_for_log.append(event)
+                        if hasattr(self, "_record_benchmark_contact_event"):
+                            self._record_benchmark_contact_event(
+                                contact_step=self._metric_step,
+                                body0_name=name0,
+                                body1_name=name1,
+                                body0_id=getattr(entity0, "per_scene_id", None),
+                                body1_id=getattr(entity1, "per_scene_id", None),
+                                impulse=impulse,
+                                position=event["position"],
+                                event_type=event_type,
+                                counted_by_metric=(count_static or count_target_static),
+                            )
 
         if self._contact_stream is not None and _stream_pairs:
             _max_imp = max(p[2] for p in _stream_pairs)
@@ -1517,24 +1549,36 @@ class Bench_base_task(Base_Task):
         contact_point_id: list | float = None,
     ):
         self._mark_intended_contact(actor)
+        target_id = self._benchmark_entity_object_id(actor)
+        approach_meta = {
+            "benchmark_action": "approach",
+            "benchmark_phase": "forward_grasp",
+            "benchmark_target_object_id": target_id,
+        }
+        grasp_meta = {
+            "benchmark_action": "grasp",
+            "benchmark_phase": "forward_grasp",
+            "benchmark_target_object_id": target_id,
+        }
         if not self.plan_success:
             return None, []
         if self.need_plan == False:
             if pre_grasp_dis == grasp_dis:
                 return arm_tag, [
-                    Action(arm_tag, "move", target_pose=[0, 0, 0, 0, 0, 0, 0]),
-                    Action(arm_tag, "close", target_gripper_pos=gripper_pos),
+                    Action(arm_tag, "move", target_pose=[0, 0, 0, 0, 0, 0, 0], **approach_meta),
+                    Action(arm_tag, "close", target_gripper_pos=gripper_pos, **grasp_meta),
                 ]
             else:
                 return arm_tag, [
-                    Action(arm_tag, "move", target_pose=[0, 0, 0, 0, 0, 0, 0]),
+                    Action(arm_tag, "move", target_pose=[0, 0, 0, 0, 0, 0, 0], **approach_meta),
                     Action(
                         arm_tag,
                         "move",
                         target_pose=[0, 0, 0, 0, 0, 0, 0],
                         constraint_pose=[1, 1, 1, 0, 0, 0],
+                        **approach_meta,
                     ),
-                    Action(arm_tag, "close", target_gripper_pos=gripper_pos),
+                    Action(arm_tag, "close", target_gripper_pos=gripper_pos, **grasp_meta),
                 ]
 
         pre_grasp_pose, grasp_pose = self.choose_grasp_pose(
@@ -1552,19 +1596,20 @@ class Bench_base_task(Base_Task):
 
         if pre_grasp_pose == grasp_pose:
             return arm_tag, [
-                Action(arm_tag, "move", target_pose=pre_grasp_pose),
-                Action(arm_tag, "close", target_gripper_pos=gripper_pos),
+                Action(arm_tag, "move", target_pose=pre_grasp_pose, **approach_meta),
+                Action(arm_tag, "close", target_gripper_pos=gripper_pos, **grasp_meta),
             ]
         else:
             return arm_tag, [
-                Action(arm_tag, "move", target_pose=pre_grasp_pose),
+                Action(arm_tag, "move", target_pose=pre_grasp_pose, **approach_meta),
                 Action(
                     arm_tag,
                     "move",
                     target_pose=grasp_pose,
                     constraint_pose=[1, 1, 1, 0, 0, 0],
+                    **approach_meta,
                 ),
-                Action(arm_tag, "close", target_gripper_pos=gripper_pos),
+                Action(arm_tag, "close", target_gripper_pos=gripper_pos, **grasp_meta),
             ]
 
     def get_curobo_target(self):

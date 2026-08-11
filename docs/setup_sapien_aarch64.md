@@ -1,121 +1,138 @@
-# Building SAPIEN 3.0.0b1 from source on aarch64 (GB10 / DGX Spark)
+# GB10 / ARM64 setup with Docker and SLURM
 
-PyPI ships no aarch64 wheel for `sapien==3.0.0b1`, so on ARM machines the
-`pip install -r script/requirements.txt` step fails to resolve sapien. Build the wheel
-from source with the script below, then re-run the requirements install.
+RoboPRO's original environment is an amd64, Python 3.10 stack. The GB10 path uses
+an ARM64 NVIDIA container because CUDA-enabled PyTorch for this machine must come
+from NVIDIA's GB10-compatible image rather than the generic PyPI wheel.
 
-Set these two variables before running:
+## Supported environments
+
+| Host | Python | PyTorch | SAPIEN / mplib |
+|---|---:|---|---|
+| Linux amd64 | 3.10 | PyPI `torch==2.4.1` | Existing pinned PyPI wheels |
+| Linux ARM64 / GB10 | 3.12 | NGC PyTorch 25.11 | Repaired/rebuilt during the Docker build |
+
+The architecture markers are in the root `pyproject.toml`. On ARM64, Torch,
+Torchvision, SAPIEN, mplib, Open3D, and PyTorch3D are deliberately not resolved
+from PyPI:
+
+- Torch and Torchvision are supplied by `nvcr.io/nvidia/pytorch:25.11-py3`.
+- SAPIEN's official ARM wheel requires runtime repair on Ubuntu 24.04.
+- mplib is compiled against a single FCL/OctoMap 1.10 stack.
+- Open3D has no ARM64 wheel; RoboPRO uses Trimesh for point-cloud export.
+- A Torch farthest-point sampler is used when PyTorch3D is unavailable.
+
+## Build the image
+
+Run this on an ARM64 GB10 node with Docker and NVIDIA Container Toolkit:
 
 ```bash
-THIRD_PARTY_DIR=/path/to/third_party    # where the SAPIEN source tree will live
-CUDA_12=/usr/local/cuda-12              # your CUDA 12.x install root
+IMAGE=robopro:gb10 bash scripts/docker/build_gb10.sh
 ```
+
+CuRobo v0.7.8 is installed by default. For a faster core-image build while
+working only on SAPIEN/mplib integration:
 
 ```bash
-# ── SAPIEN 3.0.0b1 (build from source for aarch64) ───────────────────────────
-echo "==> Building SAPIEN 3.0.0b1 from source (aarch64)..."
-SAPIEN_SRC="${THIRD_PARTY_DIR}/sapien_build"
-rm -rf "${SAPIEN_SRC}"
-git clone --branch 3.0.0b1 --depth 1 https://github.com/haosulab/SAPIEN.git "${SAPIEN_SRC}"
-cd "${SAPIEN_SRC}"
-git submodule update --init --recursive
-
-# Build SAPIEN in a subshell to isolate env var exports from later sections
-(
-  export CUDA_PATH="${CUDA_12}"
-  export CUDACXX="${CUDA_12}/bin/nvcc"
-  export PATH="${CUDA_12}/bin:${PATH}"
-  export CMAKE_BUILD_PARALLEL_LEVEL="$(nproc)"
-  export CUDAARCHS="120"
-  export CC=/usr/bin/gcc-11
-  export CXX=/usr/bin/g++-11
-  export CUDAHOSTCXX=/usr/bin/g++-11
-  export CFLAGS="-w"
-  export CXXFLAGS="-w"
-  export CUDAFLAGS="-w -ccbin /usr/bin/g++-11"
-  unset CPLUS_INCLUDE_PATH C_INCLUDE_PATH
-  SAPIEN_BUILD_DIR="sapien_build"
-
-  # Patch hardcoded CUDA architectures
-  sed -i 's/CUDA_ARCHITECTURES "60;61;70;75;80;86"/CUDA_ARCHITECTURES "120"/g' 3rd_party/simsense/CMakeLists.txt
-  sed -i 's/CUDA_ARCHITECTURES "60;61;70;75;80;86"/CUDA_ARCHITECTURES "120"/g' CMakeLists.txt
-
-  # Patch pybind11 refs (smart_holder branch was archived)
-  for f in cmake/pybind11.cmake pinocchio/cmake/pybind11.cmake; do
-    if [[ -f "$f" ]]; then
-      sed -i 's/GIT_TAG smart_holder$/GIT_TAG archive\/smart_holder/' "$f"
-    fi
-  done
-
-  # First build: fetch dependencies (may fail, that's OK)
-  if [[ ! -d "${SAPIEN_BUILD_DIR}/_sapien_deps/ktx-src" ]]; then
-    echo "==> Running cmake configure to fetch dependencies..."
-    python setup.py bdist_wheel 2>&1 | tee "${SAPIEN_SRC}/sapien_build_log.txt" || true
-  fi
-
-  # Patch pybind11 again (SAPIEN's own copy, fetched during first build)
-  for f in cmake/pybind11.cmake pinocchio/cmake/pybind11.cmake; do
-    if [[ -f "$f" ]]; then
-      sed -i 's/GIT_TAG smart_holder$/GIT_TAG archive\/smart_holder/' "$f"
-    fi
-  done
-
-  # Patch ASTC encoder NEON intrinsics for GCC on aarch64
-  NEON_FILE="${SAPIEN_BUILD_DIR}/_sapien_deps/ktx-src/lib/astc-encoder/Source/astcenc_vecmathlib_neon_4.h"
-  if [[ -f "${NEON_FILE}" ]]; then
-    echo "==> Patching ASTC NEON intrinsics for aarch64/GCC..."
-    sed -i '/uint32_t lane/,/}/s/return vgetq_lane_s32(m, l);/return vgetq_lane_u32(m, l);/' "${NEON_FILE}"
-    sed -i 's/int8x16_t table { t0\.m };/int8x16_t table = vreinterpretq_s8_s32(t0.m);/' "${NEON_FILE}"
-    sed -i 's/int8x16x2_t table { t0\.m, t1\.m };/int8x16x2_t table { vreinterpretq_s8_s32(t0.m), vreinterpretq_s8_s32(t1.m) };/' "${NEON_FILE}"
-    sed -i 's/int8x16x4_t table { t0\.m, t1\.m, t2\.m, t3\.m };/int8x16x4_t table { vreinterpretq_s8_s32(t0.m), vreinterpretq_s8_s32(t1.m), vreinterpretq_s8_s32(t2.m), vreinterpretq_s8_s32(t3.m) };/' "${NEON_FILE}"
-    sed -i 's/\tint8x16_t idx_bytes = vreinterpretq_u8_s32(idx_masked);/\tuint8x16_t idx_bytes = vreinterpretq_u8_s32(idx_masked);/g' "${NEON_FILE}"
-    sed -i 's/return vint4(vqtbl1q_s8(table, idx_bytes));/return vint4(vreinterpretq_s32_s8(vqtbl1q_s8(table, idx_bytes)));/' "${NEON_FILE}"
-    sed -i 's/return vint4(vqtbl2q_s8(table, idx_bytes));/return vint4(vreinterpretq_s32_s8(vqtbl2q_s8(table, idx_bytes)));/' "${NEON_FILE}"
-    sed -i 's/return vint4(vqtbl4q_s8(table, idx_bytes));/return vint4(vreinterpretq_s32_s8(vqtbl4q_s8(table, idx_bytes)));/' "${NEON_FILE}"
-  fi
-
-  # Patch OIDN to add sm_120 CUDA support (GB10 is sm_121, PTX-compatible with sm_120)
-  OIDN_CUDA_CMAKE="${SAPIEN_BUILD_DIR}/_sapien_deps/oidn-src/devices/cuda/CMakeLists.txt"
-  if [[ -f "${OIDN_CUDA_CMAKE}" ]] && ! grep -q SM120 "${OIDN_CUDA_CMAKE}"; then
-    echo "==> Patching OIDN for sm_120 (GB10)..."
-    sed -i '/^set(OIDN_NVCC_SM90_FLAGS/a\set(OIDN_NVCC_SM120_FLAGS "-gencode arch=compute_120,code=sm_120")' "${OIDN_CUDA_CMAKE}"
-    sed -i 's/\(SM90_FLAGS}\)"/\1 ${OIDN_NVCC_SM120_FLAGS}"/' "${OIDN_CUDA_CMAKE}"
-  fi
-
-  # Patch OIDN maxSMArch to support sm_120+ (default 99 is too low for GB10)
-  OIDN_CUDA_DEVICE_H="${SAPIEN_BUILD_DIR}/_sapien_deps/oidn-src/devices/cuda/cuda_device.h"
-  if [[ -f "${OIDN_CUDA_DEVICE_H}" ]] && ! grep -q 'maxSMArch = 121' "${OIDN_CUDA_DEVICE_H}"; then
-    echo "==> Patching OIDN maxSMArch 99 -> 121 for GB10..."
-    sed -i 's/static constexpr int maxSMArch = 99;/static constexpr int maxSMArch = 121;/' "${OIDN_CUDA_DEVICE_H}"
-  fi
-
-  # Replace x86_64 PhysX5 precompiled libs with aarch64 version
-  PHYSX_VERSION="105.1-physx-5.3.1.patch0"
-  PHYSX_DIR="${SAPIEN_BUILD_DIR}/_sapien_deps/physx5-src"
-  if [[ -d "${PHYSX_DIR}" ]]; then
-    echo "==> Replacing PhysX5 libs with aarch64 build..."
-    curl -sL "https://github.com/sapien-sim/physx-precompiled/releases/download/${PHYSX_VERSION}/linux-aarch64-release.zip" -o "${SAPIEN_SRC}/physx5-aarch64.zip"
-    rm -rf "${SAPIEN_SRC}/physx5-aarch64"
-    unzip -q "${SAPIEN_SRC}/physx5-aarch64.zip" -d "${SAPIEN_SRC}/physx5-aarch64"
-    rm -rf "${PHYSX_DIR}/bin/linux.clang"
-    mkdir -p "${PHYSX_DIR}/bin/linux.clang"
-    ln -s "${SAPIEN_SRC}/physx5-aarch64/bin/linux.aarch64/release" "${PHYSX_DIR}/bin/linux.clang/release"
-  fi
-
-  # Clean OIDN build cache (must rebuild with new arch) and rebuild
-  rm -rf "${SAPIEN_BUILD_DIR}/_sapien_build"
-  rm -rf "${SAPIEN_BUILD_DIR}/_sapien_deps/oidn-build"
-  rm -rf dist/
-  python setup.py bdist_wheel > "${SAPIEN_SRC}/sapien_build_log.txt" 2>&1 || {
-    echo "==> SAPIEN build failed. Errors:"
-    grep -E "^.*error:" "${SAPIEN_SRC}/sapien_build_log.txt" | grep -iv "warning\|hmderrors\|PxError\|PxDefault\|codecvt_error" | head -20
-    echo "    Full log: ${SAPIEN_SRC}/sapien_build_log.txt"
-    exit 1
-  }
-  echo "==> SAPIEN build succeeded."
-)
-# Install the built wheel outside the subshell
-pip install "${SAPIEN_SRC}/dist"/sapien-*.whl
+IMAGE=robopro:gb10-core INSTALL_CUROBO=0 bash scripts/docker/build_gb10.sh
 ```
 
-If the build fails, the full log is at `${SAPIEN_SRC}/sapien_build_log.txt`.
+The multi-stage build performs these reproducible operations:
+
+1. Starts from NGC PyTorch 25.11 (Python 3.12, CUDA 13).
+2. Builds FCL 0.7 against the OctoMap 1.10 libraries used by Pinocchio 2.7.
+3. Builds mplib 0.2.1 for CPython 3.12/aarch64 against that FCL build.
+4. Combines the current official SAPIEN ARM nightly with the denoiser libraries
+   from SAPIEN 3.0.3 and relinks glibc/GCC runtime dependencies to Ubuntu 24.04.
+5. Installs the architecture-neutral dependencies from `pyproject.toml` without
+   replacing NVIDIA's Torch.
+
+## Local smoke test
+
+```bash
+IMAGE=robopro:gb10-core bash scripts/docker/smoke_gb10.sh
+```
+
+The expected line contains `aarch64`, `True`, `NVIDIA GB10`, the SAPIEN and
+mplib versions, and `Scene`. This creates a PhysX-only scene so native-code and
+CUDA validation are independent of the host's Vulkan installation.
+
+Test the renderer separately:
+
+```bash
+IMAGE=robopro:gb10-core TEST_RENDER=1 bash scripts/docker/smoke_gb10.sh
+```
+
+The wrapper passes `/dev/dri`, `/dev/nvidia-modeset`, and NVIDIA Vulkan/GLVND
+manifests into Docker when they exist on the host.
+
+For an interactive shell with the current checkout mounted:
+
+```bash
+docker run --rm -it \
+  --gpus all \
+  --ipc=host \
+  --ulimit memlock=-1 \
+  --ulimit stack=67108864 \
+  -e NVIDIA_DRIVER_CAPABILITIES=graphics,utility,compute \
+  -v "$PWD:/workspace/RoboPRO" \
+  -w /workspace/RoboPRO \
+  robopro:gb10
+```
+
+## SLURM
+
+Docker does not request a GPU from SLURM. Request the resource with `sbatch` or
+`srun`, then pass only SLURM's allocated device to Docker. The supplied wrapper
+does this with `--gpus "device=${CUDA_VISIBLE_DEVICES}"`:
+
+```bash
+IMAGE=robopro:gb10 sbatch scripts/slurm/slurm_docker_gb10.sh
+```
+
+Run a repository command by placing it after the script name:
+
+```bash
+IMAGE=robopro:gb10 sbatch scripts/slurm/slurm_docker_gb10.sh \
+  bash -lc 'cd customized_robotwin && source set_env.sh && python -c "import sapien, mplib; print(sapien.__version__, mplib.__version__)"'
+```
+
+Docker images normally live in a node-local daemon. On a multi-node cluster,
+either build/load the image on every possible GB10 node or publish it to a
+registry. For a registry image, ask the job to pull it on the allocated node:
+
+```bash
+sbatch --export=ALL,IMAGE=registry.example/robopro:gb10,PULL_IMAGE=1 \
+  scripts/slurm/slurm_docker_gb10.sh
+```
+
+The wrapper mounts the checkout at `/workspace/RoboPRO` and runs as the calling
+UID/GID so generated results are not owned by root.
+
+## Reproducibility note
+
+The amd64 benchmark remains pinned to SAPIEN 3.0.0b1. The validated ARM64 path
+uses the June 2026 SAPIEN nightly because the older ARM artifacts are not usable
+with the GB10 Python/CUDA stack. Physics or rendering results from these two
+SAPIEN versions should not be treated as directly comparable benchmark numbers.
+The SAPIEN maintainers also describe Linux ARM64 wheels as not yet fully tested
+or manylinux-compliant: <https://github.com/haosulab/SAPIEN/issues/197>.
+
+## Troubleshooting
+
+- `GLIBC_PRIVATE` from `librt`: ensure the image was built with
+  `docker/gb10/repair_sapien_wheel.sh`; do not install the upstream wheel over it.
+- Heap corruption at Python shutdown: ensure mplib resolves
+  `/opt/fcl-cmeel/lib/libfcl.so.0.7`, not Ubuntu's FCL linked to OctoMap 1.9.
+- `libucc.so.1: undefined symbol`: retain the image's `LD_LIBRARY_PATH` ordering;
+  NVIDIA HPC-X must precede Ubuntu's UCX libraries pulled in by OMPL.
+- SAPIEN cannot create a rendering device: first test the host itself with
+  `VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/nvidia_icd.json vulkaninfo --summary`.
+  If that fails with `ERROR_INCOMPATIBLE_DRIVER`, the NVIDIA Vulkan userspace
+  package/driver must be repaired by the cluster administrator; Docker cannot
+  fix a host ICD that does not initialize. After the host test passes, retain
+  `NVIDIA_DRIVER_CAPABILITIES=graphics,utility,compute`, `libvulkan1`, the DRM
+  device arguments, and manifest mounts supplied by the wrappers.
+
+On the GB10 node used for validation, CUDA and SAPIEN PhysX pass, but the host
+NVIDIA 580.95.05 Vulkan ICD currently fails that host-side `vulkaninfo` check.
+Rendering therefore remains unavailable until the host driver is corrected.

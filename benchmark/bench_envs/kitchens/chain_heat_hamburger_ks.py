@@ -102,21 +102,38 @@ class chain_heat_hamburger_ks(KitchenS_base_task):
         tgt_y = mw_y + float(np.random.uniform(-0.10, -0.04))
         tgt_z = mw_z + 0.02
 
+        placement_meta = {
+            "benchmark_target_entity": self.target_obj,
+            "benchmark_destination_entity": self.microwave,
+        }
         hover_pose = [tgt_x, tgt_y - 0.15, tgt_z] + grasp_q
-        self.move(self.move_to_pose(arm_tag, hover_pose))
+        self.move(self.move_to_pose(
+            arm_tag, hover_pose, benchmark_action="transport",
+            benchmark_phase="transition", **placement_meta,
+        ))
         if not self.plan_success:
             self.plan_success = True
 
         insert_pose = [tgt_x, tgt_y, tgt_z - 0.02] + grasp_q
-        self.move(self.move_to_pose(arm_tag, insert_pose))
+        self.move(self.move_to_pose(
+            arm_tag, insert_pose, benchmark_action="place",
+            benchmark_phase="final_descent", **placement_meta,
+        ))
         if not self.plan_success:
             self.plan_success = True
 
-        self.move(self.open_gripper(arm_tag, pos=1.0))
-        self.move(self.move_by_displacement(arm_tag=arm_tag, y=-0.20))
+        self.move(self.open_gripper(
+            arm_tag, pos=1.0, benchmark_action="release",
+            benchmark_phase="final_descent", **placement_meta,
+        ))
+        self.move(self.move_by_displacement(
+            arm_tag=arm_tag, y=-0.20, benchmark_action="retreat",
+        ))
         if not self.plan_success:
             self.plan_success = True
-        self.move(self.move_by_displacement(arm_tag=arm_tag, z=0.10))
+        self.move(self.move_by_displacement(
+            arm_tag=arm_tag, z=0.10, benchmark_action="retreat",
+        ))
         self.move(self.back_to_origin(arm_tag))
 
     # -----------------------------------------------------------------
@@ -132,29 +149,46 @@ class chain_heat_hamburger_ks(KitchenS_base_task):
         cp_mat = self.microwave.get_contact_point(0, "matrix")
         hx, hy, hz = float(cp_mat[0, 3]), float(cp_mat[1, 3]), float(cp_mat[2, 3])
 
-        self.move(self.close_gripper(arm_tag, pos=0.0))
+        articulation_meta = {
+            "benchmark_target_entity": self.microwave,
+            "interaction_part": "door_handle_contact_point_0",
+            "articulation_joint_index": 0,
+        }
 
         for _ in range(3):
             dx = float(np.random.uniform(-0.03, 0.03))
             dy = float(np.random.uniform(-0.02, 0.02))
             dz = float(np.random.uniform(-0.02, 0.03))
-            self.move(self.move_by_displacement(arm_tag=arm_tag, x=dx, y=dy, z=dz))
+            self.move(self.move_by_displacement(
+                arm_tag=arm_tag, x=dx, y=dy, z=dz,
+                benchmark_action="approach_handle", **articulation_meta,
+            ))
             if not self.plan_success:
                 self.plan_success = True
                 break
 
         hover_pose = [hx - 0.10, hy - 0.15, hz + 0.10] + grasp_q
-        self.move(self.move_to_pose(arm_tag, hover_pose))
+        self.move(self.move_to_pose(
+            arm_tag, hover_pose, benchmark_action="approach_handle", **articulation_meta,
+        ))
 
+        self.move(self.close_gripper(
+            arm_tag, pos=0.0, benchmark_action="grasp_handle", **articulation_meta,
+        ))
         push_pose = [hx - 0.10, hy - 0.15, hz] + grasp_q
-        self.move(self.move_to_pose(arm_tag, push_pose))
+        self.move(self.move_to_pose(
+            arm_tag, push_pose, benchmark_action="close_articulation", **articulation_meta,
+        ))
 
         limits = self.microwave.get_qlimits()
         start_qpos = self.microwave.get_qpos()[0]
 
         # Push until the door is within 3 degrees of shut (strict eval threshold).
         for _ in range(3):
-            self.move(self.move_by_displacement(arm_tag=arm_tag, x=0.10, y=0.00))
+            self.move(self.move_by_displacement(
+                arm_tag=arm_tag, x=0.10, y=0.00,
+                benchmark_action="close_articulation", **articulation_meta,
+            ))
             new_qpos = self.microwave.get_qpos()[0]
             if not self.plan_success:
                 break
@@ -165,7 +199,10 @@ class chain_heat_hamburger_ks(KitchenS_base_task):
             start_qpos = new_qpos
 
         for _ in range(3):
-            self.move(self.move_by_displacement(arm_tag=arm_tag, x=0.00, y=0.10, z=-0.01))
+            self.move(self.move_by_displacement(
+                arm_tag=arm_tag, x=0.00, y=0.10, z=-0.01,
+                benchmark_action="close_articulation", **articulation_meta,
+            ))
             new_qpos = self.microwave.get_qpos()[0]
             if not self.plan_success:
                 break

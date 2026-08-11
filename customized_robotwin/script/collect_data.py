@@ -11,13 +11,19 @@ from sapien.render import clear_cache
 from collections import OrderedDict
 import pdb
 from envs import *
+from envs.utils.policy_action_contract import (
+    CONTRACT_VERSION as POLICY_ACTION_CONTRACT_VERSION,
+    provider_registry, resolve_provider, tool_schema,
+)
 import yaml
 import importlib
 import json
 import traceback
 import os
+import subprocess
 import time
 import h5py
+import numpy as np
 from argparse import ArgumentParser
 
 from export_scene import export_scene
@@ -37,6 +43,159 @@ except Exception as _e:  # noqa: BLE001
 current_file_path = os.path.abspath(__file__)
 parent_directory = os.path.dirname(current_file_path)
 bench_root = Path(os.environ["BENCH_ROOT"])
+
+
+def _parse_env_bool(name, value):
+    normalized = value.strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    raise ValueError(f"{name} must be one of 1/0, true/false, yes/no, or on/off; got {value!r}")
+
+
+def _apply_relation_collection_env_overrides(args):
+    """Apply the small, documented Make/env override surface for graph runs."""
+    relations = args.setdefault("benchmark_relations", {})
+    reachability = relations.setdefault("reachable_by", {})
+    near = relations.setdefault("near", {})
+    on_supports = relations.setdefault("on_supports", {})
+    in_contains = relations.setdefault("in_contains", {})
+    held_by = relations.setdefault("held_by", {})
+    visible_to = relations.setdefault("visible_to", {})
+    occludes = relations.setdefault("occludes", {})
+    blocks = relations.setdefault("blocks", {})
+    bool_overrides = {
+        "ROBOPRO_REACHABLE_BY_ENABLED": "enabled",
+        "ROBOPRO_REACHABLE_BY_MOVABLE_ONLY": "movable_only",
+        "ROBOPRO_REACHABLE_BY_CACHE_UNCHANGED": "cache_unchanged",
+    }
+    float_overrides = {
+        "ROBOPRO_NEAR_HORIZONTAL_THRESHOLD_M": (near, "horizontal_threshold_m", False),
+        "ROBOPRO_NEAR_VERTICAL_MARGIN_M": (near, "vertical_margin_m", False),
+        "ROBOPRO_NEAR_MIN_GEOMETRY_EXTENT_M": (near, "min_geometry_extent_m", True),
+        "ROBOPRO_ON_SUPPORTS_MAX_VERTICAL_PENETRATION_M": (
+            on_supports, "max_vertical_penetration_m", False
+        ),
+        "ROBOPRO_ON_SUPPORTS_MAX_VERTICAL_SEPARATION_M": (
+            on_supports, "max_vertical_separation_m", False
+        ),
+        "ROBOPRO_ON_SUPPORTS_MIN_XY_AREA_M2": (
+            on_supports, "min_xy_area_m2", True
+        ),
+        "ROBOPRO_IN_CONTAINS_CENTER_TOLERANCE_M": (
+            in_contains, "center_tolerance_m", False
+        ),
+        "ROBOPRO_HELD_BY_MAX_OBJECT_TCP_DISTANCE_M": (
+            held_by, "max_object_tcp_distance_m", False
+        ),
+        "ROBOPRO_OCCLUDES_MIN_DEPTH_MARGIN_M": (
+            occludes, "min_depth_margin_m", False
+        ),
+        "ROBOPRO_BLOCKS_CORRIDOR_CLEARANCE_M": (
+            blocks, "corridor_clearance_m", False
+        ),
+        "ROBOPRO_BLOCKS_ENDPOINT_MARGIN_M": (
+            blocks, "endpoint_margin_m", False
+        ),
+    }
+    ratio_overrides = {
+        "ROBOPRO_ON_SUPPORTS_MIN_XY_OVERLAP_RATIO": (
+            on_supports, "min_xy_overlap_ratio"
+        ),
+        "ROBOPRO_OCCLUDES_MIN_OVERLAP_FRACTION": (
+            occludes, "min_overlap_fraction"
+        ),
+    }
+    int_overrides = {
+        "ROBOPRO_VISIBLE_TO_MIN_VISIBLE_PIXEL_COUNT": (
+            visible_to, "min_visible_pixel_count", 1
+        ),
+        "ROBOPRO_OCCLUDES_MIN_OVERLAP_PIXEL_COUNT": (
+            occludes, "min_overlap_pixel_count", 1
+        ),
+        "ROBOPRO_REACHABLE_BY_FRAME_STRIDE": (reachability, "frame_stride", 1),
+        "ROBOPRO_REACHABLE_BY_POSE_DECIMALS": (reachability, "pose_round_decimals", 0),
+        "ROBOPRO_RELATION_OBSTACLE_DENSITY": (
+            args.setdefault("domain_randomization", {}), "obstacle_density", 0
+        ),
+        "ROBOPRO_RELATION_EPISODE_NUM": (args, "episode_num", 1),
+    }
+
+    for env_name, config_name in bool_overrides.items():
+        value = os.getenv(env_name)
+        if value not in (None, ""):
+            reachability[config_name] = _parse_env_bool(env_name, value)
+
+    value = os.getenv("ROBOPRO_OCCLUDES_MOVABLE_TARGETS_ONLY")
+    if value not in (None, ""):
+        occludes["movable_targets_only"] = _parse_env_bool(
+            "ROBOPRO_OCCLUDES_MOVABLE_TARGETS_ONLY", value
+        )
+
+    for env_name, config_name in (
+        ("ROBOPRO_BLOCKS_MOVABLE_SOURCES_ONLY", "movable_sources_only"),
+        ("ROBOPRO_BLOCKS_MOVABLE_TARGETS_ONLY", "movable_targets_only"),
+    ):
+        value = os.getenv(env_name)
+        if value not in (None, ""):
+            blocks[config_name] = _parse_env_bool(env_name, value)
+
+    for env_name, (destination, config_name, strictly_positive) in float_overrides.items():
+        value = os.getenv(env_name)
+        if value in (None, ""):
+            continue
+        parsed = float(value)
+        valid = np.isfinite(parsed) and (parsed > 0 if strictly_positive else parsed >= 0)
+        if not valid:
+            operator = "> 0" if strictly_positive else ">= 0"
+            raise ValueError(f"{env_name} must be finite and {operator}; got {value!r}")
+        destination[config_name] = parsed
+
+    for env_name, (destination, config_name) in ratio_overrides.items():
+        value = os.getenv(env_name)
+        if value in (None, ""):
+            continue
+        parsed = float(value)
+        if not np.isfinite(parsed) or not 0 <= parsed <= 1:
+            raise ValueError(f"{env_name} must be finite and in [0, 1]; got {value!r}")
+        destination[config_name] = parsed
+
+    for env_name, (destination, config_name, minimum) in int_overrides.items():
+        value = os.getenv(env_name)
+        if value in (None, ""):
+            continue
+        parsed = int(value)
+        if parsed < minimum:
+            raise ValueError(f"{env_name} must be >= {minimum}; got {parsed}")
+        destination[config_name] = parsed
+
+    save_path = os.getenv("ROBOPRO_RELATION_SAVE_PATH")
+    if save_path not in (None, ""):
+        args["save_path"] = save_path
+
+    provider_name = os.getenv("ROBOPRO_ACTION_PROVIDER", "rule_based")
+    provider_config_ref = os.getenv("ROBOPRO_ACTION_PROVIDER_CONFIG")
+    provider = resolve_provider(provider_name, provider_config_ref)
+    if provider["kind"] != "expert_planner":
+        raise ValueError(
+            f"collect_data.py executes the rule-based expert, not {provider['name']!r}; "
+            "use the policy rollout collector for model providers"
+        )
+    args["policy_action_provider"] = {
+        "name": provider["name"], "config_ref": provider["config_ref"]
+    }
+
+    office_arrangement = os.getenv("ROBOPRO_OFFICE_ARRANGEMENT")
+    if office_arrangement not in (None, ""):
+        parsed = int(office_arrangement)
+        if parsed not in {0, 1, 2}:
+            raise ValueError(
+                f"ROBOPRO_OFFICE_ARRANGEMENT must be 0, 1, or 2; got {parsed}"
+            )
+        args["office_arrangement"] = parsed
+
+    return args
 
 
 def class_decorator(task_name):
@@ -79,6 +238,8 @@ def build_task_and_args(task_name, task_config):
         
     with open(task_config_path, "r", encoding="utf-8") as f:
         args = yaml.load(f.read(), Loader=yaml.FullLoader)
+
+    _apply_relation_collection_env_overrides(args)
 
     args['task_name'] = task_name
 
@@ -159,6 +320,26 @@ def _stamp_provenance_attrs(hdf5_path, args, seed=None, success=None, timestep=N
     peo = args.get("planner_exclude_obstacles", None)
     blind = bool(peo) if peo is not None else ecm
     with h5py.File(hdf5_path, "a") as f:
+        action_provider = resolve_provider(generator if generator is not None else "rule_based")
+        f.attrs["action_provider"] = action_provider["name"]
+        f.attrs["action_provider_kind"] = action_provider["kind"]
+        f.attrs["action_representation"] = action_provider["action_representation"]
+        f.attrs["policy_action_contract_version"] = POLICY_ACTION_CONTRACT_VERSION
+        contract_group = f.require_group("benchmark_support").require_group("policy_action_contract")
+        string_dtype = h5py.string_dtype(encoding="utf-8")
+        contract_values = {
+            "version": POLICY_ACTION_CONTRACT_VERSION,
+            "provider_name": action_provider["name"],
+            "provider_kind": action_provider["kind"],
+            "action_representation": action_provider["action_representation"],
+            "provider_config_json": json.dumps(action_provider, sort_keys=True),
+            "provider_registry_json": json.dumps(provider_registry(), sort_keys=True),
+            "tool_schema_json": json.dumps(tool_schema(), sort_keys=True),
+        }
+        for dataset_name, value in contract_values.items():
+            if dataset_name in contract_group:
+                del contract_group[dataset_name]
+            contract_group.create_dataset(dataset_name, data=value, dtype=string_dtype)
         # human-readable producer label ("what made this data"). CuRobo datasets
         # derive it from the resolved planner regime; policy-rollout datasets pass
         # generator=<policy name> (e.g. "pi05") explicitly.
@@ -327,6 +508,12 @@ def run(TASK_ENV, args):
             st_idx += 1
 
         attempted_num, deleted_num, error_num = 0, 0, 0
+        existing_num = min(st_idx, args["episode_num"])
+        if existing_num >= args["episode_num"]:
+            print(
+                f"Dataset already complete: found {existing_num}/{args['episode_num']} "
+                f"requested HDF5 episode(s) in {os.path.abspath(args['save_path'])}"
+            )
 
         for episode_idx in range(st_idx, args["episode_num"]):
             if exist_hdf5(episode_idx):
@@ -337,6 +524,12 @@ def run(TASK_ENV, args):
 
             try:
                 TASK_ENV.setup_demo(now_ep_num=episode_idx, seed=seed_list[episode_idx], **args)
+                if hasattr(TASK_ENV, "set_benchmark_export_context"):
+                    TASK_ENV.set_benchmark_export_context(
+                        task_config=args["task_config"],
+                        config_snapshot=args,
+                        bench_subdir=None,
+                    )
                 if hasattr(TASK_ENV, "_maybe_apply_language_perturbation"):
                     TASK_ENV._maybe_apply_language_perturbation()
 
@@ -378,6 +571,8 @@ def run(TASK_ENV, args):
                 # measured while the scene is still alive (used for the keep decision
                 # below — the stock code re-queried after close_env)
                 success = bool(TASK_ENV.check_success())
+                if hasattr(TASK_ENV, "build_benchmark_episode_record"):
+                    info = TASK_ENV.build_benchmark_episode_record(success=success)
 
                 # only episodes with saved frames become an hdf5 (a failed plan can
                 # produce no executable motion -> nothing to save, not a crash)
@@ -445,12 +640,25 @@ def run(TASK_ENV, args):
                             pass
                 continue
 
-        command = f"cd description && bash gen_episode_instructions.sh {args['task_name']} {args['task_config']} {args['language_num']}"
-        os.system(command)
+        subprocess.run(
+            [
+                sys.executable,
+                "utils/generate_episode_instructions.py",
+                args["task_name"],
+                args["task_config"],
+                str(args["language_num"]),
+                "--run-dir",
+                os.path.abspath(args["save_path"]),
+            ],
+            cwd="description",
+            check=True,
+        )
 
         _banner(f"COLLECTION SUMMARY · {args['task_name']} / {args['task_config']}")
         print(f"  {'episodes attempted':26s} {attempted_num}")
+        print(f"  {'already present':26s} {existing_num}")
         print(f"  {'kept in dataset':26s} {attempted_num - deleted_num - error_num}")
+        print(f"  {'dataset directory':26s} {os.path.abspath(args['save_path'])}")
         if deleted_num:
             print(f"  {'removed (task failed)':26s} {deleted_num}")
         if error_num:

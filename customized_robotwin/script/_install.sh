@@ -37,17 +37,21 @@ else
     echo "  mplib planner already patched (skipping)"
 fi
 
-echo "Installing Curobo ..."
-cd envs
-CUROBO_TAG="v0.7.8"
-if [ ! -d curobo ] || ! git -C curobo describe --tags --exact-match 2>/dev/null | grep -q "^${CUROBO_TAG}$"; then
-    rm -rf curobo
-    git clone --branch "${CUROBO_TAG}" --depth 1 https://github.com/NVlabs/curobo.git
+if [ "${SKIP_CUROBO:-0}" != "1" ]; then
+    echo "Installing Curobo ..."
+    cd envs
+    CUROBO_TAG="v0.7.8"
+    if [ ! -d curobo ] || ! git -C curobo describe --tags --exact-match 2>/dev/null | grep -q "^${CUROBO_TAG}$"; then
+        rm -rf curobo
+        git clone --branch "${CUROBO_TAG}" --depth 1 https://github.com/NVlabs/curobo.git
+    fi
+    cd curobo
+    "${PIP_CMD[@]}" install -e . "numpy<2" --no-build-isolation
+    "${PIP_CMD[@]}" install warp-lang==1.12.0 setuptools==69.5.1
+    cd ../..
+else
+    echo "Skipping Curobo installation (SKIP_CUROBO=1)."
 fi
-cd curobo
-"${PIP_CMD[@]}" install -e . --no-build-isolation
-"${PIP_CMD[@]}" install warp-lang==1.12.0 setuptools==69.5.1
-cd ../..
 
 echo "Installation basic environment complete!"
 echo -e "You need to:"

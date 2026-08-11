@@ -1,0 +1,25 @@
+contract_version: "1.0.0"
+default_provider: rule_based
+providers:
+  rule_based:
+    kind: expert_planner
+    available: true
+    action_representation: high_level_action_nodes
+  pi0:
+    aliases: [Pi_0, pi_0]
+    kind: policy_model
+    module: pi0
+    available: true
+    action_representation: low_level_policy_commands
+  pi05:
+    aliases: [Pi_0.5, pi_0.5]
+    kind: policy_model
+    module: pi05
+    available: true
+    action_representation: low_level_policy_commands
+  xvla:
+    aliases: [XVLA]
+    kind: policy_model
+    module: XVLA
+    available: false
+    action_representation: adapter_required

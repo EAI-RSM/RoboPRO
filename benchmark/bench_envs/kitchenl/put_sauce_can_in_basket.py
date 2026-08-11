@@ -11,6 +11,11 @@ import transforms3d as t3d
 
 
 class put_sauce_can_in_basket(Kitchen_base_large):
+    # This task's placement destination is the inherited table-side basket,
+    # not a des_obj* attribute. Opt in explicitly so other basket tasks keep
+    # their own source/destination semantics.
+    benchmark_destination_attrs = ("basket_right",)
+
     BOTTLE_MASS = 0.1
     BOTTLE_SPAWN_Z_OFFSET = 0.01
     BOTTLE_WORLD_XY_JITTER = 0.025

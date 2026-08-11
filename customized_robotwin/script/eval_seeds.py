@@ -39,7 +39,7 @@ def resolve_eval_seeds(task_name, task_config, usr_args):
     if use_flag is not None and not _truthy(use_flag, default=True):
         return None
 
-    seed_file = usr_args.get("eval_seed_file")
+    seed_file = usr_args.get("eval_seed_file") or os.environ.get("EVAL_SEED_FILE")
     if seed_file:
         path = Path(seed_file)
         if not path.exists():

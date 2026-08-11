@@ -7,6 +7,7 @@ file — no pkl, no hdf5, no mp4. Output:
 
 Seeds start at 40000 to guarantee no collision with training seeds (0..~30).
 Per (task, config) target: 20 seeds for *_clean configs, 2 seeds otherwise.
+Set EVAL_SEED_TARGET to request a different positive target explicitly.
 """
 
 import sys
@@ -131,7 +132,10 @@ def atomic_write_seeds(seed_path: Path, seeds):
 
 
 def main(task_name, task_config):
-    target = 20 if task_config.endswith("_clean") else 2
+    default_target = 20 if task_config.endswith("_clean") else 2
+    target = int(os.environ.get("EVAL_SEED_TARGET", default_target))
+    if target < 1:
+        raise ValueError(f"EVAL_SEED_TARGET must be positive, got {target}")
     max_tries = MAX_TRIES_CLEAN if task_config.endswith("_clean") else MAX_TRIES_CLUTTER
 
     seed_path = EVAL_SEED_ROOT / task_name / f"{task_config}.txt"

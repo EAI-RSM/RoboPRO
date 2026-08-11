@@ -1,76 +1,58 @@
-#!/bin/bash
-#SBATCH --partition=h100-private
+#!/usr/bin/env bash
+#SBATCH --job-name=pi05-precollect-eval
+#SBATCH --partition=gb10
 #SBATCH --gres=gpu:1
-#SBATCH --qos=high
-#SBATCH --time=3-00:00:00
+#SBATCH --time=03:00:00
 #SBATCH --mem=64G
 #SBATCH --cpus-per-task=8
-# NOTE: set --chdir and --output to your local checkout, e.g.
-#   #SBATCH --chdir=/path/to/RoboPRO/customized_robotwin
-#   #SBATCH --output=/path/to/RoboPRO/logs/%x_%j.out
+#SBATCH --output=logs/%x_%j.out
 
-# Args: <task_name> <task_config> <train_config> <model_name> <ckpt_id> <seed> <test_num>
-TASK_NAME="${1:?}"
-TASK_CONFIG="${2:?}"
-TRAIN_CONFIG="${3:?}"
-MODEL_NAME="${4:?}"
-CKPT_ID="${5:?}"
+set -euo pipefail
+
+ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
+mkdir -p "$ROOT_DIR/logs"
+
+TASK_NAME="${1:-put_sauce_can_in_basket}"
+TASK_CONFIG="${2:-relation_validation_d14}"
+TRAIN_CONFIG="${3:-pi05_aloha_full_base}"
+MODEL_NAME="${4:-pi05_base}"
+CKPT_ID="${5:-0}"
 SEED="${6:-0}"
 TEST_NUM="${7:-20}"
+GRAPH_INPUT_CONDITION="${8:-visual_only}"
+EVAL_START_SEED="${9:-4}"
 
-echo "Task: $TASK_NAME"
-echo "Config: $TASK_CONFIG"
-echo "GPU: $CUDA_VISIBLE_DEVICES"
-echo ""
-
-source set_env.sh
-export ROBOTWIN_BENCH_TASK="bench"
-export XLA_PYTHON_CLIENT_MEM_FRACTION=0.4
-export PYTHONUNBUFFERED=1
-
-PYTHON="${PI05_PYTHON:-$(command -v python)}"
-# To pin a specific conda env: export PI05_PYTHON=/path/to/miniconda3/envs/pi05/bin/python
-export PYTHONPATH="$ROBOTWIN_ROOT/policy/pi05/src:$PYTHONPATH"
-
-# === Phase 1: pre-collect 20 eval seeds (skipped if file already has 20) ===
-echo "=== precollecting eval seeds for $TASK_NAME / $TASK_CONFIG ==="
-$PYTHON script/precollect_eval_seeds.py "$TASK_NAME" "$TASK_CONFIG"
-PRECOLLECT_RC=$?
-echo "precollect exit code: $PRECOLLECT_RC"
-echo ""
-
-if [ "$PRECOLLECT_RC" -ne 0 ]; then
-    echo "precollect failed, aborting eval"
-    exit 1
+if [[ -z "${SLURM_JOB_ID:-}" ]]; then
+  export IMAGE="${IMAGE:-robopro:gb10}"
+  export PROJECT_ROOT="${PROJECT_ROOT:-$ROOT_DIR}"
+  export PULL_IMAGE="${PULL_IMAGE:-0}"
+  export IMAGE_TAR="${IMAGE_TAR:-}"
+  JOB_ID=$(sbatch --parsable \
+    --chdir="$ROOT_DIR" \
+    --output="$ROOT_DIR/logs/%x_%j.out" \
+    --export=ALL \
+    "$0" "$@")
+  echo "submitted job $JOB_ID"
+  echo "log: $ROOT_DIR/logs/pi05-precollect-eval_${JOB_ID}.out"
+  exit 0
 fi
 
-# Verify seed file exists and has 20 seeds
-SEED_FILE="${BENCH_ROOT}/eval_seeds/${TASK_NAME}/${TASK_CONFIG}.txt"
-if [ ! -f "$SEED_FILE" ]; then
-    echo "ERROR: seed file $SEED_FILE not created"
-    exit 1
-fi
-N_SEEDS=$(wc -w < "$SEED_FILE")
-echo "have $N_SEEDS seeds in $SEED_FILE"
-if [ "$N_SEEDS" -lt 20 ]; then
-    echo "WARNING: only got $N_SEEDS seeds (target 20). Proceeding anyway."
-fi
-echo ""
+export PROJECT_ROOT="${PROJECT_ROOT:-$ROOT_DIR}"
 
-# === Phase 2: eval ===
-echo "=== running eval ==="
-$PYTHON script/eval_policy.py \
-    --config policy/pi05/deploy_policy.yml \
-    --overrides \
-    --task_name "$TASK_NAME" \
-    --task_config "$TASK_CONFIG" \
-    --train_config_name "$TRAIN_CONFIG" \
-    --model_name "$MODEL_NAME" \
-    --checkpoint_id "$CKPT_ID" \
-    --policy_name pi05 \
-    --instruction_type seen \
-    --seed "$SEED" \
-    --ckpt_setting "${TRAIN_CONFIG}_${MODEL_NAME}_${CKPT_ID}" \
-    --test_num "$TEST_NUM"
-
-echo "Eval done, exit code: $?"
+exec "$ROOT_DIR/scripts/slurm/slurm_docker_gb10.sh" \
+  bash -lc 'set -euo pipefail
+    make precollect-seeds TASK_NAME="$1" TASK_CONFIG="$2"
+    make eval-pi05-double \
+      TASK_NAME="$1" \
+      TASK_CONFIG="$2" \
+      TRAIN_CONFIG_NAME="$3" \
+      MODEL_NAME="$4" \
+      CHECKPOINT_ID="$5" \
+      SEED="$6" \
+      TEST_NUM="$7" \
+      GRAPH_INPUT_CONDITION="$8" \
+      EVAL_START_SEED="$9" \
+      GPU_SPEC=0' \
+  robopro-precollect-eval \
+  "$TASK_NAME" "$TASK_CONFIG" "$TRAIN_CONFIG" "$MODEL_NAME" "$CKPT_ID" \
+  "$SEED" "$TEST_NUM" "$GRAPH_INPUT_CONDITION" "$EVAL_START_SEED"

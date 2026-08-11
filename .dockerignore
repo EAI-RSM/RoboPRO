@@ -1,0 +1,12 @@
+.git
+.venv
+**/__pycache__
+**/*.pyc
+benchmark/assets
+customized_robotwin/assets
+customized_robotwin/data
+customized_robotwin/eval_result
+customized_robotwin/policy/**/checkpoints
+logs
+outputs
+wandb

@@ -1,0 +1,95 @@
+# One-episode, graph-rich validation run for dense scenes.
+# Preferred invocation from repository root (parameters are Make-overridable):
+#   make relation-validation GPU_ID=0 REACHABLE_BY_INTERVAL=10
+# The launcher infers ROBOTWIN_BENCH_TASK=bench from this config's location.
+
+render_freq: 0
+episode_num: 1
+use_seed: false
+save_freq: 15
+video_fps: 30
+embodiment: [aloha-agilex]
+language_num: 100
+
+domain_randomization:
+  random_background: false
+  cluttered_table: true
+  clean_background_rate: 0
+  random_head_camera_dis: 0
+  random_table_height: 0
+  random_light: false
+  crazy_random_light_rate: 0
+  obstacle_density: 14
+  language_perturbation:
+    enabled: true
+    instruction_bank: benchmark/bench_task_config/instruction_bank.json
+
+camera:
+  head_camera_type: D435
+  wrist_camera_type: D435
+  demo_camera_type: D435
+  collect_head_camera: true
+  collect_wrist_camera: true
+
+data_type:
+  rgb: true
+  third_view: false
+  depth: true
+  pointcloud: false
+  observer: false
+  endpose: true
+  qpos: true
+  mesh_segmentation: false
+  actor_segmentation: true
+  actor_bbox: true
+  link_bbox: true
+  proximity: true
+  object_poses: true
+
+pcd_down_sample_num: 1024
+pcd_crop: true
+# Keep the first diagnostic run intact; this path is for the corrected
+# configuration-propagation validation.
+save_path: ./data/relation_validation_d14_stride10
+clear_cache_freq: 1
+collect_data: true
+eval_video_log: true
+
+# Preserve raw physical evidence and keep the expert planner clutter-aware.
+enable_collision_metrics: true
+planner_exclude_obstacles: false
+
+# MVP cost control: retain collision-aware IK semantics, explicitly marking
+# changed off-stride frames invalid instead of labeling them negative.
+benchmark_relations:
+  near:
+    horizontal_threshold_m: 0.10
+    vertical_margin_m: 0.08
+    min_geometry_extent_m: 1.0e-6
+  on_supports:
+    max_vertical_penetration_m: 0.03
+    max_vertical_separation_m: 0.06
+    min_xy_overlap_ratio: 0.20
+    min_xy_area_m2: 1.0e-8
+  in_contains:
+    center_tolerance_m: 1.0e-4
+  held_by:
+    max_object_tcp_distance_m: 0.16
+  visible_to:
+    min_visible_pixel_count: 1
+  occludes:
+    min_overlap_pixel_count: 1
+    min_overlap_fraction: 0.01
+    min_depth_margin_m: 0.001
+    movable_targets_only: true
+  blocks:
+    corridor_clearance_m: 0.04
+    endpoint_margin_m: 0.02
+    movable_sources_only: true
+    movable_targets_only: true
+  reachable_by:
+    enabled: true
+    frame_stride: 10
+    movable_only: true
+    cache_unchanged: true
+    pose_round_decimals: 3

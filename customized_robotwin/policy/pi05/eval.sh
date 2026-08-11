@@ -28,4 +28,4 @@ python script/eval_policy.py --config policy/$policy_name/deploy_policy.yml \
     --checkpoint_id ${checkpoint_id} \
     --ckpt_setting ${ckpt_setting} \
     --seed ${seed} \
-    --policy_name ${policy_name} 
+    --policy_name ${policy_name}

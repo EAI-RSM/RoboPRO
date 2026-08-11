@@ -157,12 +157,38 @@ class put_sauce_can_in_cabinet(Kitchen_base_large):
                 contact_point_id=self.GRASP_CONTACT_POINT_ID,
             )
         )
-        self.move(self.move_by_displacement(arm_tag=arm_tag, z=0.15))
-        self.move(self.back_to_origin(arm_tag=arm_tag))
+        self.move(self.move_by_displacement(
+            arm_tag=arm_tag,
+            z=0.15,
+            benchmark_action="lift",
+            benchmark_target_entity=self.sauce_can,
+        ))
+        self.move(self.move_to_pose(
+            arm_tag=arm_tag,
+            target_pose=self.robot.right_original_pose,
+            benchmark_action="transport",
+            benchmark_target_entity=self.sauce_can,
+        ))
 
-        self.move(self.move_by_displacement(arm_tag=arm_tag, **self.APPROACH_DELTA_1))
-        self.move(self.move_by_displacement(arm_tag=arm_tag, **self.APPROACH_DELTA_2))
-        self.move(self.open_gripper(arm_tag=arm_tag, pos=1.0))
+        self.move(self.move_by_displacement(
+            arm_tag=arm_tag,
+            benchmark_action="transport",
+            benchmark_target_entity=self.sauce_can,
+            **self.APPROACH_DELTA_1,
+        ))
+        self.move(self.move_by_displacement(
+            arm_tag=arm_tag,
+            benchmark_action="place",
+            benchmark_target_entity=self.sauce_can,
+            benchmark_destination_entity=self.cabinet,
+            benchmark_phase="final_descent",
+            **self.APPROACH_DELTA_2,
+        ))
+        self.move(self.open_gripper(
+            arm_tag=arm_tag,
+            pos=1.0,
+            benchmark_target_entity=self.sauce_can,
+        ))
 
 
         self.info["info"] = {

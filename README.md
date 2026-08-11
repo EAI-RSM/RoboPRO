@@ -9,6 +9,11 @@ RoboPRO extends the RoboTwin simulation framework with:
 - **Systematic perturbation suite** — Language, Vision, and Object axes for evaluating policy robustness
 - **Aloha-Agilex** bimanual embodiment with CuRobo motion planning
 
+Graph-rich benchmark consumers should use
+[`docs/graph_schema_reference.md`](docs/graph_schema_reference.md) as the
+authoritative reference for node types, state relations, action nodes,
+action-entity edges, tensor shapes, validity semantics, and examples.
+
 ## Installation
 
 System prereqs (one-time): `libvulkan1 mesa-vulkan-drivers vulkan-tools` (apt), `ffmpeg`, and an NVIDIA driver with CUDA 12.x.
@@ -55,6 +60,17 @@ cd ..
 > **aarch64 (GB10 / DGX Spark):** PyPI has no aarch64 wheel for `sapien==3.0.0b1`, so `requirements.txt` will fail to resolve it. Build the SAPIEN wheel from source first — see [docs/setup_sapien_aarch64.md](docs/setup_sapien_aarch64.md) — then re-run the requirements install (pip will treat sapien as satisfied).
 
 > ⚠️ **SAPIEN version matters:** the benchmark is pinned to `sapien==3.0.0b1`. A different SAPIEN version can change physics and rendering behavior, which shifts evaluation results — success rates from mismatched versions are not comparable. Verify with `python -c "import sapien; print(sapien.__version__)"` before collecting data or running evals.
+
+#### GB10 / ARM64 Docker workflow
+
+The ARM64 environment uses Python 3.12 and NVIDIA's GB10-compatible PyTorch image; do not install the generic PyPI Torch wheel on GB10. Build and validate the repository image with:
+
+```bash
+IMAGE=robopro:gb10 bash scripts/docker/build_gb10.sh
+IMAGE=robopro:gb10 bash scripts/docker/smoke_gb10.sh
+```
+
+For SLURM, submit `scripts/slurm/slurm_docker_gb10.sh`; it passes only the GPU allocated by SLURM into Docker. See [the complete GB10 guide](docs/setup_sapien_aarch64.md) for image distribution across compute nodes, interactive use, version caveats, and troubleshooting.
 
 `script/_install.sh` also clones CuRobo v0.7.8 into `envs/curobo/` and pip-installs it editable, then re-pins `warp-lang==1.12.0` and `setuptools==69.5.1`. If you keep `scipy==1.10.1` from `requirements.txt`, `scikit-image` will print a version-conflict warning — harmless.
 
@@ -153,6 +169,19 @@ Eval rolls a trained checkpoint out against a `(task, config)` pair and writes a
 | X-VLA | [mzxuan/x-vla-robopro-100k](https://huggingface.co/mzxuan/x-vla-robopro-100k) |
 
 For pi05, symlink the downloaded `jax_30000/` dir to `policy/pi05/checkpoints/<train_config_name>/<model_name>/30000/`.
+
+The upstream OpenPI runtime, virtual environment, and model weights are intentionally
+not tracked. Restore the pinned runtime snapshot while preserving RoboPRO's tracked
+adapters, then optionally synchronize its dependencies:
+
+```bash
+bash scripts/setup_pi05_runtime.sh
+bash scripts/setup_pi05_runtime.sh --sync  # requires network access
+```
+
+RoboPRO registers `pi05_robopro_top_cam_jax` dynamically from the tracked
+`customized_robotwin/policy/pi05_robopro_config.py`; do not patch the ignored
+OpenPI `src/openpi/training/config.py` manually.
 
 **Args (shared by both modes):**
 

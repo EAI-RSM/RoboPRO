@@ -225,7 +225,14 @@ class Office_base_task(Bench_base_task):
         self.cuboid_collision_list = [] # list of cuboid collision objects for curobo planner
         self._init_collision_metrics()
 
-        self.arr_v = np.random.choice([0,1,2]) # which version to use for furniture arrangement
+        arrangement_override = kwags.get("office_arrangement")
+        self.arr_v = (
+            int(arrangement_override)
+            if arrangement_override is not None
+            else int(np.random.choice([0, 1, 2]))
+        )  # which version to use for furniture arrangement
+        if self.arr_v not in {0, 1, 2}:
+            raise ValueError(f"office_arrangement must be 0, 1, or 2; got {self.arr_v}")
 
         self.load_robot(**kwags)
         self.create_static_elements(table_xy_bias=table_xy_bias)

@@ -2,7 +2,6 @@ import sapien.core as sapien
 import numpy as np
 import pdb
 from PIL import Image, ImageColor
-import open3d as o3d
 import json
 import transforms3d as t3d
 import cv2
@@ -33,12 +32,39 @@ try:
 
         return sampled_points, indices
 
-except:
-    print("missing pytorch3d")
+except ImportError:
+    print("missing pytorch3d; using the Torch farthest-point-sampling fallback")
 
     def fps(points, num_points=1024, use_cuda=True):
-        print("fps error: missing pytorch3d")
-        exit()
+        """Farthest-point sampling compatible with pytorch3d's return shape."""
+        device = torch.device(
+            "cuda" if use_cuda and torch.cuda.is_available() else "cpu"
+        )
+        points_tensor = torch.as_tensor(
+            points, dtype=torch.float32, device=device
+        )
+        point_count = points_tensor.shape[0]
+        if point_count == 0:
+            raise ValueError("cannot sample an empty point cloud")
+
+        sample_count = min(num_points, point_count)
+        if sample_count == point_count:
+            indices = torch.arange(point_count, device=device)
+        else:
+            indices = torch.empty(sample_count, dtype=torch.long, device=device)
+            min_distances = torch.full(
+                (point_count,), float("inf"), device=device
+            )
+            farthest = torch.tensor(0, dtype=torch.long, device=device)
+            for i in range(sample_count):
+                indices[i] = farthest
+                centroid = points_tensor[farthest]
+                distances = torch.sum((points_tensor - centroid) ** 2, dim=1)
+                min_distances = torch.minimum(min_distances, distances)
+                farthest = torch.argmax(min_distances)
+
+        sampled_points = points_tensor[indices].cpu().numpy()
+        return sampled_points, indices.unsqueeze(0)
 
 
 class Camera:
