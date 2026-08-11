@@ -15,6 +15,11 @@ cells from behind the box to the pad is what trajopt can actually connect.
 The milk-box occluder is added to the collision world by default; pass --no-occluder
 to map reachability on the bare (table-only) world instead.
 
+OUTPUT LAYOUT: every run writes to its OWN timestamped folder, so re-running never
+overwrites an earlier run's figures:
+
+    <out-dir>/<YYYYmmdd-HHMMSS>/reach_seed0001_off0.2_z0.90_left_sidegrasp_occ.png
+
 USAGE (from the benchmark folder, env sourced + ROBOTWIN_BENCH_TASK=bench):
     python reachability_map.py --seed 1 --offset 0.2 --res 0.02
     python reachability_map.py --arms right --z 0.90
@@ -25,20 +30,22 @@ USAGE (from the benchmark folder, env sourced + ROBOTWIN_BENCH_TASK=bench):
 and derives figures: (A) a ceiling z_max(x,y) 3D surface, (A2) a flat 2D z_max heatmap with a
 contrast-stretched turbo colour map, (B) reachable-area-vs-z curve, (C) a per-z slice montage,
 (D) a marching-cubes isosurface of the reachable region. For a rotatable version of the 3D
-views, run reachability_view.py on the cached .npz (needs only numpy+matplotlib, no GPU).
+views, run ``python -m lib.reachability_view`` on the cached .npz (needs only
+numpy+matplotlib, no GPU).
 
 NOTE: reachability is orientation-specific. By default we use the target's own
 horizontal side-grasp orientation (per arm). Pass --topdown for a top-down quat.
 """
 
 import argparse
+from datetime import datetime
 from pathlib import Path
 
 import numpy as np
-import transforms3d as t3d
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+from lib import reachability_view as rv
 
 from setup_paths import setup_paths
 setup_paths()
@@ -48,74 +55,25 @@ setup_paths()
 RESULTS_DIR = Path(__file__).resolve().parents[3] / "scripts" / "validation" / "results" / "reachability"
 
 import torch  # noqa: E402  (after setup_paths so curobo's torch is on the path)
-from analyze_occluder_visibility import make_occluder_task, PAD_XY, OCC_HALF_FOOTPRINT  # noqa: E402
-from analyze_natural_visibility import build_cfg, DR_CLEAN  # noqa: E402
+from lib.ik_grid import _build_ik_solver, _solve_grid
+from lib.scene_build import DR_CLEAN, build_cfg
+from lib.scene_constants import OCC_HALF_FOOTPRINT, PAD_XY
+from task.occluder_task import make_occluder_task  # noqa: E402
 
 
 # ----------------------------------------------------------------------------- frames
-def _world_gripper_to_curobo(robot, planner, arm_tag, gripper_pose):
-    """Replicate robot.left/right_plan_path + planner.plan_path frame chain for a single
-    WORLD gripper pose [x,y,z,qw,qx,qy,qz] -> (pos3, quat4) in curobo's IK frame.
-    (aloha-agilex branch, since the bench uses that embodiment.)"""
-    # 1) gripper -> endlink (robot frame convention)
-    endlink = robot._trans_from_gripper_to_endlink(gripper_pose, arm_tag=str(arm_tag))
-    # 2) world -> arm base
-    world_base = np.concatenate([np.array(planner.robot_origion_pose.p),
-                                 np.array(planner.robot_origion_pose.q)])
-    world_target = np.concatenate([np.array(endlink.p), np.array(endlink.q)])
-    p, q = planner._trans_from_world_to_base(world_base, world_target)
-    # 3) frame_bias + small per-arm yaw (aloha-agilex patch, see planner.plan_path)
-    T_target = t3d.affines.compose(p, t3d.quaternions.quat2mat(q), [1, 1, 1])
-    T_bias = t3d.affines.compose(planner.frame_bias, np.eye(3), [1, 1, 1])
-    rot = t3d.axangles.axangle2mat([0, 0, 1], -0.02 if str(arm_tag) == "left" else -0.01)
-    T_rot = t3d.affines.compose([0, 0, 0], rot, [1, 1, 1])
-    T_new = T_rot @ T_bias @ T_target
-    return T_new[:3, 3], t3d.quaternions.mat2quat(T_new[:3, :3])
 
 
-def _build_ik_solver(planner):
-    """Fresh IKSolver that REUSES the planner's already-loaded collision world, with
-    use_cuda_graph=False so we can pass an arbitrary-size batch (the motion_gen ik_solver
-    locks its batch size via cuda-graph, so we can't reuse it directly)."""
-    from curobo.wrap.reacher.ik_solver import IKSolver, IKSolverConfig
-    mg = planner.motion_gen
-    cfg = IKSolverConfig.load_from_robot_config(
-        planner.yml_path,
-        None,                                   # world comes from the shared checker below
-        tensor_args=mg.tensor_args,
-        world_coll_checker=mg.world_coll_checker,   # <- already has the box + table
-        use_cuda_graph=False,
-        self_collision_check=True,
-        self_collision_opt=False,
-    )
-    return IKSolver(cfg)
 
 
-def _solve_grid(robot, planner, ik, arm_tag, gp_world, chunk=256):
-    """gp_world: (N,7) world gripper poses -> (N,) bool reachable+collision-free.
-    Solved in chunks: batched IK spawns many seeds per pose, so the whole grid at once
-    is a multi-GB allocation -> chunk to cap peak memory (safe since use_cuda_graph=False)."""
-    from curobo.types.math import Pose as CuroboPose
-    ta = planner.motion_gen.tensor_args
-    N = len(gp_world)
-    pos = np.empty((N, 3), dtype=np.float32)
-    quat = np.empty((N, 4), dtype=np.float32)
-    for i, gp in enumerate(gp_world):
-        p, q = _world_gripper_to_curobo(robot, planner, arm_tag, gp)
-        pos[i], quat[i] = p, q
-    out = np.zeros(N, dtype=bool)
-    for s in range(0, N, chunk):
-        e = min(s + chunk, N)
-        goal = CuroboPose(position=ta.to_device(pos[s:e]), quaternion=ta.to_device(quat[s:e]))
-        result = ik.solve_batch(goal)
-        out[s:e] = result.success.detach().cpu().numpy().reshape(e - s, -1)[:, 0].astype(bool)
-        del result, goal
-        torch.cuda.empty_cache()
-    return out
 
 
 # ----------------------------------------------------------------------------- run
 def run(args):
+    # One folder per run, so re-running a seed never clobbers the previous figures.
+    args.out_dir = str(Path(args.out_dir) / datetime.now().strftime("%Y%m%d-%H%M%S"))
+    print(f"[run] writing to {args.out_dir}")
+
     env = make_occluder_task()()
     env.spawn_occluder = args.occluder     # --no-occluder -> empty (table-only) collision world
     env.occluder_offset = args.offset
@@ -239,26 +197,15 @@ def _save_and_plot_volume(XX, YY, xs, ys, zs, reach_any, per_arm, box_p, tgt_p, 
     _plot_area_curve(zs, reach_any, per_arm, out / f"{stem}_area.png", args.res, box_p, args)
     _plot_slice_montage(XX, YY, zs, reach_any, out / f"{stem}_slices.png", box_p, tgt_p, pad_xy, args)
     _plot_isosurface(xs, ys, zs, reach_any, out / f"{stem}_iso.png", box_p, tgt_p, pad_xy, args)
-    print(f"[interactive] rotate the 3D view with:  python reachability_view.py {npz}")
-
-
-def _column_bounds(reach_any, zs):
-    """Per (x,y): lowest and highest reachable z (NaN where the column is never reachable).
-    A vertical line through the arm's shell-shaped workspace enters once and exits once, so
-    [z_floor, z_ceil] is an (almost always) lossless summary of the column."""
-    any_reach = reach_any.any(axis=0)                                   # (ny,nx)
-    floor_idx = np.argmax(reach_any, axis=0)                            # first True from bottom
-    ceil_idx = reach_any.shape[0] - 1 - np.argmax(reach_any[::-1], axis=0)  # first True from top
-    z_floor = zs[floor_idx].astype(float); z_floor[~any_reach] = np.nan
-    z_ceil = zs[ceil_idx].astype(float);   z_ceil[~any_reach] = np.nan
-    return z_floor, z_ceil
+    print(f"[interactive] rotate the 3D view with:  python -m lib.reachability_view {npz}")
 
 
 def _plot_ceiling3d(XX, YY, zs, reach_any, path, box_p, tgt_p, pad_xy, args):
     """(A) ceiling z_max(x,y) as a single height-coloured 3D surface (floor dropped).
-    Static PNG; for a rotatable version run:  python reachability_view.py <cache.npz> --kind ceiling
+    Static PNG; for a rotatable version run:
+    python -m lib.reachability_view <cache.npz> --kind ceiling
     Colour is stretched to the actual ceiling min..max (turbo) to emphasise height differences."""
-    _, z_ceil = _column_bounds(reach_any, zs)
+    z_ceil = rv._ceiling(reach_any, zs)
     if not np.isfinite(z_ceil).any():
         print("ceiling3d skipped: nothing reachable"); return
     vmin, vmax = float(np.nanmin(z_ceil)), float(np.nanmax(z_ceil))
@@ -282,7 +229,6 @@ def _plot_ceiling_heatmap(XX, YY, zs, reach_any, path, box_p, tgt_p, pad_xy, arg
     """(A2) flat 2D z_max(x,y) heatmap with the 'clears the milk-box top' divider. The actual
     drawing lives in reachability_view.ceiling_heatmap (single source, so the standalone viewer
     regenerates the identical figure from the cache with no re-sweep)."""
-    import reachability_view as rv   # light module (numpy/argparse only at import); safe under Agg
     fig, _ = rv.ceiling_heatmap(XX[0, :], YY[:, 0], zs, reach_any, box_p, tgt_p, pad_xy,
                                 OCC_HALF_FOOTPRINT, args.arms)
     if fig is None:
@@ -342,22 +288,10 @@ def _plot_isosurface(xs, ys, zs, reach_any, path, box_p, tgt_p, pad_xy, args):
         print("isosurface skipped: nothing reachable"); return
     if len(zs) < 2:
         print("isosurface skipped: need >= 2 z levels"); return
-    from skimage import measure
     from mpl_toolkits.mplot3d.art3d import Poly3DCollection
-    vol = reach_any.astype(np.float32)                        # (nz, ny, nx)
-    try:                                                      # light smoothing -> a readable blob
-        from scipy.ndimage import gaussian_filter
-        vol = gaussian_filter(vol, sigma=0.6)
-    except Exception:
-        pass
-    spacing = (float(zs[1] - zs[0]), float(ys[1] - ys[0]), float(xs[1] - xs[0]))
-    try:
-        verts, faces, _, _ = measure.marching_cubes(vol, level=0.5, spacing=spacing)
-    except (ValueError, RuntimeError) as e:
-        print(f"isosurface skipped: {e}"); return
-    # verts columns are (z,y,x) in index*spacing -> shift onto world axes, reorder to (x,y,z)
-    vz = verts[:, 0] + float(zs.min()); vy = verts[:, 1] + float(ys.min()); vx = verts[:, 2] + float(xs.min())
-    tri = np.stack([vx, vy, vz], axis=1)[faces]               # (nfaces, 3, 3)
+    tri = rv._iso_mesh(xs, ys, zs, reach_any)
+    if tri is None:
+        print("isosurface skipped: marching cubes failed"); return
     zlo, zhi = float(tri[..., 2].min()), float(tri[..., 2].max())   # fit z to the blob, not the sweep
     fig = plt.figure(figsize=(8, 7))
     ax = fig.add_subplot(111, projection="3d")
@@ -408,7 +342,8 @@ def main():
                     help="IK poses per batch; lower if you hit CUDA OOM (planners already use ~9GB)")
     ap.add_argument("--out-dir", default=str(RESULTS_DIR),
                     help="results location (default: repo-root scripts/validation/results/reachability, "
-                         "resolved from the script path so it's the same from any cwd)")
+                         "resolved from the script path so it's the same from any cwd). "
+                         "Each run lands in its own <out-dir>/<timestamp>/ subfolder.")
     run(ap.parse_args())
 
 
