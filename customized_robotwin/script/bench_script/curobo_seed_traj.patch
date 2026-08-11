@@ -1,0 +1,157 @@
+diff --git a/src/curobo/wrap/reacher/motion_gen.py b/src/curobo/wrap/reacher/motion_gen.py
+index c2b3d97..c9ac356 100644
+--- a/src/curobo/wrap/reacher/motion_gen.py
++++ b/src/curobo/wrap/reacher/motion_gen.py
+@@ -1023,6 +1023,15 @@ class MotionGenPlanConfig:
+     #: Finetune dt scale for joint space planning.
+     finetune_js_dt_scale: Optional[float] = 1.1
+ 
++    #: ROBOPRO (Phase 1a): externally-supplied trajectory-optimization seed. When provided, it is
++    #: injected as the first seeds of the trajopt batch and curobo fills the remaining slots with
++    #: its own linear seeds (mirroring how the internal graph planner seeds trajopt), so an
++    #: unhelpful external seed can only be ignored -- never cause a false rejection. Shape
++    #: ``(k, action_horizon, dof)`` or ``(k, 1, action_horizon, dof)`` with ``k <= num_trajopt_seeds
++    #: * noisy_trajopt_seeds``. Used only on the ``plan_single`` path with ``enable_opt`` and when no
++    #: graph seed was produced. Leave None for stock behavior. See plans/SEED_TRAJECTORY_PLAN.md.
++    seed_traj: Optional[torch.Tensor] = None
++
+     def __post_init__(self):
+         """Post initialization checks."""
+         if not self.enable_opt and not self.enable_graph:
+@@ -1056,6 +1065,7 @@ class MotionGenPlanConfig:
+             finetune_attempts=self.finetune_attempts,
+             time_dilation_factor=self.time_dilation_factor,
+             finetune_js_dt_scale=self.finetune_js_dt_scale,
++            seed_traj=self.seed_traj,  # ROBOPRO Phase 1a: share ref (read-only; injection copies)
+         )
+ 
+ 
+@@ -3419,6 +3429,43 @@ class MotionGen(MotionGenConfig):
+                 if plan_config.need_graph_success:
+                     return result
+ 
++        # --- ROBOPRO external seed injection (Phase 1a) ----------------------------------
++        # If the caller supplied a trajopt seed (e.g. a clearance-metric route), inject it in the
++        # SAME format the internal graph planner uses: our k rows become the first k of the trajopt
++        # seed batch and get_seed_set() fills the remaining slots with curobo's own linear seeds.
++        # Only when enable_opt and no graph seed was produced (trajopt_seed_traj still None). See
++        # plans/SEED_TRAJECTORY_PLAN.md.
++        if (
++            getattr(plan_config, "seed_traj", None) is not None
++            and plan_config.enable_opt
++            and trajopt_seed_traj is None
++        ):
++            ext_seed = plan_config.seed_traj
++            if isinstance(ext_seed, JointState):
++                ext_seed = ext_seed.position
++            ext_seed = ext_seed.to(device=self.tensor_args.device, dtype=self.tensor_args.dtype)
++            if ext_seed.dim() == 3:  # (k, action_horizon, dof) -> (k, 1, action_horizon, dof)
++                ext_seed = ext_seed.unsqueeze(1)
++            n_total_seeds = solve_state.num_trajopt_seeds * self.noisy_trajopt_seeds
++            if (
++                ext_seed.dim() != 4
++                or ext_seed.shape[1] != 1
++                or ext_seed.shape[2] != self.trajopt_solver.action_horizon
++                or ext_seed.shape[3] != self._dof
++                or not (1 <= ext_seed.shape[0] <= n_total_seeds)
++            ):
++                log_error(
++                    "seed_traj must be (k, action_horizon, dof) or (k, 1, action_horizon, dof) with "
++                    + "1 <= k <= %d, action_horizon=%d, dof=%d; got %s"
++                    % (n_total_seeds, self.trajopt_solver.action_horizon, self._dof, str(tuple(ext_seed.shape)))
++                )
++            trajopt_seed_traj = ext_seed.contiguous()
++            trajopt_seed_success = torch.zeros(
++                (solve_state.batch_size, n_total_seeds), dtype=torch.bool, device=self.tensor_args.device
++            )
++            trajopt_seed_success[:, : ext_seed.shape[0]] = True
++        # --- end ROBOPRO external seed injection -----------------------------------------
++
+         # do trajopt::
+ 
+         if plan_config.enable_opt:
+@@ -3492,6 +3539,84 @@ class MotionGen(MotionGenConfig):
+                         self.trajopt_solver.action_horizon,
+                         self._dof,
+                     ).contiguous()
++            # --- ROBOPRO SEED DUMP (Phase 0a, temporary, revertible) -------------------
++            # Env-guarded, dumps the FINAL trajopt seed format ONCE so the clearance-route
++            # seed builder can match it exactly. Zero-impact when ROBOPRO_SEED_DUMP is unset.
++            # Remove this whole block after Phase 0. See plans/SEED_TRAJECTORY_PLAN.md.
++            import os as _rp_os
++            if _rp_os.environ.get("ROBOPRO_SEED_DUMP") and not getattr(type(self), "_robopro_seed_dumped", False):
++                try:
++                    import json as _rp_json
++                    _rp_info = {
++                        "trajopt_seed_traj_shape": list(trajopt_seed_traj.shape),
++                        "dtype": str(trajopt_seed_traj.dtype),
++                        "device": str(trajopt_seed_traj.device),
++                        "contiguous": bool(trajopt_seed_traj.is_contiguous()),
++                        "action_horizon": int(self.trajopt_solver.action_horizon),
++                        "dof": int(self._dof),
++                        "num_trajopt_seeds": int(solve_state.num_trajopt_seeds),
++                        "noisy_trajopt_seeds": int(self.noisy_trajopt_seeds),
++                        "used_graph": bool(getattr(result, "used_graph", False)),
++                        "joint_names": list(self.rollout_fn.joint_names),
++                        "start_state_position_shape": list(start_state.position.shape),
++                        "seed_row0_first3_tsteps": trajopt_seed_traj.reshape(
++                            -1, trajopt_seed_traj.shape[-2], trajopt_seed_traj.shape[-1]
++                        )[0, :3].detach().cpu().tolist(),
++                    }
++                    _rp_path = _rp_os.environ.get(
++                        "ROBOPRO_SEED_DUMP_PATH",
++                        "/tmp/claude-1000/-home-haccerkat-Documents-Research-Experimental-RoboPRO/"
++                        "df986694-f37b-4bd8-ba92-473d3e364e15/scratchpad/robopro_seed_dump.json",
++                    )
++                    with open(_rp_path, "w") as _rp_f:
++                        _rp_json.dump(_rp_info, _rp_f, indent=2)
++                    print(f"[ROBOPRO_SEED_DUMP] wrote {_rp_path}  shape={_rp_info['trajopt_seed_traj_shape']} "
++                          f"dof={_rp_info['dof']} horizon={_rp_info['action_horizon']} "
++                          f"used_graph={_rp_info['used_graph']}", flush=True)
++                    type(self)._robopro_seed_dumped = True
++                except Exception as _rp_e:  # never let the dump break planning
++                    print(f"[ROBOPRO_SEED_DUMP] failed: {_rp_e}", flush=True)
++            # --- end ROBOPRO SEED DUMP -------------------------------------------------
++            # --- ROBOPRO SEED ROUNDTRIP (Phase 0b, temporary) --------------------------
++            # Same-problem injection-format check: take the first k rows of curobo's OWN stock seed
++            # batch and feed them back through the EXACT transforms the injection block uses
++            # (transpose -> success-mask -> get_seed_set -> view). A correct format reproduces the
++            # identical batch (we injected curobo's own seeds). Read-only: does NOT touch the real
++            # trajopt_seed_traj used for planning. Env-guarded, runs once. Remove after Phase 0.
++            if (_rp_os.environ.get("ROBOPRO_SEED_ROUNDTRIP")
++                    and plan_config.seed_traj is None
++                    and not getattr(result, "used_graph", False)
++                    and not getattr(type(self), "_robopro_roundtrip_done", False)):
++                try:
++                    import json as _rp_json2
++                    _S_def = trajopt_seed_traj                          # (n_total, batch, H, dof) stock batch
++                    _n_total = int(_S_def.shape[0])
++                    _k = 1
++                    _ext = _S_def[:_k].transpose(0, 1).contiguous()     # -> (batch, k, H, dof), injection fmt
++                    _mask = torch.zeros((solve_state.batch_size, _n_total), dtype=torch.bool,
++                                        device=self.tensor_args.device)
++                    _mask[:, :_k] = True
++                    _S_inj = self.trajopt_solver.get_seed_set(
++                        seed_goal, _ext, num_seeds=self.noisy_trajopt_seeds,
++                        batch_mode=solve_state.batch_mode, seed_success=_mask,
++                    ).view(_n_total, solve_state.batch_size,
++                           self.trajopt_solver.action_horizon, self._dof)
++                    _mad = float((_S_inj - _S_def).abs().max().item())
++                    _passed = bool(torch.allclose(_S_inj, _S_def, atol=1e-6))
++                    _rp_res = {"roundtrip_pass": _passed, "max_abs_diff": _mad, "k": _k,
++                               "n_total": _n_total, "shape": list(_S_def.shape)}
++                    _rp_rp = _rp_os.environ.get(
++                        "ROBOPRO_SEED_ROUNDTRIP_PATH",
++                        "/tmp/claude-1000/-home-haccerkat-Documents-Research-Experimental-RoboPRO/"
++                        "df986694-f37b-4bd8-ba92-473d3e364e15/scratchpad/robopro_roundtrip.json")
++                    with open(_rp_rp, "w") as _rp_f2:
++                        _rp_json2.dump(_rp_res, _rp_f2, indent=2)
++                    print(f"[ROBOPRO_SEED_ROUNDTRIP] pass={_passed} max_abs_diff={_mad:.3e} "
++                          f"-> {_rp_rp}", flush=True)
++                    type(self)._robopro_roundtrip_done = True
++                except Exception as _rp_e2:  # never break planning
++                    print(f"[ROBOPRO_SEED_ROUNDTRIP] skipped/failed: {_rp_e2}", flush=True)
++            # --- end ROBOPRO SEED ROUNDTRIP --------------------------------------------
+             if plan_config.enable_finetune_trajopt:
+                 og_value = self.trajopt_solver.interpolation_type
+                 self.trajopt_solver.interpolation_type = InterpolateType.LINEAR_CUDA

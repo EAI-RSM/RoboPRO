@@ -1,0 +1,52 @@
+{
+  "schema": "robopro.metric-bucket-spec.v1",
+  "status": "frozen",
+  "approved_date": "2026-07-31",
+  "task": "put_cup_on_coaster",
+  "bucket_variable": {
+    "name": "rho_geom_min",
+    "source_metric": "eps_geom_min",
+    "operation": "divide_by_reference_radius",
+    "reference_radius_m": 0.03
+  },
+  "bucket_order": [
+    "very_low_clearance",
+    "low_clearance",
+    "medium_clearance",
+    "high_clearance"
+  ],
+  "rho_boundaries": [
+    2.5,
+    4.0,
+    5.0
+  ],
+  "eps_geom_min_boundaries_m": [
+    0.075,
+    0.12,
+    0.15
+  ],
+  "interval_closure": "lower_closed_upper_open",
+  "boundary_assignment": "higher_bucket",
+  "tie_policy": "identical_values_never_split",
+  "positive_infinity_bucket": "high_clearance",
+  "labels_encode": "clearance_not_outcome_difficulty",
+  "primary_association_predictor": "eps_geom_min",
+  "source_distribution": {
+    "metric_run": "scripts/validation/results/task_metric/20260731-154726",
+    "distribution_run": "scripts/validation/results/task_metric_distribution/20260731-160620",
+    "records_sha256": "67bcd0037513d1c63c7c7b30ac6e87d30e3099a8d3f57e3c9697448aa39ec1d7",
+    "config_sha256": "87bf96967aab3e4432f7b6cfb9d402ad7a882d42c6012d00370efce2ab4a7890",
+    "distribution_summary_sha256": "16e4df29024c7253083e83982e9f14e07dec7e70474e5ba536775312590bb68d",
+    "record_count": 100,
+    "seed_start": 1000,
+    "seed_end": 1099,
+    "obstacle_density": 10,
+    "outcome_data_loaded": false,
+    "bucket_counts": {
+      "very_low_clearance": 17,
+      "low_clearance": 35,
+      "medium_clearance": 30,
+      "high_clearance": 18
+    }
+  }
+}
