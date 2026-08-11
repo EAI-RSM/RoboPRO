@@ -10,7 +10,7 @@ metadata:
 ## Branch and worktree
 
 Branch: `peng-training-branch` (the previous entry naming `codex/bench-script-refactor` was stale;
-that branch is 1 commit behind this one and the same line of work). Tip `e3a09ce`.
+that branch is 1 commit behind this one and the same line of work).
 
 - **S1 IS DONE (2026-08-11). All local-only work is backed up off-machine.** Before it,
   `git rev-list --all --not --remotes` was **71**; it is now **0**, verified against a fresh bare
@@ -23,7 +23,10 @@ that branch is 1 commit behind this one and the same line of work). Tip `e3a09ce
 - Scope note: pushing `peng-training-branch` alone would have saved only 64 of the 71 commits. Four
   other branches held unique work, including `585d307`, the vanilla `--plan-algo` baseline that
   [[domain_expert_baseline]] calls "recoverable from that commit."
-- Working tree clean. Tip is `0d7df5c` (rehaul plan + memory corrections); `e3a09ce` is its parent.
+- S2 is committed in four reviewable boundaries: dependency declaration/lock, harness bootstrap,
+  main-only wrappers plus GPU marker, and this baseline/plan record. Unrelated edits to
+  `MEMORY.md`, `feedback_role_boundary.md`, and `repo_env_and_git.md` remain unstaged and are not
+  part of S2.
 - Against `origin/dev` (`64840ce`): **82 ahead, 60 behind**, merge base `aabeff4` (2026-06-25).
   See [[repo_env_and_git]] for the full divergence numbers and the stale-local-`dev` trap.
 
@@ -62,16 +65,29 @@ Decisions taken this session, so they are not relitigated:
 
 ## Verification state
 
-Unchanged from the 2026-08-10 prune gates: all active/archive Python parses; CPU-safe top-level
-commands pass `--help`; CPU-safe checks pass as `python -m checks.<module>`; the lib/task→top-level
+**S2 CPU baseline, 2026-08-11:** from `customized_robotwin/script/bench_script/`,
+`../../../.venv/bin/python -m pytest -q` collects **50 items across 12 runnable modules** and reports
+**49 passed, 1 skipped**, with one existing Sapien `pkg_resources` deprecation warning. The only
+GPU-marked item is `checks/smoke_test_seed_2a.py::test_seed_2a_smoke`; it was collected and skipped,
+not executed. No existing test function needed a GPU marker.
+
+Legacy entry points still pass for `checks.test_ring_config`, `checks.test_obstacle_set`, and the
+newly collected CPU AST guard `checks.test_lib_env_api`. The earlier prune gates also remain: all
+active/archive Python parses; CPU-safe top-level commands pass `--help`; the lib/task→top-level
 dependency count is zero. `checks.smoke_test_seed_2a` and `diag_kitchen_curobo.py` remain **unrun
 (CUDA-only)** — do not claim those gates passed.
 
-**Nothing has executed in this repo since 2026-07-31.** All of August has been prune/refactor work.
+`uv.lock` added exactly five package blocks (`pytest`, `iniconfig`, `pluggy`, `pygments`, `tomli`).
+`uv sync --locked` exposed an existing packaging gap: it prunes the editable local CuRobo install
+before `bootstrap_uv.sh` reinstalls it. `pytest.ini` therefore adds vendored `envs/curobo/src` to
+pytest's import path; this keeps CPU collection valid without pretending the GPU install was tested.
 
 ## Next action
 
-Not started — the rehaul is scoped, not begun.
+S1 and S2 are done. Before S3 creates `peng-dev-new`, cherry-pick the atomic pytest dependency
+commit (`pyproject.toml` + `uv.lock`) onto an upstream PR branch targeting `8-research-branch`; S3
+must inherit both files together because `bootstrap_uv.sh` uses `uv sync --locked`. Then execute S3
+from `peng-training-branch` and compare its port against the 49-pass/1-skip baseline above.
 
 `plans/REHAUL_PLAN.md` now opens with a **Work breakdown** of twelve executable sections, S1–S12,
 each self-contained enough to prompt an agent with "write a technical plan for S6" or "execute S8"
@@ -79,13 +95,14 @@ without reading the rest of the document. **Numbering is stable; do not renumber
 carries in-scope / out-of-scope / a done-when gate / verification commands, and the ones that must
 not change behaviour are marked NO-BEHAVIOUR-CHANGE.
 
-Order: ~~S1~~ **done**, then **S2** (pytest harness — run it on `peng-training-branch` *before* the
-move, so the port has a passing baseline to diff against), then S3/S4 (branch, port, make it run).
-S5 is parallelisable. S10 needs a user GPU run mid-section — schedule it early.
+Order: ~~S1~~ **done**, ~~S2~~ **done**, then S3/S4 (branch, port, make it run). S5 is
+parallelisable. S10 needs a user GPU run mid-section — schedule it early.
 
-**Next up: S2.** Note one wrinkle recorded in its section — `pyproject.toml` is SHARED and
-byte-identical to `origin/dev`, so adding pytest to it is best sent as a one-line PR to dev rather
-than carried as a branch diff.
+The completed S2 technical plan and corrections are in
+`customized_robotwin/script/bench_script/plans/S2_PYTEST_HARNESS_PLAN.md`. The investigation found
+10 of 12 modules already pytest-shaped; `smoke_test_seed_2a.py` and `test_lib_env_api.py` needed thin
+wrappers. The similarly named local helpers are name collisions, not duplicate fixtures, so none
+were merged.
 
 One open question: whether to add §4e, the entry-point collapse (14 → ~4 subcommands). It is
 deliberately unsectioned because it renames every command and breaks Makefile targets,

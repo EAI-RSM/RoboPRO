@@ -49,9 +49,8 @@ The disease is not "the branches diverged." It is three separate things:
 1. **Staleness.** Six weeks of dev fixes unabsorbed, some of which change what the data *means*:
    occluder spacing became edge-to-edge (`cf966f7`), and `update_world()`'s default flipped. Fixed
    by merging, not by rewriting.
-2. **No safety net.** There is no test runner in the repo — `pytest` appears zero times in
-   `pyproject.toml`. 13 hand-rolled `checks/` modules (2,618 LOC) run as `python -m checks.<module>`;
-   the real verification bar is `--help`.
+2. **No safety net.** There was no test runner in the repo. Twelve hand-rolled `checks/` modules
+   (2,618 LOC) ran as `python -m checks.<module>`; the real verification bar was `--help`.
 3. **Coupling by habit.** Research code edits shared files, and reaches into `envs/` through five
    doors where one was intended.
 
@@ -77,6 +76,83 @@ records over-engineering as the costliest failure mode on this repo, and that wi
 "done when" there is always one more defect to fix. Sections marked NO-BEHAVIOUR-CHANGE must not
 alter algorithms, thresholds or retry logic — the 2026-07-29 refactor succeeded precisely because it
 was structural only, which kept already-collected A/B data comparable.
+
+**COMMIT DISCIPLINE — every section's plan must name its commit points.** A section never ends
+uncommitted, and long sections commit at internal boundaries too. Rules:
+
+- **One commit minimum per section**, at its end, once the done-when gate passes.
+- **Isolate shared-file changes into their own commit**, separate from exclusive-file work. That is
+  what makes a hunk cherry-pickable for the upstream PR the fork policy requires.
+- **Commit before any step whose outcome is unpredictable** — iterative fix-and-rerun loops, GPU
+  runs, anything that might need to be abandoned. If it goes wrong, the prior steps survive.
+- Each section's plan states its commits explicitly as `→ COMMIT` markers between steps. Do not
+  leave the count to the implementing agent's judgement.
+
+The point is granular rollback and a bisectable history across a 17,000-line restructure: when
+something breaks three sections later, the commit boundaries are what let you find where.
+
+**EVERY DETAILED PLAN MUST CARRY A TEST PLAN.** The `Verify with` blocks in the sections below are
+*seeds*, not complete test plans — only S2, S3 and S6 have one at all. A per-section
+`S<N>_<TOPIC>_PLAN.md` is not finished until it contains all four of these:
+
+1. **The universal regression gate.** From S2 onward, every section must end with `pytest` at or
+   above the baseline S2 established: **50 items across 12 modules — 49 passed, 1 skipped**
+   (`test_seed_2a_smoke`, the only GPU-marked test). A section that lowers the pass count has broken
+   something, whatever else it achieved. State the expected count, not just "tests pass."
+2. **Section-specific commands** — copy-pasteable, with the expected output. Not "confirm imports
+   work" but the actual invocation and what it should print.
+3. **An equivalence check for anything marked NO-BEHAVIOUR-CHANGE.** This is the one that matters
+   most and the one most likely to be skipped. Proving code *runs* after a restructure proves
+   nothing; you must prove the output is *unchanged*. Precedents already in this document: S8's
+   offline CPU rebuild reproducing recorded `eps_geom` at max abs diff 0.000e+00; S9's figures and
+   summary numbers unchanged on a recorded run; S10's success rate unchanged on a matched seed set.
+   A structural section without an equivalence check is unverified, no matter how green the suite is.
+4. **What the section CANNOT verify** — stated plainly. GPU-only paths, anything needing a rollout,
+   anything with no CPU-reachable assertion. `agent-memory/feedback_scientific_rigor.md` records the
+   2026-07-30 lesson that isolation is not enough — you must confirm the treatment actually fired.
+   The same applies here: a test plan that hides its blind spots invites exactly that failure.
+
+### How testing operates (from S2 onward)
+
+**Running it.** From `bench_script/`:
+
+```bash
+../../../.venv/bin/python -m pytest -q          # expect: 49 passed, 1 skipped
+../../../.venv/bin/python -m pytest -q --gpu    # adds the CUDA smoke test
+```
+
+⚠️ **Use the `.venv` interpreter explicitly.** `source set_env.sh` sets `BENCH_ROOT`/`ROBOTWIN_ROOT`
+but does **not** change which Python the shell runs — a bare `python -m pytest` may hit a different
+interpreter with no pytest. `conftest.py` handles the rest of the bootstrap, so no exports are
+needed.
+
+**Triage rule when something fails mid-section.** Compare against the baseline before debugging.
+49/1 is the reference; if the failing test also fails on `pre-rehaul-2026-08-11`, it is pre-existing
+and belongs in the section's "cannot verify" list, not in its fix list. Do not repair pre-existing
+failures inside a restructuring section — that mixes two changes in one diff and destroys the
+comparison.
+
+**The equivalence toolkit.** Requirement 3 above demands an equivalence check for structural work.
+Three patterns already exist in this repo; prefer them over inventing one:
+
+| Pattern | Use for | Cost |
+|---|---|---|
+| **Offline CPU rebuild** — `records.jsonl`'s `scene_fingerprint_source.scene.metric_obstacles` carries every obstacle's mesh path, pose and scale, enough to rebuild the exact `geometric_eps` input with no SAPIEN and no GPU. Verified to reproduce all 100 recorded values at **max abs diff 0.000e+00**. See `agent-memory/tool_task_metric_validity.md`. | S7, S8 — anything touching the metric pipeline | ~40 s/scene, single core |
+| **`checks/test_ring_config`** — asserts the occluder formation is byte-identical per (seed, offset-spec). Already in the suite. | S6, and any change near `occluder_ring.py` or scene construction | seconds |
+| **Recorded-run replay** — regenerate figures and summary numbers from an existing run directory under `scripts/validation/results/` and diff them. | S9 (visualisation, record loading) | minutes, CPU |
+
+If a section can build none of these, say so in its "cannot verify" section rather than substituting
+"the tests still pass" — the suite covers the metric math and ring determinism, not the code most
+sections are moving.
+
+**Known coverage, stated honestly.** The 12 modules cover metric math, obstacle-set and ring
+determinism, and a handful of VLA reporting paths. They cover **nothing** in `scripts/`, the
+Makefile, the install path, the eval drivers, `collect_data.py`, or the seed-band contract. The
+suite going green is necessary, never sufficient.
+
+**One fragility to expect again.** `uv sync` prunes the editable CuRobo install before
+`bootstrap_uv.sh` reinstalls it, which breaks collection. `pytest.ini` works around it with
+`pythonpath = ../../envs/curobo/src`. Any section that re-syncs dependencies may hit this.
 
 **Which branch am I on?** This changes at S3 — check before starting any section.
 
@@ -104,7 +180,7 @@ cd customized_robotwin && source set_env.sh && export ROBOTWIN_BENCH_TASK=bench
 | S | Title | Risk surface | Owner | Days | Depends on |
 |---|---|---|---|---|---|
 | S1 | Safety net | — | user | mins | — |
-| S2 | pytest harness | exclusive | agent | 1 | — |
+| S2 | pytest harness | mostly exclusive; dependency files shared | agent | 1 | — |
 | S3 | Branch + port | **SHARED** | agent | 1 | S1, S2 |
 | S4 | Make it run | **SHARED** | agent + user GPU | 1 | S3 |
 | S5 | 84-file cleanup script | **SHARED** | agent | 0.5 | S3 |
@@ -147,39 +223,47 @@ which until this push existed on one disk.
 
 ---
 
-### S2 — pytest harness
-**Exclusive files. Depends on: nothing — run this on `peng-training-branch` BEFORE the move.**
+### S2 — pytest harness ✅ DONE 2026-08-11
+**Mostly exclusive files. Depends on: nothing — run this on `peng-training-branch` BEFORE the move.**
 
-Doing this first is deliberate: it touches no shared file, so it carries zero merge risk, and it
-gives a **passing baseline on the old branch** to diff the port against. Every later section is a
-refactor with no safety net until this exists.
+Doing this first is deliberate: the harness itself is exclusive and gives a **passing baseline on
+the old branch** to diff the port against. Only the atomic `pyproject.toml`/`uv.lock` dependency
+change is shared. Every later section now has a regression gate.
 
-**Working branch: `peng-training-branch`.** Everything here is exclusive except one line — see below.
+📄 **Detailed technical plan and execution record:
+[S2_PYTEST_HARNESS_PLAN.md](S2_PYTEST_HARNESS_PLAN.md).**
+
+**Working branch: `peng-training-branch`.** Everything here is exclusive except the two dependency
+files below.
+
+**Two findings from execution that shrink this section:** 10 of 12 check modules already define
+module-level `test_*()` functions, so pytest collects them unmodified; `smoke_test_seed_2a.py` and
+`test_lib_env_api.py` only needed thin wrappers. And the "duplicated fixtures" below are **name
+collisions, not duplication**
+(`_record` ×3, `_rollout` ×2, `_metric` ×2 all have different signatures; `_fake_env` exists once),
+so nothing is merged. See §4b Cluster F, which is corrected accordingly.
 
 **In scope.**
-- Add `pytest` to `pyproject.toml` (it appears zero times today) and a `conftest.py`.
-  ⚠️ **`pyproject.toml` is SHARED** — byte-identical to `origin/dev`. This is the one shared-file
-  edit in S2. Send it to dev as a one-line PR rather than carrying a diff on it: the team gets a
-  test runner, and `peng-dev-new` inherits it at S3 with nothing to reconcile. Everything else in
-  this section (`checks/`, `conftest.py`) is exclusive — `origin/dev` has no `checks/` directory.
-- Wire the 13 modules under `bench_script/checks/` into pytest, keeping `python -m checks.<module>`
+- Add `pytest` to `pyproject.toml`, update `uv.lock`, and add a `conftest.py`.
+  ⚠️ **`pyproject.toml` and `uv.lock` are SHARED.** Send them upstream atomically: a pyproject-only
+  change breaks `uv sync --locked`. Everything else in this section is exclusive — `origin/dev`
+  has no `checks/` directory.
+- Wire the 12 runnable modules under `bench_script/checks/` into pytest, keeping
+  `python -m checks.<module>`
   working so existing habits and docs don't break.
-- Move duplicated fixtures into `conftest.py`: the fake-env stubs (`get_pose`, `get_name`,
-  `get_contact_point`, `get_left_ee_pose`, `get_right_ee_pose`) duplicated across
-  `test_task_metric.py` and `test_vla_office_smoke.py`; `_rollout()`/`_metric()` builders in
-  `test_metric_correlation.py` and `test_task_metric_route_visualization.py`; `_record()`, defined
-  three times.
-- Mark GPU-only tests `@pytest.mark.gpu`, deselected by default: `smoke_test_seed_2a` at minimum.
+- Keep the similarly named local helpers separate; they have different signatures and purposes.
+- Mark GPU-only tests `@pytest.mark.gpu`, skipped by default: only `smoke_test_seed_2a` needed it.
 
 **Out of scope.** Changing what any check asserts. Adding new tests.
 
-**Done when** `pytest` runs green on the CPU-safe checks, GPU ones skip cleanly, and the pass/skip
-set is written down as the baseline.
+**Result:** 50 items collected across 12 runnable modules; **49 passed, 1 GPU smoke skipped**. The
+legacy `test_ring_config`, `test_obstacle_set`, and `test_lib_env_api` module commands also pass.
 
 **Verify with**
 ```bash
-cd customized_robotwin/script/bench_script && python -m pytest -q
-python -m checks.test_ring_config && python -m checks.test_obstacle_set   # legacy path still works
+cd customized_robotwin/script/bench_script && ../../../.venv/bin/python -m pytest -q
+../../../.venv/bin/python -m checks.test_ring_config
+../../../.venv/bin/python -m checks.test_obstacle_set
 ```
 
 ---
@@ -622,7 +706,7 @@ Six clusters, measured:
 | **C — visualization** | ~1,470 | Two ceiling/heatmap renderers and overlapping 3D drawing across `lib/plotting.py`, `lib/metric_viz.py`, `lib/metric_diagnostics.py`, `lib/reachability_view.py`, `visualize_task_metric_routes.py` (861 LOC whose actual drawing is one call into `metric_viz._metric_path3d`). Shrunk from 1,881 — `swept_volume_3d.py` is no longer ported, which removes one of the three volume renderers outright. |
 | **D — record loading / stats** | 1,554 | `analyze_metric_correlation.py` and `analyze_metric_distribution.py` both ingest the same JSONL, both bucket and histogram it. `lib/vla_reporting.summarize()` collides by name with `analyze_metric_correlation.summarize()`; `_eps(...)` is defined twice independently. |
 | **E — three scene drivers** | — | `analyze_occluder_visibility.py`, `vla_rollout.py`, `visualize_task_scene.py` each do config load → `build_cfg`/`DR_CLEAN` → env construction → seed loop → video/record writing, with three CLI vocabularies (17 / 22 / 11 args). |
-| **F — check fixtures** | — | Fake-env stubs duplicated across four checks; `_record()` defined three times. |
+| **F — check fixtures** | **0** | **Corrected 2026-08-11: there is no duplication here.** The earlier claim (fake-env stubs across four checks, `_record()` three times) counted *names*, not functions. `_record` appears 3× with signatures `(episode, density, config_hash, *, hard_success)` / `(scene, seed, values, clutter, outcome=False)` / `(value)`; `_rollout` 2× and `_metric` 2×, likewise unrelated; `_fake_env` exists once (`test_vla_office_smoke.py` has a different function, `_task_api_env`). These are correctly-scoped local helpers. **Merge nothing.** |
 
 ### 4c. Make config one surface again
 
@@ -695,7 +779,7 @@ The only supporting-layer change worth making:
   `phase2_occluder_rollout` — a directory that does not exist. The live one is
   `occluder_visibility/{rollout,no_rollout}`. (This file *is* shared with dev, so send it as a PR.)
 
-**Adopt `pytest`.** This is the highest-leverage item in the entire rehaul: wire the 13 existing
+**Adopt `pytest`.** This is the highest-leverage item in the entire rehaul: wire the 12 existing
 `checks/` modules into a real runner. Everything in Part 4 is a restructure with no safety net until
 this exists, so **do it first, not last.** Roughly a day.
 
