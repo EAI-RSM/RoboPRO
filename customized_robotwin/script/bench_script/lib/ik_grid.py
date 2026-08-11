@@ -124,11 +124,8 @@ def _solve_grid_q(robot, planner, ik, arm_tag, gp_world, chunk=256, num_seeds=No
         goal = CuroboPose(position=ta.to_device(pos[s:e]), quaternion=ta.to_device(quat[s:e]))
         result = ik.solve_batch(goal, num_seeds=num_seeds)
         sc = result.success.detach().cpu().numpy().reshape(e - s, -1)[:, 0].astype(bool)
-        # VALIDATE (first GPU run): result.solution is expected (batch, n_seeds, dof); we take seed 0
-        # to match the [:, 0] used on success. The one-time shape print below confirms the axis.
+        # result.solution is (batch, n_seeds, dof); take seed 0 to match the [:, 0] used on success.
         sol = result.solution.detach().cpu().numpy()
-        if s == 0:
-            print(f"[solve_q] result.solution raw shape = {sol.shape}  (expect (chunk, n_seeds, dof))")
         sol = sol.reshape(e - s, -1, sol.shape[-1])[:, 0, :]        # (batch, dof)
         if qout is None:
             qout = np.full((N, sol.shape[-1]), np.nan, dtype=np.float32)
@@ -183,3 +180,56 @@ def grasp_orientation(env, arm_tag, topdown):
     grasp_pose = env._geometric_grasp_pose(env.target_obj, cp_id, pre_dis=0.0) if cp_id is not None else None
     grasp_q = np.array(grasp_pose[-4:]) if grasp_pose is not None else np.array([0, 1, 0, 0], dtype=float)
     return grasp_q, grasp_pose
+
+
+def select_arm(env, arm_choice, topdown, chunk):
+    """Resolve which arm the metric runs on and return (arm, planner, grasp_q, grasp_pose, ik),
+    with the chosen arm's IK solver already built (so run() doesn't rebuild it).
+
+    arm_choice == 'left'/'right' -> use that arm.
+    arm_choice == 'auto'         -> probe BOTH arms' grasp reachability and pick a reachable one;
+                                  nearest arm-base breaks ties (prefer the arm that isn't
+                                  over-extending). If neither grasp is reachable, fall back to the
+                                  nearest arm and warn (the metric will then read inaccessible)."""
+    import torch
+
+    def planner_for(arm):
+        return env.robot.left_planner if arm == "left" else env.robot.right_planner
+
+    if arm_choice in ("left", "right"):
+        planner = planner_for(arm_choice)
+        grasp_q, grasp_pose = grasp_orientation(env, arm_choice, topdown)
+        return arm_choice, planner, grasp_q, grasp_pose, _build_ik_solver(planner)
+
+    tgt_xy = np.array(env.target_obj.get_pose().p)[:2]
+    cands = []
+    for arm in ("left", "right"):
+        planner = planner_for(arm)
+        grasp_q, grasp_pose = grasp_orientation(env, arm, topdown)
+        base = np.array(planner.robot_origion_pose.p)[:2]
+        ref = np.array(grasp_pose[:2]) if grasp_pose is not None else tgt_xy
+        dist = float(np.hypot(ref[0] - base[0], ref[1] - base[1]))
+        reachable, ik = None, None
+        if grasp_pose is not None:
+            ik = _build_ik_solver(planner)
+            reachable = bool(_solve_grid(env.robot, planner, ik, arm,
+                                         np.array([grasp_pose]), chunk=chunk)[0])
+        cands.append(dict(arm=arm, planner=planner, grasp_q=grasp_q, grasp_pose=grasp_pose,
+                          dist=dist, reachable=reachable, ik=ik))
+        print(f"[auto-arm] {arm}: grasp reachable={reachable}  base-dist={dist:.3f}m")
+
+    reach = [c for c in cands if c["reachable"]]
+    pool = reach if reach else cands
+    pool.sort(key=lambda c: c["dist"])
+    chosen = pool[0]
+    if not reach:
+        print(f"[auto-arm] WARNING no arm's grasp is reachable; falling back to nearest "
+              f"({chosen['arm']}) -> metric will likely read inaccessible")
+    # release IK solvers built for the arm(s) we did not choose
+    for c in cands:
+        if c is not chosen and c["ik"] is not None:
+            del c["ik"]
+    torch.cuda.empty_cache()
+    ik = chosen["ik"] if chosen["ik"] is not None else _build_ik_solver(chosen["planner"])
+    print(f"[auto-arm] chosen: {chosen['arm']}")
+    return chosen["arm"], chosen["planner"], chosen["grasp_q"], chosen["grasp_pose"], ik

@@ -33,12 +33,14 @@ from pathlib import Path
 
 import numpy as np
 
+from setup_paths import setup_paths
+setup_paths()
+
 import torch
 import transforms3d as t3d
 from scipy.ndimage import distance_transform_edt
 
-from clearance_metric_3d import select_arm
-from lib.ik_grid import _build_ik_solver_no_world, build_grid
+from lib.ik_grid import _build_ik_solver_no_world, build_grid, select_arm
 from lib.labeling import BEYOND, FREE, geometric_envelope
 from lib.metric_config import SeedMetricConfig
 from lib.run_io import CLEARANCE_RESULTS_DIR as RESULTS_DIR, Timings
@@ -185,7 +187,7 @@ def produce_for_arm(env, args, arm, cache_dir, out_dir):
     Stores BOTH the sphere fallback (grid-independent: shoulder centre + radius) and the Tier-2
     occupancy prune mask (grid-dependent: the real reachable-workspace shape)."""
     args.arm = arm
-    _arm, planner, grasp_q, grasp_pose, ik = select_arm(env, args)   # forced arm -> that planner + IK
+    _arm, planner, grasp_q, grasp_pose, ik = select_arm(env, args.arm, args.topdown, args.chunk)   # forced arm -> that planner + IK
     del ik                                          # the world IK isn't needed; reach is scene-independent
     torch.cuda.empty_cache()
     ik_nw = _build_ik_solver_no_world(planner)      # self-collision only -> scene-independent reachability

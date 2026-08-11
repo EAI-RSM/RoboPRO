@@ -36,8 +36,10 @@ from pathlib import Path
 
 import numpy as np
 
-from clearance_metric_3d import select_arm
-from lib.ik_grid import build_grid
+from setup_paths import setup_paths
+setup_paths()
+
+from lib.ik_grid import build_grid, select_arm
 from lib.labeling import BEYOND, label_volume, load_reach_envelope
 from lib.metric_config import SeedMetricConfig
 from lib.run_io import CLEARANCE_RESULTS_DIR as RESULTS_DIR, Timings
@@ -281,7 +283,7 @@ def main():
     print(f"[val] grid: {XX.size} cells/slice x {len(zs)} slices = {XX.size * len(zs)} voxels")
 
     with tm.section("select_arm"):
-        arm, planner, grasp_q, grasp_pose, ik = select_arm(env, args)
+        arm, planner, grasp_q, grasp_pose, ik = select_arm(env, args.arm, args.topdown, args.chunk)
     args.arm = arm
 
     # LOAD the exact prune mask a run would apply (occupancy or sphere); errors if artifact missing

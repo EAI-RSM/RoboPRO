@@ -35,7 +35,6 @@ from lib.run_io import (
     Timings,
     append_jsonl_fsync,
     atomic_write_json,
-    atomic_write_text,
     sha256_file,
 )
 from lib.scene_build import build_cfg, get_env_class
@@ -46,6 +45,7 @@ from lib.scene_provenance import (
     task_scene_identity,
 )
 from lib.task_roles import SUPPORTED_TASK, resolve_task_roles
+from lib.vla_reporting import sync_records_jsonl
 from lib.waypoints import canonical_legs, canonical_waypoints
 
 
@@ -412,14 +412,6 @@ def _read_committed_metric_records(out_dir, jobs, config_sha256):
     return records
 
 
-def _sync_metric_jsonl(out_dir, records):
-    text = "".join(
-        json.dumps(record, sort_keys=True, allow_nan=False) + "\n"
-        for record in records
-    )
-    atomic_write_text(Path(out_dir) / "records.jsonl", text)
-
-
 def _commit_metric_record(out_dir, record):
     sequence = int(record["metric_sequence"])
     episode_path = Path(out_dir) / "episodes" / f"episode{sequence:06d}.json"
@@ -504,7 +496,7 @@ def run(args):
     records = _read_committed_metric_records(
         out_dir, jobs, config["config_sha256"]
     )
-    _sync_metric_jsonl(out_dir, records)
+    sync_records_jsonl(out_dir, records)
     completed_sequences = {int(record["metric_sequence"]) for record in records}
     if records:
         print(
@@ -615,7 +607,7 @@ def run(args):
         records = _read_committed_metric_records(
             out_dir, jobs, config["config_sha256"]
         )
-        _sync_metric_jsonl(out_dir, records)
+        sync_records_jsonl(out_dir, records)
         timings.save(out_dir)
         _regenerate_postprocess_reports(
             args,
@@ -625,7 +617,7 @@ def run(args):
             raise_errors=False,
         )
         raise
-    _sync_metric_jsonl(out_dir, records)
+    sync_records_jsonl(out_dir, records)
     timings.save(out_dir)
     _regenerate_postprocess_reports(
         args, out_dir, records, complete=True, raise_errors=True

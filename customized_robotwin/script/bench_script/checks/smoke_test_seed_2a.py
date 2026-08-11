@@ -29,6 +29,7 @@ from types import SimpleNamespace
 import numpy as np
 
 import clearance_metric_3d as cm
+from lib.ik_grid import select_arm
 from lib import seed_from_clearance as sfc
 
 
@@ -65,8 +66,8 @@ def main():
 
     # --- resolve arm + grasp orientation/pose + its IK solver (same as run) ---
     with tm.section("select_arm"):
-        sel_args = SimpleNamespace(arm=args.arm, topdown=args.topdown, chunk=args.chunk)
-        arm, planner, grasp_q, grasp_pose, ik = cm.select_arm(env, sel_args)
+        arm, planner, grasp_q, grasp_pose, ik = select_arm(
+            env, args.arm, args.topdown, args.chunk)
     print(f"[smoke] arm={arm}  grasp_pose={'None' if grasp_pose is None else np.round(grasp_pose, 3)}")
 
     # start (current gripper) + goal (grasp) world positions -> the two widest-path seeds

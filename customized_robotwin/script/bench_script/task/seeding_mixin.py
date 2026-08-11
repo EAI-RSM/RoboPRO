@@ -86,7 +86,6 @@ class SeedingMixin:
         seed = None
         ik = None
         try:
-            import numpy as _np
             planner = self.robot.left_planner if tag == "left" else self.robot.right_planner
             grasp_q, grasp_pose = grasp_orientation(self, tag, topdown=False)
             if grasp_pose is None:

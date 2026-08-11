@@ -46,7 +46,7 @@ class PoseGeometryMixin:
 
     def _box_side_x(self, arm_tag, gap=SIDE_WAYPOINT_GAPS[1]):
         """World x beside the occluder on the arm's OWN side (right -> +x, left -> -x),
-            OCC_HALF_FOOTPRINT + SIDE_WAYPOINT_GAP from the box centre, clamped to the reach
+            OCC_HALF_FOOTPRINT + ``gap`` from the box centre, clamped to the reach
             limit on that same side (never flipped across to the wrong side)."""
         if self.spawn_occluder and getattr(self, "occluder", None) is not None:
             box_x = float(self.occluder.get_pose().p[0])

@@ -39,6 +39,8 @@ from lib.task_roles import resolve_task_roles
 from lib.vla_reporting import read_episode_records
 from lib.waypoints import canonical_legs, canonical_waypoints
 from lib.metric_viz import _metric_path3d
+from analyze_metric_correlation import _validated_hard_success
+from analyze_metric_distribution import _metric_value
 from task_metric import (
     _metric_record,
     _read_committed_metric_records,
@@ -78,17 +80,7 @@ def _validate_embedded_hash(config, path):
 
 
 def _eps(record_or_leg, value_key, unbounded_key):
-    unbounded = record_or_leg.get(unbounded_key)
-    value = record_or_leg.get(value_key)
-    if unbounded is True:
-        if value is not None:
-            raise ValueError(f"{value_key} must be null when {unbounded_key}=true")
-        return math.inf
-    if unbounded is not False:
-        raise ValueError(f"{unbounded_key} must be an explicit Boolean")
-    if value is None or not math.isfinite(float(value)):
-        raise ValueError(f"finite {value_key} must contain a finite value")
-    return float(value)
+    return _metric_value(record_or_leg, value_key, unbounded_key)
 
 
 def minimum_leg_indices(metric_record):
@@ -495,17 +487,7 @@ def _atomic_route_plot(out_dir, plot_args, foots, occ_ps, result, kind, target_p
 
 
 def _hard_outcome(rollout):
-    collision = rollout.get("collision_metrics", {}).get("is_collision")
-    if not isinstance(collision, bool):
-        raise ValueError(f"rollout episode {rollout.get('episode')} has invalid collision status")
-    task_success = rollout.get("task_success")
-    hard_success = rollout.get("hard_success")
-    if not isinstance(task_success, bool) or not isinstance(hard_success, bool):
-        raise ValueError(f"rollout episode {rollout.get('episode')} has invalid outcome fields")
-    expected = task_success and not collision
-    if hard_success != expected:
-        raise ValueError(f"rollout episode {rollout.get('episode')} has invalid hard_success")
-    return "hard_success" if expected else "hard_fail"
+    return "hard_success" if _validated_hard_success(rollout) else "hard_fail"
 
 
 def validate_source_pair(job, rollout, committed):

@@ -130,9 +130,10 @@ def _build_geometric_volume(env, arm, cfg, reach_cache_dir, reach_mode):
         foots, occ_ps, XX, YY, zs, cfg.res, cfg.zres,
         OCC_HALF_FOOTPRINT, shape=cfg.occ_shape,
     )
-    occ_mask = occluder_mask_3d(foots, XX, YY, zs, shape=cfg.occ_shape)
-    if occ_mask is None:
-        occ_mask = edt <= 0.0
+    # occluder_clearance_3d already rasterised the occluder solid to build this EDT, and
+    # distance_transform_edt(~mask) is exactly 0.0 on the masked voxels -- so recover the mask
+    # from the EDT rather than paying for the mesh-sectioning pass a second time.
+    occ_mask = edt <= 0.0
     target_mask = _target_mask(env, XX, YY, zs, cfg.occ_shape)
     label = np.where(prune_mask | occ_mask | target_mask, BEYOND, FREE).astype(np.int8)
     return _GeometricVolume(

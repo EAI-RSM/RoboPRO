@@ -47,7 +47,8 @@ setup_paths()
 
 import torch
 from lib.continuity import warm_start_branches, warm_start_branches_3d
-from lib.ik_grid import _build_ik_solver, _solve_grid, _solve_grid_q_multi, build_grid, grasp_orientation
+from lib.ik_grid import (_build_ik_solver, _solve_grid, _solve_grid_q_multi, build_grid,
+                         grasp_orientation, select_arm)
 from lib.labeling import FREE, LABEL_NAMES, OBSTACLE, label_volume, load_reach_envelope
 from lib.metric_config import SeedMetricConfig
 from lib.obstacles import obstacle_centers, occluder_clearance_3d, occluder_footprints_3d
@@ -59,55 +60,6 @@ from lib.widest_path import nearest_free_voxel, reconstruct_widest_path_3d, wide
 from task.occluder_task import make_occluder_task
 from lib.metric_diagnostics import phase1_stack_report, phase2_vertical_report, phase3_clearance_report
 from lib.metric_viz import _metric_path3d, feasibility, phase4_visuals
-def select_arm(env, args):
-    """Resolve which arm the metric runs on and return (arm, planner, grasp_q, grasp_pose, ik),
-    with the chosen arm's IK solver already built (so run() doesn't rebuild it).
-
-    args.arm == 'left'/'right' -> use that arm.
-    args.arm == 'auto'         -> probe BOTH arms' grasp reachability and pick a reachable one;
-                                  nearest arm-base breaks ties (prefer the arm that isn't
-                                  over-extending). If neither grasp is reachable, fall back to the
-                                  nearest arm and warn (the metric will then read inaccessible)."""
-    def planner_for(arm):
-        return env.robot.left_planner if arm == "left" else env.robot.right_planner
-
-    if args.arm in ("left", "right"):
-        planner = planner_for(args.arm)
-        grasp_q, grasp_pose = grasp_orientation(env, args.arm, args.topdown)
-        return args.arm, planner, grasp_q, grasp_pose, _build_ik_solver(planner)
-
-    tgt_xy = np.array(env.target_obj.get_pose().p)[:2]
-    cands = []
-    for arm in ("left", "right"):
-        planner = planner_for(arm)
-        grasp_q, grasp_pose = grasp_orientation(env, arm, args.topdown)
-        base = np.array(planner.robot_origion_pose.p)[:2]
-        ref = np.array(grasp_pose[:2]) if grasp_pose is not None else tgt_xy
-        dist = float(np.hypot(ref[0] - base[0], ref[1] - base[1]))
-        reachable, ik = None, None
-        if grasp_pose is not None:
-            ik = _build_ik_solver(planner)
-            reachable = bool(_solve_grid(env.robot, planner, ik, arm,
-                                         np.array([grasp_pose]), chunk=args.chunk)[0])
-        cands.append(dict(arm=arm, planner=planner, grasp_q=grasp_q, grasp_pose=grasp_pose,
-                          dist=dist, reachable=reachable, ik=ik))
-        print(f"[auto-arm] {arm}: grasp reachable={reachable}  base-dist={dist:.3f}m")
-
-    reach = [c for c in cands if c["reachable"]]
-    pool = reach if reach else cands
-    pool.sort(key=lambda c: c["dist"])
-    chosen = pool[0]
-    if not reach:
-        print(f"[auto-arm] WARNING no arm's grasp is reachable; falling back to nearest "
-              f"({chosen['arm']}) -> metric will likely read inaccessible")
-    # release IK solvers built for the arm(s) we did not choose
-    for c in cands:
-        if c is not chosen and c["ik"] is not None:
-            del c["ik"]
-    torch.cuda.empty_cache()
-    ik = chosen["ik"] if chosen["ik"] is not None else _build_ik_solver(chosen["planner"])
-    print(f"[auto-arm] chosen: {chosen['arm']}")
-    return chosen["arm"], chosen["planner"], chosen["grasp_q"], chosen["grasp_pose"], ik
 def phase4_metric(out_dir, args, XX, YY, zs, label, edt, q_gate, grasp_pose, tgt_p, pad_xy, occ_ps,
                   foots, ee_xyz=None):
     """PHASE 4: the 2.5D metric. Seed the grasp voxel and the pad voxel, run the 26-conn widest-path
@@ -241,7 +193,7 @@ def run(args):
 
     # --- resolve the grasping arm (explicit or auto) + its IK solver ---
     with tm.section("select_arm"):
-        arm, planner, grasp_q, grasp_pose, ik = select_arm(env, args)
+        arm, planner, grasp_q, grasp_pose, ik = select_arm(env, args.arm, args.topdown, args.chunk)
     args.arm = arm      # downstream naming / filenames use the resolved arm
     # where the acting gripper currently IS (rest pose), in the same world "gripper pose" convention
     # the grid is swept in -- a scene anchor for the figures, never used by the metric itself

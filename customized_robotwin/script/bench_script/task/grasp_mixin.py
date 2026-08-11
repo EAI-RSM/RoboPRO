@@ -146,8 +146,8 @@ class GraspMixin:
             clearance_zs = (PLACE_CLEARANCE_ZS[1],) if placement_off else PLACE_CLEARANCE_ZS
             z_lifts = ((0.0,) if waypoints_off else
                        (SIDE_WAYPOINT_Z_LIFTS if occluder_present else (0.0,)))
-            orients = WAYPOINT_ORIENTATIONS if occluder_present else ("grasp_aligned",)
-            y_offsets = WAYPOINT_Y_OFFSETS if occluder_present else (0.0,)
+            orients = ("grasp_aligned",)
+            y_offsets = (0.0,)
             for gap in gaps:
                 x_side = self._box_side_x(arm_tag, gap=gap)
                 for z_lift in z_lifts:

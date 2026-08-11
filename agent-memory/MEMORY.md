@@ -30,6 +30,7 @@ the reasoning behind decisions that look arbitrary from the diff.
 - [bench_script layout](domain_bench_script_layout.md) — post-refactor lib/ + task/ packages, dependency rule
 - [curobo](domain_curobo.md) — why subgoals, batched-IK recipe, knobs, what each failure means
 - [Scene](domain_scene.md) — target/occluder geometry, ring layout, collision-registration traps
+- [Seed conventions](domain_seed_conventions.md) — **READ BEFORE ANY FINETUNE/EVAL SEED CHOICE**: three disjoint bands (train 0.., eval 40000+, upstream 100000*(1+s)), the expert-feasibility gate, and the fact that `eval_seeds/` is frozen but wired into NOTHING
 - [Visibility](domain_visibility.md) — 5 buckets, denominator timing, the one safe render speedup
 
 **Tools**

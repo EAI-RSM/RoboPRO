@@ -3,7 +3,6 @@
 import os
 
 
-SIDE_WAYPOINT_GAP = 0.24       # clearance from the box EDGE to the waypoint (gripper)
 
 
 REACH_X_LIMIT = 0.5
@@ -114,17 +113,14 @@ PLACE_CLEARANCE_ZS_FALLBACK = (0.95, 0.90, 0.85)
 PLACEMENT_STRICT_ORIENTATION_STAGES = ("placement:center_over_pad",)
 
 
-LOCAL_WAYPOINT_ATTEMPTS = int(os.environ.get(
-    "LOCAL_WAYPOINT_ATTEMPTS", os.environ.get("POST_GRASP_ESCAPE_ATTEMPTS", "5")))
+LOCAL_WAYPOINT_ATTEMPTS = int(os.environ.get("LOCAL_WAYPOINT_ATTEMPTS", "5"))
 
 
 WAYPOINT_SHRINK_MIN_DISTANCE = float(os.environ.get("WAYPOINT_SHRINK_MIN_DISTANCE", "0.05"))
 
 
-WAYPOINT_ORIENTATIONS = ("grasp_aligned",)
 
 
-WAYPOINT_Y_OFFSETS = (0.0,)
 
 
 STAGE_ORDER = ["waypoint", "pre_grasp", "grasp", "lift", "post_grasp_escape",
