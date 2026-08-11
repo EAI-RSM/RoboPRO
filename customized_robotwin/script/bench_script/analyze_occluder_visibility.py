@@ -4,7 +4,7 @@ Phase 2 part 1 (#35): deterministic occluder-ring spawn + visibility distributio
 Places the target (001_bottle id 9) in the upper third of the reachable region (in
 front of the back furniture) and spawns a RING of `--num-occluders` tall, skinny olive-oil
 occluders (029_olive-oil id 3, scale 1.0) equally spaced (2*pi/n apart) on a circle of
-radius `--offsets` around the target -- n=1 is a single box directly in front (-y, the
+edge-to-edge gap `--offsets` around the target -- n=1 is a single box directly in front (-y, the
 robot/camera side). No clutter, no binary search. Then measures the t=0 countertop
 `visible_fraction` distribution across seeds, reusing the Phase 1 harness (measurement +
 plotting).
@@ -64,7 +64,7 @@ for _i, _a in enumerate(sys.argv):
         os.environ["OCCLUDER_ASSET"] = sys.argv[_i + 1]
 
 from lib.occluder_ring import (
-    draw_ring_config, occluder_ring_xy, parse_count_choices, parse_offset_specs,
+    draw_ring_config, parse_count_choices, parse_offset_specs,
 )
 from lib.planning_tuning import *  # noqa: F403
 from lib.run_io import _Tee, _prune_empty_topdirs
@@ -160,26 +160,15 @@ def run(args):
                 # (keyed on seed+offset so the decision is shared across densities)
                 show = bool(np.random.default_rng(int(seed) * 1000 + int(round(off * 100))).random()
                             >= args.no_occluder_prob)
-                # The formation (rotation, count, per-occluder radii) is drawn ONCE here and
+                # The formation (rotation, count, per-occluder gaps) is drawn ONCE here and
                 # then re-asserted verbatim on the env for both the measurement build and the
                 # rollout build -- re-deriving it anywhere would risk measuring one scene and
                 # rolling out another.
                 angle0, n_occ, radii = draw_ring_config(seed, spec, count_choices,
                                                         args.random_ring_rotation)
-                # Reject scenes where ANY occluder that WILL spawn (off-table ring positions
-                # are dropped by the same xlim/ylim filter load_actors uses) lands too close
-                # to / on the destination pad. Rejects the WHOLE seed (redraw) so the
-                # trajectory count is still met.
-                if show:
-                    ring_xys = occluder_ring_xy(clean_pose[0], clean_pose[1], radii, n_occ,
-                                                angle0, xlim=TABLE_XLIM, ylim=TABLE_YLIM)
-                    pad_dist = min((float(np.linalg.norm(np.array(xy) - np.array(PAD_XY)))
-                                    for xy in ring_xys), default=float("inf"))
-                    if pad_dist < OCC_PAD_MIN_DIST:
-                        print(f"[seed {seed}] a ring occluder@off={off:.2f} is {pad_dist:.3f}m from "
-                              f"pad (< {OCC_PAD_MIN_DIST:.3f}m); rejecting seed, drawing another.")
-                        seed_ok = False
-                        break
+                # The yaw-aware centre positions are only known after load_actors draws
+                # the actor yaws. The post-build flag below replaces the old centre-only
+                # pad estimate.
                 env.spawn_occluder = show
                 env.occluder_offset = off
                 env.num_occluders = n_occ
@@ -189,6 +178,8 @@ def run(args):
                     try:
                         env.setup_demo(**build_cfg("put_mouse_on_pad", args.base_config, seed,
                                                    dr_measure(cd)))
+                        if show and not env.occluder_pad_clearance_ok:
+                            raise RuntimeError("yaw-aware occluder placement is too close to the pad")
                         target = _resolve_target(env)
                         pose_ok = bool(np.allclose(np.array(target.actor.get_pose().p), clean_pose, atol=1e-4))
                         res = env.measure_target_visibility(target, camera_name=CAMERA, denominator=full_px)
@@ -360,11 +351,14 @@ def main():
     ap.add_argument("--seed-start", type=int, default=0)
     ap.add_argument("--num-seeds", type=int, default=50)
     ap.add_argument("--offsets", default="0.2",
-                    help="occluder radius/radii in m (target at centre); one figure group per "
-                         "token. A token is either a FIXED value (0.20 -- every occluder at that "
-                         "radius, the original behaviour) or a RANGE (0.10-0.25 -- each occluder "
-                         "independently draws its own radius from that interval, so one scene can "
+                    help="occluder edge-to-edge gap(s) in m; one figure group per "
+                         "token. A token is either a FIXED value (0.20 -- every occluder has that "
+                         "gap) or a RANGE (0.10-0.25 -- each occluder independently draws its own "
+                         "gap from that interval, so one scene can "
                          "mix near and far occluders). e.g. 0.15,0.20,0.25 or 0.10-0.25")
+    ap.add_argument("--occluding-object-distance", default=None, metavar="LO,HI",
+                    help="Makefile-compatible edge-to-edge gap range in centimetres; "
+                         "for example 20,20 is converted to --offsets 0.20")
     ap.add_argument("--num-occluders", default="1",
                     help="how many occluders to spawn, equally spaced in angle. A single value "
                          "(1 = the original single box in front) or a comma-separated menu "
@@ -415,6 +409,16 @@ def main():
     ap.add_argument("--plot-only", action="store_true")
     args = ap.parse_args()
 
+    if args.occluding_object_distance is not None:
+        try:
+            low_cm, high_cm = (
+                float(value.strip()) for value in args.occluding_object_distance.split(",", 1)
+            )
+        except (TypeError, ValueError) as exc:
+            ap.error(f"--occluding-object-distance must be LO,HI in centimetres: {exc}")
+        low_m, high_m = sorted((low_cm / 100.0, high_cm / 100.0))
+        args.offsets = str(low_m) if low_m == high_m else f"{low_m}-{high_m}"
+
     # Resolve the tri-state --save-images default: on for no-rollout runs (overlay PNGs
     # are their main artifact), off for --rollout runs (the episode video is). An explicit
     # --save-images / --no-save-images on the command line wins over this.
@@ -431,7 +435,7 @@ def main():
 
     if not args.plot_only:
         run(args)
-    group_label = {"offset": "occluder offset (m)",
+    group_label = {"offset": "occluder edge-to-edge gap (m)",
                    "clutter_density": "table clutter density"}[args.group_by]
     out_dir = Path(args.out_dir)
     analyze_kwargs = dict(group_key=args.group_by, group_label=group_label,

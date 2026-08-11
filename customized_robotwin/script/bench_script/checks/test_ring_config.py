@@ -15,6 +15,7 @@ import sys
 import numpy as np
 
 import lib.occluder_ring as A
+from lib.footprint_geometry import min_rect_distance
 
 
 def test_parse_offset_specs():
@@ -101,15 +102,36 @@ def test_per_occluder_radii():
 
 
 def test_ring_geometry():
-    """Per-occluder radii place each bottle at ITS OWN distance, with angles still even."""
+    """Per-occluder gaps produce the requested true distances at evenly spaced angles."""
     cx, cy = 0.05, 0.10
-    radii = [0.10, 0.18, 0.25, 0.13]
-    pts = A.occluder_ring_xy(cx, cy, radii, 4, angle0=0.0)
+    gaps = [0.10, 0.18, 0.25, 0.13]
+    target_yaw, target_half = 0.35, (0.04, 0.02)
+    occluder_yaws, occluder_half = [-0.2, 0.4, 1.1, -0.7], (0.06, 0.03)
+    pts = A.occluder_ring_xy(
+        cx, cy, gaps, 4, angle0=0.0,
+        target_yaw=target_yaw, target_half=target_half,
+        occluder_yaws=occluder_yaws, occluder_half=occluder_half,
+    )
     assert len(pts) == 4, pts
     for k, (x, y) in enumerate(pts):
-        d = float(np.hypot(x - cx, y - cy))
-        assert abs(d - radii[k]) < 1e-9, (k, d, radii[k])
-    # angles evenly spaced by 2pi/n regardless of the radii
+        gap = min_rect_distance(
+            (cx, cy), target_yaw, target_half,
+            (x, y), occluder_yaws[k], occluder_half,
+        )
+        assert abs(gap - gaps[k]) < 1e-9, (k, gap, gaps[k])
+        assert np.hypot(x - cx, y - cy) > gaps[k]
+
+    # Reviewed S3 baseline: these centres replace the old radius-equals-centre-distance
+    # formation. Their extra separation is the two yaw-aware object footprints.
+    expected = np.array([
+        [0.05, -0.07137405090210466],
+        [0.34113667994768265, 0.10],
+        [0.05, 0.44762961186400774],
+        [-0.18797848580922927, 0.10],
+    ])
+    assert np.allclose(np.asarray(pts), expected, atol=1e-12), pts
+
+    # Angles remain evenly spaced by 2pi/n even though centre distances now vary.
     angs = [np.arctan2(x - cx, -(y - cy)) % (2 * np.pi) for x, y in pts]
     for k in range(1, 4):
         step = (angs[k] - angs[k - 1]) % (2 * np.pi)
@@ -119,10 +141,18 @@ def test_ring_geometry():
     p0 = A.occluder_ring_xy(0.0, 0.0, 0.2, 1, angle0=0.0)
     assert len(p0) == 1 and abs(p0[0][0]) < 1e-12 and abs(p0[0][1] + 0.2) < 1e-12, p0
 
-    # rotating by theta rotates the whole formation about the target
-    rot = A.occluder_ring_xy(cx, cy, radii, 4, angle0=0.7)
-    for k, ((x0, y0), (x1, y1)) in enumerate(zip(pts, rot)):
-        assert abs(np.hypot(x1 - cx, y1 - cy) - np.hypot(x0 - cx, y0 - cy)) < 1e-9, k
+    # Rotating changes the placement directions while retaining every true gap.
+    rot = A.occluder_ring_xy(
+        cx, cy, gaps, 4, angle0=0.7,
+        target_yaw=target_yaw, target_half=target_half,
+        occluder_yaws=occluder_yaws, occluder_half=occluder_half,
+    )
+    for k, (x1, y1) in enumerate(rot):
+        gap = min_rect_distance(
+            (cx, cy), target_yaw, target_half,
+            (x1, y1), occluder_yaws[k], occluder_half,
+        )
+        assert abs(gap - gaps[k]) < 1e-9, (k, gap, gaps[k])
     a0 = np.arctan2(pts[0][0] - cx, -(pts[0][1] - cy)) % (2 * np.pi)
     a1 = np.arctan2(rot[0][0] - cx, -(rot[0][1] - cy)) % (2 * np.pi)
     assert abs(((a1 - a0) % (2 * np.pi)) - 0.7) < 1e-9, (a0, a1)
@@ -131,7 +161,7 @@ def test_ring_geometry():
     tight = A.occluder_ring_xy(0.0, 0.0, [0.2, 0.9, 0.2, 0.9], 4,
                                xlim=(-0.5, 0.5), ylim=(-0.5, 0.5))
     assert len(tight) == 2, tight
-    print("  [7] ring geometry: own radius per k, even angles, rotation, off-table  PASS")
+    print("  [7] ring geometry: true gaps, reviewed baseline, rotation, off-table PASS")
 
 
 def test_ab_configuration():

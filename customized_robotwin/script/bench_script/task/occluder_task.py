@@ -3,8 +3,10 @@
 import os
 import time
 
+import sapien.core as sapien
 
 from envs.utils import ArmTag, create_actor, create_box, rand_pose
+from lib.footprint_geometry import model_footprint_half_extents, yaw_from_quat
 from lib.occluder_ring import occluder_ring_xy
 from lib.planning_tuning import *  # noqa: F403
 from lib.scene_build import get_env_class
@@ -31,16 +33,16 @@ def make_occluder_task():
         # stock straight-in, wrist-locked constrained approach.
         DROP_GRASP_ORIENTATION_CONSTRAINT = True
         spawn_occluder = False
-        # Occluder ring: num_occluders bottles equally spaced (2*pi/n apart) on a circle of
-        # radius occluder_offset centred on the target. occluder_offset is the RING RADIUS
+        # Occluder ring: num_occluders bottles equally spaced (2*pi/n apart) around the
+        # target. occluder_offset is the closest-surface GAP
         # (kept under its old name so the reachability/gripper/swept tools that set
         # env.occluder_offset still get a single front box). occluder_angle0 rotates the
         # whole ring; 0 puts occluder k=0 directly in front (-y). num_occluders=1 == the
         # original single front occluder. See occluder_ring_xy().
-        occluder_offset = 0.2         # ring radius in metres (target at centre)
+        occluder_offset = 0.2         # edge-to-edge gap in metres
         num_occluders = 1
         occluder_angle0 = 0.0         # radians; angle of occluder k=0, measured from -y (front)
-        occluder_radii = None         # per-occluder radii (list); None -> occluder_offset for all
+        occluder_radii = None         # per-occluder gaps (list); None -> occluder_offset for all
         target_model = TARGET_MODEL
         target_id = TARGET_ID
         target_xlim = TARGET_XLIM
@@ -70,29 +72,57 @@ def make_occluder_task():
             self.des_obj_pose = self.des_obj.get_pose().p.tolist() + [0, 0, 0, 1]
             self.des_obj_pose[2] += 0.02
 
-            # occluder ring: num_occluders tall olive-oil bottles equally spaced (2*pi/n
-            # apart) on a circle of radius occluder_offset around the target. k=0 sits
+            # Occluder ring: requested gaps are converted to yaw-aware centre offsets.
+            # k=0 sits
             # directly in front (-y) when occluder_angle0=0; num_occluders=1 reproduces the
             # original single front box. self.occluder aliases ring bottle 0 so the
             # single-box tools (reachability/gripper/swept) keep working unchanged.
             self.occluders = []
             self.occluder = None
+            self.occluder_pad_clearance_ok = True
             if self.spawn_occluder and self.num_occluders > 0:
-                mp = self.target_obj.get_pose().p
-                # Per-occluder radii when the caller supplied them (--offsets given a range),
-                # else the single scalar radius. The scalar path keeps every external tool
+                target_actor_pose = self.target_obj.get_pose()
+                mp = target_actor_pose.p
+                # Per-occluder gaps when the caller supplied them (--offsets given a range),
+                # else the single scalar gap. The scalar path keeps every external tool
                 # that only sets env.occluder_offset (reachability / gripper / swept volume)
                 # working unchanged.
                 radii = getattr(self, "occluder_radii", None) or self.occluder_offset
-                # Drop any ring position whose centre would leave the tabletop -- keep the
-                # formation with fewer bottles rather than spawning one off the table.
+                target_scale = self.item_info["scales"].get(self.target_model, {}).get(
+                    f"{self.target_id}", None
+                )
+                target_half = model_footprint_half_extents(
+                    self.target_model, self.target_id, target_scale
+                )
+                occluder_half = model_footprint_half_extents(
+                    OCCLUDER_MODEL, OCCLUDER_ID, [1.0, 1.0, 1.0]
+                )
+                # Draw every yaw before solving positions. Reusing these exact poses after
+                # the off-table filter keeps each surviving position paired with its yaw.
+                probe_poses = [
+                    rand_pose(
+                        xlim=[0.0], ylim=[0.0], qpos=OCCLUDER_QPOS,
+                        rotate_rand=True, rotate_lim=[0, 3.14, 0],
+                    )
+                    for _ in range(self.num_occluders)
+                ]
                 ring = occluder_ring_xy(float(mp[0]), float(mp[1]),
                                         radii, self.num_occluders,
                                         self.occluder_angle0,
-                                        xlim=TABLE_XLIM, ylim=TABLE_YLIM)
-                for ox, oy in ring:
-                    occ_pose = rand_pose(xlim=[ox], ylim=[oy], qpos=OCCLUDER_QPOS,
-                                         rotate_rand=True, rotate_lim=[0, 3.14, 0])  # random yaw
+                                        xlim=TABLE_XLIM, ylim=TABLE_YLIM,
+                                        target_yaw=yaw_from_quat(target_actor_pose.q),
+                                        target_half=target_half,
+                                        occluder_yaws=[yaw_from_quat(pose.q) for pose in probe_poses],
+                                        occluder_half=occluder_half,
+                                        return_indices=True)
+                self.occluder_pad_clearance_ok = all(
+                    ((ox - self.fixed_pad_xy[0]) ** 2 + (oy - self.fixed_pad_xy[1]) ** 2) ** 0.5
+                    >= OCC_PAD_MIN_DIST
+                    for _, ox, oy in ring
+                )
+                for index, ox, oy in ring:
+                    probe_pose = probe_poses[index]
+                    occ_pose = sapien.Pose([ox, oy, float(probe_pose.p[2])], probe_pose.q)
                     occ = create_actor(
                         scene=self, pose=occ_pose, modelname=OCCLUDER_MODEL, convex=True,
                         model_id=OCCLUDER_ID, scale=[1.0, 1.0, 1.0],

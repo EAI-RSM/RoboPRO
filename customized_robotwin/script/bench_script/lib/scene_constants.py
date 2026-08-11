@@ -32,8 +32,7 @@ PAD_XY = (0.0, -0.28)          # destination pad parked at the front, out of the
 # Only the ASSET and its footprint constants switch here. Ring geometry, APPROACH_MODE,
 # PLACEMENT_MODE and every planner path are untouched -- the original scene is reproduced by
 # running this asset with ONE occluder and no ring rotation (OCCLUDER_COUNTS=1,
-# RANDOM_RING_ROTATION=0), which `occluder_ring_xy` already places directly in front (-y),
-# exactly where the original hardcoded `oy = target_y - offset` put it.
+# RANDOM_RING_ROTATION=0), which `occluder_ring_xy` places directly in front (-y).
 #
 # Footprint numbers are the originals recovered from b3c2e66: the milk box is a rectangular
 # carton (~0.11 x 0.122) and genuinely bigger than the round olive-oil bottle (~0.08), so the
