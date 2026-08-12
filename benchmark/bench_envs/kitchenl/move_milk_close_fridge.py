@@ -4,10 +4,8 @@ import yaml
 
 from bench_envs.kitchenl._kitchen_base_large import Kitchen_base_large
 from envs.utils import *
-import math
 import numpy as np
 import sapien
-import transforms3d as t3d
 
 
 class move_milk_close_fridge(Kitchen_base_large):

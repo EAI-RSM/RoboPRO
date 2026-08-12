@@ -1,12 +1,9 @@
 from bench_envs.kitchens._kitchens_base_task import KitchenS_base_task
 from envs.utils import *
-import sapien
 import math
 import os
 import transforms3d as t3d
 from envs._GLOBAL_CONFIGS import *
-from copy import deepcopy
-import glob
 
 
 class put_hamburger_in_microwave_ks(KitchenS_base_task):

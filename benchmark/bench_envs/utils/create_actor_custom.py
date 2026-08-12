@@ -1,5 +1,4 @@
 import sapien.core as sapien
-import numpy as np
 from pathlib import Path
 import os
 from .actor_utils_custom import Simple_Actor

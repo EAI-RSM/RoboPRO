@@ -1,8 +1,7 @@
 from bench_envs.kitchens._kitchens_base_task import KitchenS_base_task
 from envs.utils import *
-import sapien, math, os, glob
+import sapien, os
 from envs._GLOBAL_CONFIGS import *
-from copy import deepcopy
 
 
 class chain_bowl_rack_apple_sink_ks(KitchenS_base_task):

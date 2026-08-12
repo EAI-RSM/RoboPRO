@@ -5,8 +5,6 @@ import math
 import os
 import transforms3d as t3d
 from envs._GLOBAL_CONFIGS import *
-from copy import deepcopy
-import glob
 
 
 class pick_fork_from_sink_ks(KitchenS_base_task):
