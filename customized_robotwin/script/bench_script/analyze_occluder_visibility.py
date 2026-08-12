@@ -258,6 +258,11 @@ def run(args):
                     # (_get_approach_seed writes into out_dir/seed_route_visuals/episode<N>_<arm>/)
                     env._rollout_out_dir = out_dir
                     env._rollout_ep = ep_counter
+                    # The env instance is reused across seeds. Clear the delivery
+                    # diagnostic before setup_demo/play_once so an early failure cannot
+                    # inherit the previous episode's collision-world counts.
+                    env.rollout_curobo_collision_world_entry_count_before_override = None
+                    env.rollout_curobo_collision_world_entry_count = None
                     _t_rollout = time.perf_counter()
                     with contextlib.redirect_stdout(_Tee(sys.stdout, rollout_log)), \
                          contextlib.redirect_stderr(_Tee(sys.stderr, rollout_log)):
@@ -300,6 +305,14 @@ def run(args):
                     rec["placement_mode"] = env._placement_mode()
                     rec["rollout_plan_effort"] = getattr(env, "rollout_plan_effort", None)
                     rec["rollout_seed_stats"] = getattr(env, "rollout_seed_stats", None)
+                    rec["curobo_collision_world_entry_count_before_override"] = getattr(
+                        env,
+                        "rollout_curobo_collision_world_entry_count_before_override",
+                        None,
+                    )
+                    rec["curobo_collision_world_entry_count"] = getattr(
+                        env, "rollout_curobo_collision_world_entry_count", None
+                    )
                     # Physics collision metrics for THIS episode (accumulated by
                     # check_collisions during play_once; reset per build by
                     # _init_collision_metrics; survives close_env like the fields
@@ -312,8 +325,13 @@ def run(args):
                     except Exception:
                         rec["collision_metrics"] = None
                     cm = rec["collision_metrics"] or {}
+                    curobo_count = rec["curobo_collision_world_entry_count"]
+                    curobo_default_count = rec[
+                        "curobo_collision_world_entry_count_before_override"
+                    ]
                     summary = (f"    seed {seed} off={off:.2f} cd={cd} {res['bucket']}: "
                                f"rollout {'SUCCESS' if success else 'FAIL'} "
+                               f"curobo_world={curobo_count} (default={curobo_default_count}) "
                                f"collisions={cm.get('total_collision_count', '?')} "
                                f"(clutter={cm.get('robot_to_static_object', '?')}"
                                f"+{cm.get('target_to_static_object', '?')}) -> "

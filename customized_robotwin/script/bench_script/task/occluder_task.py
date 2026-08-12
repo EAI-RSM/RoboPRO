@@ -186,16 +186,24 @@ def make_occluder_task():
             self._stage_clock = time.perf_counter()
 
             # Re-register the FULL collision world (clutter included) before any
-            # planning. setup_demo ran update_world(exclude_obstacles=True) because the
-            # bench config sets enable_collision_metrics=true -- that drops every
-            # is_obstacle=True procedural clutter object from curobo's world, so the
-            # expert would plan straight THROUGH clutter and knock it over (even on
-            # "successful" rollouts). The whole point here is to test how well the
-            # expert AVOIDS clutter, so curobo must see it: update_world() (no exclude)
-            # rebuilds the world from collision_list including clutter. The physics-based
-            # collision metrics (check_collisions, gated by enable_collision_metrics) are
-            # independent of curobo's world, so they still measure any residual hits.
-            self.update_world()
+            # planning. Dev's default resolves through planner_exclude_obstacles to
+            # enable_collision_metrics, which is true in the bench config and therefore
+            # hides every is_obstacle=True procedural object. The ring path must override
+            # that default explicitly so the expert plans around clutter. Physics-based
+            # collision metrics remain independent and still measure any residual hits.
+            self.rollout_curobo_collision_world_entry_count_before_override = getattr(
+                self, "_last_curobo_collision_world_entry_count", None
+            )
+            self.rollout_curobo_collision_world_entry_count = None
+            self.update_world(exclude_obstacles=False)
+            self.rollout_curobo_collision_world_entry_count = getattr(
+                self, "_last_curobo_collision_world_entry_count", None
+            )
+            print(
+                "[CUROBO WORLD] collision entries: "
+                f"default={self.rollout_curobo_collision_world_entry_count_before_override} "
+                f"ring_override={self.rollout_curobo_collision_world_entry_count}"
+            )
 
             def checkpoint(name):
                 # Diagnostic: the dry-run candidate search only verifies the
