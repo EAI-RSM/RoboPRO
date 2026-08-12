@@ -75,7 +75,9 @@ def _prepare_graph_prompt(task_env, model, observation, controller):
     prepared = prepare_instruction(
         task_env, model, observation, _GRAPH_CONDITION, _GRAPH_CONTRACT,
         previous_phase=controller.phase.value,
+        collision_objects=controller.collision_prompt_objects,
     )
+    controller.collision_prompt_objects = ()
     active_prompt = getattr(task_env, "_graph_active_prompt", None)
     prompt_updated = prepared.instruction != active_prompt
     if model.observation_window is None or prompt_updated:

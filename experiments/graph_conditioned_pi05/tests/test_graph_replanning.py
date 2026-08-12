@@ -18,6 +18,7 @@ def state(**values):
         "path_blocked": Evidence.FALSE,
         "reachable": Evidence.TRUE,
         "visible": Evidence.TRUE,
+        "robot_collision": Evidence.FALSE,
     }
     defaults.update(values)
     return ActionGraphState(**defaults)
@@ -47,6 +48,26 @@ def test_path_delta_uses_hysteresis():
     assert detector.observe(state(path_blocked=Evidence.TRUE)).events == (
         GraphEvent.PATH_BLOCKED,
     )
+
+
+def test_collision_onset_replans_immediately_and_persistent_contact_does_not():
+    controller = GraphControllerState()
+    controller.observe(state(), 0)
+    controller.actions_since_replan = 1
+    collision = state(
+        robot_collision=Evidence.TRUE,
+        collision_objects=("yellow cup",),
+    )
+    decision, record = controller.observe(collision, 31)
+    assert decision.requires_replan
+    assert decision.event is GraphEvent.COLLISION_STARTED
+    assert decision.next_phase is PromptPhase.GRASP
+    assert record["discarded_actions"] == 31
+    assert controller.collision_prompt_objects == ("yellow cup",)
+
+    controller.actions_since_replan = 10
+    decision, _ = controller.observe(collision, 20)
+    assert not decision.requires_replan
 
 
 def test_policy_is_phase_aware_and_safety_bypasses_cooldown():

@@ -7,6 +7,7 @@ from tempfile import TemporaryDirectory
 
 from experiments.graph_conditioned_pi05.contract import GraphNode, InputCondition, RetrievalContract
 from experiments.graph_conditioned_pi05.graph_retriever import GraphFact, HDF5GraphRetriever
+from experiments.graph_conditioned_pi05.graph_replanning import Evidence
 from experiments.graph_conditioned_pi05.graph_serializer import (
     NaturalLanguageGraphRenderer,
     fact_pack_item,
@@ -19,6 +20,7 @@ from experiments.graph_conditioned_pi05.graph_serializer import (
 )
 from experiments.graph_conditioned_pi05.live_adapter import (
     LiveGraphRetriever,
+    action_graph_state,
     destination_ids_from_task,
     goal_geometry_pack_item,
     keep_active_gripper_closed,
@@ -254,9 +256,9 @@ def _live_inputs(root):
     catalog = [
         {"object_id": 10, "name": "target", "is_target": True},
         {"object_id": 20, "name": "box", "is_target": False},
-        {"object_id": -1, "name": "robot", "is_target": False},
-        {"object_id": -2, "name": "left", "is_target": False},
-        {"object_id": -3, "name": "right", "is_target": False},
+        {"object_id": -1, "name": "robot", "is_target": False, "is_robot": True},
+        {"object_id": -2, "name": "left", "is_target": False, "is_robot": True},
+        {"object_id": -3, "name": "right", "is_target": False, "is_robot": True},
     ]
     state = {}
     for name, dataset in root["benchmark_support/relation_state"].items():
@@ -288,6 +290,43 @@ def _live_inputs(root):
         "has_aabb": np.array([True, True, False, False, False]),
     }
     return catalog, state, object_state
+
+
+def test_action_graph_state_extracts_nontarget_robot_collision(tmp_path):
+    class Task:
+        def __init__(self, catalog):
+            self.catalog = catalog
+
+        def get_instruction(self):
+            return "put target in box"
+
+        def get_role_names(self):
+            return {"destination_id": 20}
+
+        def _get_benchmark_object_catalog(self):
+            return self.catalog
+
+    with _graph_file(tmp_path / "graph.hdf5") as root:
+        catalog, relation_state, object_state = _live_inputs(root)
+    collision = np.zeros((5, 5), dtype=bool)
+    collision[2, 1] = collision[1, 2] = True
+    relation_state["robot_collision_with"] = collision
+    relation_state["contact_semantics_valid"] = np.ones_like(collision)
+    relation_state["held_by"] = np.zeros((5, 2), dtype=bool)
+    relation_state["held_by_valid"] = np.ones((5, 2), dtype=bool)
+    relation_state["in"] = np.zeros((5, 5), dtype=bool)
+    relation_state["containment_valid"] = np.ones((5, 5), dtype=bool)
+    observation = {
+        "benchmark_support": {
+            "relation_state": relation_state,
+            "object_state": object_state,
+        }
+    }
+    graph_state = action_graph_state(
+        Task(catalog), observation, RetrievalContract()
+    )
+    assert graph_state.robot_collision is Evidence.TRUE
+    assert graph_state.collision_objects == ("box",)
 
 
 def test_live_retrieval_matches_hdf5(tmp_path):
@@ -331,7 +370,7 @@ def test_prepare_instruction_preserves_visual_only_and_fits_graph(tmp_path):
             ]
             return {
                 "instruction": payload["instruction"] + (
-                    "\n" + goal_texts[0] if goal_texts else ""
+                    "\n" + "\n".join(goal_texts) if goal_texts else ""
                 ),
                 "selected_node_count": 0,
                 "selected_fact_count": len(goal_texts),
@@ -368,6 +407,23 @@ def test_prepare_instruction_preserves_visual_only_and_fits_graph(tmp_path):
     # Grasp is call-equivalent to visual-only: no tokenizer/packer RPC and no
     # graph text, while the graph-aware controller still observes every frame.
     assert model.calls == []
+
+    collision_prompt = prepare_instruction(
+        task,
+        model,
+        observation,
+        InputCondition.VISUAL_RETRIEVED_GRAPH,
+        RetrievalContract(),
+        collision_objects=("yellow cup",),
+    )
+    assert collision_prompt.instruction == (
+        "put target in box\n"
+        "Avoid the yellow cup and continue the task."
+    )
+    assert collision_prompt.prompt_phase == "grasp"
+    assert collision_prompt.selected_fact_count == 1
+    assert len(model.calls) == 1
+    model.calls.clear()
 
     held = np.zeros((5, 2), dtype=bool)
     held[0, 0] = True
@@ -585,11 +641,13 @@ def main():
     with TemporaryDirectory() as directory:
         test_live_retrieval_matches_hdf5(Path(directory))
     with TemporaryDirectory() as directory:
+        test_action_graph_state_extracts_nontarget_robot_collision(Path(directory))
+    with TemporaryDirectory() as directory:
         test_prepare_instruction_preserves_visual_only_and_fits_graph(Path(directory))
     test_transport_gripper_latch_changes_only_the_active_channel()
     with TemporaryDirectory() as directory:
         test_alignment_mismatch_fails(Path(directory))
-    print("17 graph-context tests passed")
+    print("18 graph-context tests passed")
 
 
 if __name__ == "__main__":
