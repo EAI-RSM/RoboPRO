@@ -123,12 +123,6 @@ class put_phone_on_holder(Office_base_task):
         # self.move(self.move_by_displacement(arm_tag=arm_tag, z=-0.4))
 
 
-        # self.info["info"] = {
-        #     "{A}": f"077_phone/base{self.phone_id}",
-        #     "{B}": f"078_phonestand/base{self.stand_id}",
-        #     "{a}": str(arm_tag),
-        # }
-        # return self.info
 
     def check_success(self):
         end_pose_actual = np.array(self.target_obj.get_pose().p)
