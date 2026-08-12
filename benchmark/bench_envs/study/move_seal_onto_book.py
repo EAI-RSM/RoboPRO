@@ -24,7 +24,7 @@ class move_seal_onto_book(Study_base_task):
 
     def setup_demo(self, is_test=False, **kwargs):
         kwargs["collision_cache"] = {"mesh": 100, "obb": 3}
-        kwargs["include_collison"] = False
+        kwargs["include_collision"] = False
         super()._init_task_env_(**kwargs)
 
     def load_actors(self):
