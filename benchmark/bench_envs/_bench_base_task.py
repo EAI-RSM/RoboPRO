@@ -92,6 +92,10 @@ class Bench_base_task(Base_Task):
     def _init_task_env_(self, table_xy_bias=[0, 0], table_height_bias=0, **kwags):
         pass
 
+    def setup_demo(self, is_test=False, **kwargs):
+        kwargs["collision_cache"] = {"mesh": 100, "obb": 3}
+        self._init_task_env_(**kwargs)
+
 
     def setup_scene(self, **kwargs):
         """
