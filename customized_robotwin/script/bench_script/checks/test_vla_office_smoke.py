@@ -165,6 +165,9 @@ class _TaskActor:
 
 
 class _TaskRobot:
+    def update_world(self, collision_dict):
+        self.collision_dict = collision_dict
+
     def get_left_ee_pose(self):
         return [-0.4, 0.0, 0.9, 1.0, 0.0, 0.0, 0.0]
 
@@ -196,6 +199,8 @@ def _task_api_env(root):
             {"actor": destination, "collision_path": str(root / "assets/objects/019_coaster/collision/base0.glb")},
             {"actor": obstacle, "collision_path": str(root / "assets/objects/block/collision/base3.glb"), "is_obstacle": True},
         ],
+        cuboid_collision_list=[],
+        seed=0,
     )
 
 
@@ -209,6 +214,10 @@ def test_live_task_roles_and_waypoints() -> None:
             roles = resolve_task_roles(env, "put_cup_on_coaster")
             first = canonical_waypoints(env, "put_cup_on_coaster")
             second = canonical_waypoints(env, "put_cup_on_coaster")
+            Bench_base_task.update_world(env, exclude_obstacles=True)
+            excluded_count = env._last_curobo_collision_world_entry_count
+            Bench_base_task.update_world(env, exclude_obstacles=False)
+            included_count = env._last_curobo_collision_world_entry_count
         finally:
             if previous is None:
                 os.environ.pop("BENCH_ROOT", None)
@@ -219,6 +228,9 @@ def test_live_task_roles_and_waypoints() -> None:
     assert [role.name for role in roles.obstacles] == ["block"]
     assert first == second
     assert first[0].arm == "right"
+    assert excluded_count == 2
+    assert included_count == 3
+    assert len(env.robot.collision_dict["mesh"]) == included_count
 
 
 def test_policy_camera_config() -> None:

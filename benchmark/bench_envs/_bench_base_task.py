@@ -2087,6 +2087,9 @@ class Bench_base_task(Base_Task):
                     "pose": pose,
                 }
         self.robot.update_world(collision_dict)
+        self._last_curobo_collision_world_entry_count = sum(
+            len(entries) for entries in collision_dict.values()
+        )
     
     def collision_dict_from_convex_obj_dir(
         self,
