@@ -216,6 +216,7 @@ def collect_rollouts(TASK_ENV, args, model, usr_args, collect_num, instruction_t
         print(f"\033[33m[resume] {ep_idx} episodes exist; seeds continue from {seed}\033[0m")
 
     n_succ = n_fail = 0
+    _consec_fail = 0                      # fixed-seed: abort instead of drifting
     while ep_idx < collect_num:
         # ── expert solvability check (same role as the collector's seed search) ─
         if not fixed_seed:
@@ -355,8 +356,16 @@ def collect_rollouts(TASK_ENV, args, model, usr_args, collect_num, instruction_t
             TASK_ENV.remove_data_cache()
 
             if not has_frames:
-                print(f"\033[93m[rollout] episode {ep_idx}: no frames — retry next seed\033[0m")
-                seed += 1
+                print(f"\033[93m[rollout] episode {ep_idx}: no frames — retry\033[0m")
+                # COLLECT_FIXED_SEED contract: the seed NEVER moves. Drifting here
+                # walked seeds out of their allotted blocks (observed 80000->81868)
+                # and can silently collide with a neighbouring density's range.
+                if not fixed_seed:
+                    seed += 1
+                else:
+                    _consec_fail += 1
+                    if _consec_fail >= 3:
+                        raise RuntimeError(f"fixed seed {seed}: 3 consecutive failures — aborting")
                 continue
 
             hdf5_path = str(run_dir / "data" / f"episode{ep_idx}.hdf5")
@@ -392,10 +401,18 @@ def collect_rollouts(TASK_ENV, args, model, usr_args, collect_num, instruction_t
             print(f"\033[92m[rollout] episode {ep_idx} saved (success={success})\033[0m  "
                   f"SR {n_succ}/{ep_idx + 1}")
             ep_idx += 1
-            seed += 1
+            _consec_fail = 0
+            if not fixed_seed:
+                seed += 1            # fixed mode: same scene again (N rollouts per seed)
         except UnStableError:
             _finish_cmd_video(locals().get('_cmd_video'))
-            TASK_ENV.close_env(); seed += 1
+            TASK_ENV.close_env()
+            if not fixed_seed:
+                seed += 1
+            else:
+                _consec_fail += 1
+                if _consec_fail >= 3:
+                    raise RuntimeError(f"fixed seed {seed}: 3 consecutive UnStable failures — aborting")
         except (BrokenPipeError, ConnectionError) as e:
             # dead policy server — retrying seeds is pointless; abort loudly
             print(f"\033[91m[rollout] model server connection lost: {e} — aborting\033[0m")
@@ -414,7 +431,12 @@ def collect_rollouts(TASK_ENV, args, model, usr_args, collect_num, instruction_t
                     fn()
                 except Exception:
                     pass
-            seed += 1
+            if not fixed_seed:
+                seed += 1
+            else:
+                _consec_fail += 1
+                if _consec_fail >= 3:
+                    raise RuntimeError(f"fixed seed {seed}: 3 consecutive failures — aborting")
 
     # end-of-run language instructions, same as the CuRobo collector
     os.system(f"cd description && bash gen_episode_instructions.sh "
