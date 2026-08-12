@@ -5,49 +5,58 @@ metadata:
   type: project
 ---
 
-**This is the only memory allowed to hold volatile state.** Last rewritten 2026-08-11.
+**This is the only memory allowed to hold volatile state.** Last rewritten 2026-08-12.
 
 ## Branch and worktree
 
-Branch: `peng-dev-new`, created from freshly fetched `origin/dev@64840ce` and tracking
-`origin/peng-dev-new`. The source line remains backed up at `origin/backup/peng-training-branch`;
-tag `pre-rehaul-2026-08-11` remains on `e3a09ce`.
+Branch: `peng-dev-new`, tracking `origin/peng-dev-new`. S1, S2, and S3 are complete. S4's CPU
+implementation is complete and committed locally; the branch is four commits ahead of its remote:
 
-S1, S2, and S3 are complete. S3's review boundaries are:
+- `14be2e3` — expose the exact collision-world entry count after `robot.update_world` succeeds;
+- `9b60bbd` — explicitly include clutter on the ring path and record default/full counts per rollout;
+- `ff82142` — guard the gitignored vendored CuRobo patch with patch-specific sentinels, including in
+  `run_approach_mode_ab.sh`;
+- current S4 handoff commit — add the self-contained built-scene geometry validation and record the
+  pending GPU gate.
 
-- `5b806cc` — pytest dependency and lockfile, cherry-picked atomically;
-- `73f167d` — 106 retained exclusive files, byte-identical to the source at the copy gate;
-- `35ef06a` — five shared `bench_script/` files resolved explicitly;
-- `f5271af` — research hooks reapplied onto dev-owned base classes;
-- `cf4883b` — yaw-aware edge-to-edge occluder geometry and reviewed ring baseline;
-- final S3 record/import-gate fixes, followed by push to the tracking branch.
+The user's approved planning edits remain deliberately uncommitted and were not swept into the S4
+implementation commits: modified `plans/REHAUL_PLAN.md` and untracked
+`plans/S4_MAKE_IT_RUN_PLAN.md`. The source line remains backed up at
+`origin/backup/peng-training-branch`; tag `pre-rehaul-2026-08-11` remains on `e3a09ce`.
 
-`swept_volume_3d.py` was deliberately not ported. Generated `graphify-out/` trees are ignored and
-were refreshed after the code changes.
+## S4 CPU result
 
-## S3 decisions and verification
-
-- Dev's `_position_only_pose_cost_metric`, collision metrics, countertop-first eval camera, raw
-  `uint16` segmentation, and existing duplicate-clutter behavior were preserved.
-- The research `build_planner`/TOPP bypass, `seed_traj` and effort reporting,
-  `pi05_robopro_top_cam_jax`, eval checkpoint selection, step limit, collision-key typo shim,
-  `setup_demo`, and opt-in `step_hook` were carried narrowly.
-- Dev already had the `OCC_DISTANCE_CM` Makefile rename. The refactored analyzer now accepts that
-  centimetre range and converts it to its metre-based gap spec; no unrelated Makefile hunk moved.
-- `test_ring_config` deliberately changed from center-radius baselines to true footprint gaps. In
-  the reviewed fixture, a requested 0.10 m gap now uses a 0.1713740509 m center distance and the
-  measured rotated-rectangle distance remains 0.10 m.
-- The final import sweep exposed two small port gaps: `subgoal_reachability_map.py` referenced a
-  removed video helper, and `diag_kitchen_curobo.py` imported its CUDA environment before argparse.
-  Both were repaired narrowly; no GPU diagnostic or rollout was executed.
+- `OccluderTask.play_once` now calls `update_world(exclude_obstacles=False)`. It snapshots both the
+  setup-default world count and the explicit-full count, prints them, and
+  `analyze_occluder_visibility.py` writes both into each rollout record. The fields are cleared
+  before each reused-env rollout so an early failure cannot inherit the prior episode.
+- The exact diagnostic is `sum(len(entries) for entries in collision_dict.values())`; it is written
+  only after the robot accepts the update. Counting `collision_list` would be wrong because one
+  directory entry can expand to multiple CuRobo meshes.
+- `checks.test_curobo_patch` checks four RoboPRO-specific sentinels. A generic `seed_traj` grep is a
+  false guard because pristine CuRobo already has unrelated locals by that name. The working repair
+  command is printed with an explicit repository-root `cd`.
+- The Step 3 audit found no other bare ring-path `update_world`, no collision-stream double start,
+  and no missing aggregate-metric initialization. `start_metric_streams` has no callers, but those
+  JSONL streams are optional and existing records consume aggregate `get_collision_metrics()`.
+- The S4 plan's RGB premise was wrong: visibility masks use
+  `Base_Task.measure_target_visibility -> get_segmentation_raw(level="actor")`; RGB is only the
+  overlay. The dedicated raw path preserves actor IDs as `int32`, so no CPU-side compatibility
+  defect was found. The GPU scene check must still confirm a real nonempty target segmentation.
 
 Final CPU gates from `customized_robotwin/script/bench_script/`:
 
-- `../../../.venv/bin/python -m pytest -q`: **49 passed, 1 skipped** (50 items; only
-  `checks/smoke_test_seed_2a.py::test_seed_2a_smoke` is skipped; one existing Sapien warning).
-- Every top-level `*.py --help`: pass, including the CUDA-only diagnostic without initializing CUDA.
-- `python -m checks.test_ring_config`: pass through the legacy entry point.
-- `lib/task -> top-level script dependencies`: 0.
+- `../../../.venv/bin/python -m pytest -q`: **50 passed, 1 skipped** (51 items; only the GPU smoke
+  is skipped; one existing Sapien warning).
+- `../../../.venv/bin/python -m checks.test_curobo_patch`: pass.
+- `checks/test_vla_office_smoke.py`: **8 passed**, including excluded=2 versus full=3 world-entry
+  instrumentation on a fake scene.
+- `validate_s4_scene_geometry.py --help` and `py_compile`: pass. The user-run live scene measured a
+  requested 0.100 m gap as 0.109905 m (error 0.009905 m, within the 0.010 m gate), with 0.125012 m
+  target/occluder z overlap and a nonempty 207-pixel raw target-segmentation mask.
+  The first user attempt failed before scene construction because the standalone validator omitted
+  `benchmark/` from `sys.path` and therefore could not resolve `bench_envs.office.put_mouse_on_pad`;
+  the handoff script now installs that package root and checks resolution without initializing CUDA.
 
 ## Preserved research state
 
@@ -59,10 +68,20 @@ rewritten; untracked results total about 13 GB.
 
 ## Unverified and next action
 
-S3 proves imports and CPU behavior only. It does **not** prove scene construction, the physical
-edge-to-edge spacing, CuRobo planning, or an expert/policy rollout. `checks.smoke_test_seed_2a` and
-the actual `diag_kitchen_curobo` diagnostic remain unrun because they require CUDA.
+S4 is **not complete**. Two of three GPU gates pass:
 
-Next: execute S4. Its first runtime risk is dev's `update_world(exclude_obstacles=None)` resolution;
-the ring task must explicitly retain the intended obstacle inclusion. S4 needs the user-run GPU
-smoke/rollout and owns any runtime reconciliation. S5 remains parallelisable.
+1. built-scene geometry and raw segmentation pass at
+   `s4_make_it_run/geometry/20260812-121536/`;
+2. `peng-dev-new`'s five matched standard seeds completed 3/5, with failures at `grasp` and
+   `placement:pre_place_descent`; every rollout recorded full CuRobo world 10 > default 1;
+3. the cluttered ring smoke completed successfully at
+   `occluder_visibility/s4_ring/20260812-135100/`, wrote records/video/HDF5, recorded empty
+   `rollout_seed_stats` correctly for direct mode, had zero physics collisions, and proved treatment
+   delivery with full CuRobo world 11 > default 2.
+
+The `peng-training-branch` comparison cell did **not** run: its temporary worktree lacked the
+gitignored `benchmark/assets`, so import failed before scene construction. The worktree survives at
+`/tmp/robopro-s4.yUGVZp/peng-training`; its shared CuRobo and benchmark-assets links are now ready.
+Only that five-seed standard/direct cell must be rerun. Then compare its n/success/failure families
+against `peng-dev-new`, mark S4 complete, commit, refresh graphify, and push. S5 remains
+parallelisable but has not started.

@@ -82,12 +82,14 @@ drawer/shelf/file-holder tasks must keep it True.
    `load_actors`, so no stale accumulation.
 2. **`update_world(exclude_obstacles=True)` strips every entry flagged `is_obstacle=True`** — that
    is ALL procedural clutter. `bench_demo_office_clean.yml` sets `enable_collision_metrics: true`
-   and `build_cfg` never overrides it, so setup silently ran with clutter absent from curobo's
-   world. Symptom: rollouts knock down clutter. **Fix: call `self.update_world()` (full world) at
-   the top of `play_once`.** Keep `enable_collision_metrics=true` — physics `check_collisions()` is
-   independent of curobo's world and IS the clutter-avoidance measurement. Reusable gotcha for ANY
-   script reusing this harness with clutter. Consequence: cluttered scenes now legitimately fail
-   to plan more often, because curobo actually sees the obstacles.
+   and dev's `exclude_obstacles=None` default resolves through that flag, so both an explicit true
+   and a bare `update_world()` hide clutter. Symptom: rollouts knock down clutter. **Fix: call
+   `self.update_world(exclude_obstacles=False)` at the top of the ring `play_once`.** Keep
+   `enable_collision_metrics=true` — physics `check_collisions()` is independent of curobo's world
+   and IS the clutter-avoidance measurement. S4 records the setup-default and explicit-full world
+   entry counts; on a clutter-density > 0 smoke, full must exceed default. Merely nonzero proves
+   nothing because the table and curated occluder are present in both. Consequence: cluttered scenes
+   now legitimately fail to plan more often, because curobo actually sees the obstacles.
 3. `env.get_collision_metrics()` → `total_collision_count`,
    `robot_to_static_object` / `target_to_static_object` counts + hit-object NAMES. This is how you
    disambiguate a model-vs-physics gap: `robot_to_static_object > 0` = a robot LINK hit clutter
