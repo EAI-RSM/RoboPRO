@@ -1,12 +1,9 @@
 from bench_envs.kitchens._kitchens_base_task import KitchenS_base_task
 from envs.utils import *
-import sapien
 import math
 import os
 import transforms3d as t3d
 from envs._GLOBAL_CONFIGS import *
-from copy import deepcopy
-import glob
 
 # Microwave door counts as closed only within 3 degrees of fully shut.
 DOOR_CLOSED_RAD = math.radians(3.0)

@@ -3,12 +3,9 @@ import os
 import yaml
 
 from bench_envs.kitchenl._kitchen_base_large import Kitchen_base_large
-from bench_envs.utils.scene_gen_utils import get_actor_boundingbox_urdf, place_actor, print_c
+from bench_envs.utils.scene_gen_utils import place_actor
 from envs.utils import *
-import math
 import numpy as np
-import sapien
-import transforms3d as t3d
 
 
 class put_bottle_in_fridge(Kitchen_base_large):

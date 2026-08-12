@@ -1,5 +1,5 @@
 from bench_envs.kitchenl._kitchen_base_large import Kitchen_base_large
-from bench_envs.utils.scene_gen_utils import get_random_place_pose, get_actor_boundingbox, print_c
+from bench_envs.utils.scene_gen_utils import get_random_place_pose, get_actor_boundingbox
 from envs.utils import *
 import math
 import numpy as np

@@ -2,11 +2,7 @@
 # from envs._base_task import Base_Task
 from bench_envs.office._office_base_task import Office_base_task
 from envs.utils import *
-import sapien
-import math
 from envs._GLOBAL_CONFIGS import *
-from copy import deepcopy
-import glob
 
 
 class put_phone_on_holder(Office_base_task):

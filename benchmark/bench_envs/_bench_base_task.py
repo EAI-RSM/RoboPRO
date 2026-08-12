@@ -1,16 +1,12 @@
 import os
 import re
 import sapien.core as sapien
-from sapien.render import clear_cache as sapien_clear_cache
 from sapien.utils.viewer import Viewer
 import numpy as np
-import gymnasium as gym
-import pdb
 import toppra as ta
 import json
 import transforms3d as t3d
-from collections import OrderedDict
-import torch, random
+import random
 
 from envs.utils import *
 from bench_envs.utils import *
@@ -21,10 +17,8 @@ from envs.utils.actor_utils import Actor, ArticulationActor
 from envs._base_task import Base_Task
 
 from copy import deepcopy
-import subprocess
 from pathlib import Path
 import trimesh
-import imageio
 import glob
 
 

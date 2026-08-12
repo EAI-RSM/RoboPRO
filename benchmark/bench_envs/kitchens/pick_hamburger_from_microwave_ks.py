@@ -6,8 +6,6 @@ import os
 import numpy as np
 import transforms3d as t3d
 from envs._GLOBAL_CONFIGS import *
-from copy import deepcopy
-import glob
 
 
 class pick_hamburger_from_microwave_ks(KitchenS_base_task):
