@@ -19,7 +19,7 @@ from .contract import (
     RetrievalContract,
     stable_aliases,
 )
-from .graph_serializer import PackedItem
+from .graph_serializer import PackedItem, fact_pack_item, node_pack_item
 from .graph_replanning import ActionGraphState, Evidence, TaskGoal
 
 
@@ -897,10 +897,28 @@ def prepare_instruction(
     prompt_phase = previous_phase
     if not guidance_supported:
         prompt_phase = "grasp"
-    # During grasping, preserve the exact fine-tuning-style task instruction.
-    # Once valid held_by evidence appears, switch monotonically to one compact,
-    # categorical placement cue. The caller holds this prompt for the complete
-    # action chunk, so geometry noise cannot change language mid-plan.
+    if prompt_phase == "grasp":
+        # Preserve the checkpoint's original grasp control path. Graph text
+        # caused a large prompt distribution shift without adding a grasp
+        # point or arm-selection instruction. Retrieval remains available to
+        # the controller, but prompt packing begins only after grasp_acquired.
+        return PreparedInstruction(
+            instruction=base_instruction,
+            retrieved_node_count=0,
+            selected_node_count=0,
+            dropped_node_count=0,
+            retrieved_fact_count=0,
+            selected_fact_count=0,
+            dropped_fact_count=0,
+            graph_token_count=0,
+            full_prompt_token_count_estimate=0,
+            destination_seed_available=bool(destination_ids),
+            prompt_phase=prompt_phase,
+        )
+    # Keep the post-grasp phase instruction compact, then let the shared
+    # dependency-aware packer select valid one-hop nodes and relations under
+    # the real tokenizer budget. The caller holds the resulting prompt for the
+    # complete action chunk, so frame noise cannot change language mid-chunk.
     guidance_items = []
     if prompt_phase in {"placement", "release"}:
         destination_label = retriever._label_by_id[destination_ids[0]]
@@ -921,26 +939,14 @@ def prepare_instruction(
                 mandatory=True,
             )
         )
-    if not guidance_items:
-        # Keep the grasp control path call-equivalent to visual-only. In
-        # particular, do not make a tokenizer RPC or rewrite an unchanged
-        # prompt before every action chunk.
-        return PreparedInstruction(
-            instruction=base_instruction,
-            retrieved_node_count=0,
-            selected_node_count=0,
-            dropped_node_count=0,
-            retrieved_fact_count=0,
-            selected_fact_count=0,
-            dropped_fact_count=0,
-            graph_token_count=0,
-            full_prompt_token_count_estimate=0,
-            destination_seed_available=bool(destination_ids),
-            prompt_phase=prompt_phase,
-        )
     # Each item carries its own rank so the server-side packer (real
     # tokenizer, same knapsack) can reproduce the exact same
     # priority-maximizing selection it would make offline.
+    packed_candidates = (
+        [node_pack_item(node) for node in nodes]
+        + guidance_items
+        + [fact_pack_item(fact) for fact in facts]
+    )
     items = [
         {
             "text": item.text,
@@ -950,7 +956,7 @@ def prepare_instruction(
             "requires": list(item.requires),
             "mandatory": item.mandatory,
         }
-        for item in guidance_items
+        for item in packed_candidates
     ]
     response = model.fit_graph_prompt(
         {
@@ -964,12 +970,12 @@ def prepare_instruction(
     selected_fact_count = int(response["selected_fact_count"])
     return PreparedInstruction(
         instruction=str(response["instruction"]),
-        retrieved_node_count=0,
+        retrieved_node_count=len(nodes),
         selected_node_count=selected_node_count,
-        dropped_node_count=0,
-        retrieved_fact_count=len(guidance_items),
+        dropped_node_count=len(nodes) - selected_node_count,
+        retrieved_fact_count=len(facts) + len(guidance_items),
         selected_fact_count=selected_fact_count,
-        dropped_fact_count=len(guidance_items) - selected_fact_count,
+        dropped_fact_count=len(facts) + len(guidance_items) - selected_fact_count,
         graph_token_count=int(response["graph_token_count"]),
         full_prompt_token_count_estimate=int(response["full_prompt_token_count_estimate"]),
         destination_seed_available=bool(destination_ids),

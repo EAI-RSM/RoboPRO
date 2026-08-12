@@ -8,7 +8,11 @@ repository_root = Path(__file__).resolve().parents[3]
 if str(repository_root) not in sys.path:
     sys.path.insert(0, str(repository_root))
 
-from experiments.graph_conditioned_pi05.contract import InputCondition, RetrievalContract
+from experiments.graph_conditioned_pi05.contract import (
+    GRAPH_TREATMENT_VERSION,
+    InputCondition,
+    RetrievalContract,
+)
 from experiments.graph_conditioned_pi05.live_adapter import (
     action_graph_state,
     keep_active_gripper_closed,
@@ -67,6 +71,7 @@ def _controller(task_env):
 
 
 def _prepare_graph_prompt(task_env, model, observation, controller):
+    task_env._graph_treatment_version = GRAPH_TREATMENT_VERSION
     prepared = prepare_instruction(
         task_env, model, observation, _GRAPH_CONDITION, _GRAPH_CONTRACT,
         previous_phase=controller.phase.value,
@@ -84,6 +89,9 @@ def _prepare_graph_prompt(task_env, model, observation, controller):
         task_env._graph_conditioning_stats = stats
     stats.append(
         {
+            "retrieved_nodes": prepared.retrieved_node_count,
+            "selected_nodes": prepared.selected_node_count,
+            "dropped_nodes": prepared.dropped_node_count,
             "retrieved": prepared.retrieved_fact_count,
             "selected": prepared.selected_fact_count,
             "dropped": prepared.dropped_fact_count,
@@ -92,6 +100,7 @@ def _prepare_graph_prompt(task_env, model, observation, controller):
             "destination_seed_available": prepared.destination_seed_available,
             "prompt_phase": controller.phase.value,
             "prompt_updated": prompt_updated,
+            "prompt": prepared.instruction,
         }
     )
 

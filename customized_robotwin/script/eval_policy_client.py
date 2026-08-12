@@ -650,6 +650,7 @@ def eval_policy(task_name,
         TASK_ENV._graph_conditioning_stats = []
         TASK_ENV._graph_delta_events = []
         TASK_ENV._graph_controller = None
+        TASK_ENV._graph_treatment_version = None
         TASK_ENV._graph_prompt_phase = "grasp"
         TASK_ENV._graph_active_prompt = None
         TASK_ENV._graph_held_arm = None
@@ -678,10 +679,22 @@ def eval_policy(task_name,
                 "seed": now_seed,
                 "success": bool(succ),
                 "graph_input_condition": args.get("graph_input_condition", "visual_only"),
+                "graph_treatment_version": getattr(
+                    TASK_ENV, "_graph_treatment_version", None
+                ),
             }
             if graph_stats:
                 record["graph_conditioning"] = {
                     "inference_count": len(graph_stats),
+                    "mean_retrieved_nodes": float(np.mean([
+                        item["retrieved_nodes"] for item in graph_stats
+                    ])),
+                    "mean_selected_nodes": float(np.mean([
+                        item["selected_nodes"] for item in graph_stats
+                    ])),
+                    "mean_dropped_nodes": float(np.mean([
+                        item["dropped_nodes"] for item in graph_stats
+                    ])),
                     "mean_retrieved_facts": float(np.mean([
                         item["retrieved"] for item in graph_stats
                     ])),
@@ -706,6 +719,7 @@ def eval_policy(task_name,
                     "prompt_update_count": int(sum(
                         item["prompt_updated"] for item in graph_stats
                     )),
+                    "prompts": [item["prompt"] for item in graph_stats],
                     "chunk_interrupt_count": int(TASK_ENV._graph_chunk_interrupts),
                     "delta_events": list(TASK_ENV._graph_delta_events),
                 }

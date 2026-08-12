@@ -9,6 +9,7 @@ from experiments.graph_conditioned_pi05.contract import GraphNode, InputConditio
 from experiments.graph_conditioned_pi05.graph_retriever import GraphFact, HDF5GraphRetriever
 from experiments.graph_conditioned_pi05.graph_serializer import (
     NaturalLanguageGraphRenderer,
+    PackedItem,
     fact_pack_item,
     format_fact,
     format_node,
@@ -325,13 +326,28 @@ def test_prepare_instruction_preserves_visual_only_and_fits_graph(tmp_path):
 
         def fit_graph_prompt(self, payload):
             self.calls.append(payload)
-            goal_texts = [item["text"] for item in payload["items"] if item["section"] == "goal"]
+            candidates = [
+                PackedItem(
+                    text=item["text"],
+                    rank=item["rank"],
+                    section=item["section"],
+                    provides=item.get("provides", ""),
+                    requires=tuple(item.get("requires", ())),
+                    mandatory=item.get("mandatory", False),
+                )
+                for item in payload["items"]
+            ]
+            packed = pack_items(candidates, payload["graph_token_budget"])
             return {
-                "instruction": payload["instruction"] + ("\n" + goal_texts[0] if goal_texts else ""),
-                "selected_node_count": 0,
-                "selected_fact_count": len(goal_texts),
-                "graph_token_count": 9 if goal_texts else 0,
-                "full_prompt_token_count_estimate": 40 if goal_texts else 20,
+                "instruction": payload["instruction"] + "\n" + packed.text,
+                "selected_node_count": sum(
+                    item.section == "node" for item in packed.selected
+                ),
+                "selected_fact_count": sum(
+                    item.section in {"goal", "fact"} for item in packed.selected
+                ),
+                "graph_token_count": packed.token_count,
+                "full_prompt_token_count_estimate": 20 + packed.token_count,
             }
 
     with _graph_file(tmp_path / "graph.hdf5") as root:
@@ -355,11 +371,13 @@ def test_prepare_instruction_preserves_visual_only_and_fits_graph(tmp_path):
     )
     assert grasp.instruction == "put target in box"
     assert grasp.prompt_phase == "grasp"
+    assert grasp.retrieved_fact_count == 0
     assert grasp.selected_fact_count == 0
     assert grasp.selected_node_count == 0
+    assert grasp.graph_token_count == 0
     assert grasp.destination_seed_available
-    # Graph mode is call-equivalent to visual-only before a grasp: no
-    # tokenizer/packing RPC is made for an unchanged base instruction.
+    # Grasp is call-equivalent to visual-only: no tokenizer/packer RPC and no
+    # graph text, while the graph-aware controller still observes every frame.
     assert model.calls == []
 
     held = np.zeros((5, 2), dtype=bool)
@@ -371,20 +389,19 @@ def test_prepare_instruction_preserves_visual_only_and_fits_graph(tmp_path):
         RetrievalContract(), previous_phase="placement",
     )
     assert placement.prompt_phase == "placement"
-    assert placement.selected_fact_count == 1
-    assert placement.instruction == (
-        "put target in box\n"
-        "Move the held object forward and left into the box."
-    )
+    assert placement.selected_fact_count > 1
+    assert "Move the held object forward and left into the box." in placement.instruction
+    assert "T1 is held by L." in placement.instruction
     assert len(model.calls) == 1
     held_event = live_task_state(task, observation, RetrievalContract())
     assert held_event.target_held and held_event.held_arm == "left"
     assert not held_event.target_inside_destination
     assert not held_event.release_ready
     items = model.calls[-1]["items"]
-    assert len(items) == 1
-    assert items[0]["section"] == "goal" and items[0]["mandatory"]
-    assert not any(token in items[0]["text"] for token in ("T1", "D1", "0."))
+    assert {item["section"] for item in items} == {"node", "goal", "fact"}
+    goal_item = next(item for item in items if item["section"] == "goal")
+    assert goal_item["mandatory"]
+    assert not any(token in goal_item["text"] for token in ("T1", "D1", "0."))
 
     # A phase remains stable at a chunk boundary; the per-action controller
     # owns event-driven transitions and grasp-loss recovery.
@@ -410,9 +427,8 @@ def test_prepare_instruction_preserves_visual_only_and_fits_graph(tmp_path):
         RetrievalContract(), previous_phase="release",
     )
     assert release.prompt_phase == "release"
-    assert release.instruction == (
-        "put target in box\nRelease the held object in the box."
-    )
+    assert "Release the held object in the box." in release.instruction
+    assert "T1 is inside D1." in release.instruction
 
     # Held above the container rim: not contained yet, but close enough that
     # gravity can finish insertion after a controlled release.
