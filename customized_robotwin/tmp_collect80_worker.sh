@@ -16,6 +16,13 @@ source set_env.sh >/dev/null
 export ROBOTWIN_BENCH_TASK=bench
 export ROBOPRO_RT_DENOISER=${ROBOPRO_RT_DENOISER:-optix}
 OUT=${OUT:?}; mkdir -p "$OUT"
+# some cluster nodes have no system ffmpeg (ws-07/08); the client's cmd-video
+# Popen needs one on PATH -- fall back to the imageio-bundled binary.
+command -v ffmpeg >/dev/null 2>&1 || {
+  FF=$(python -c "import imageio_ffmpeg;print(imageio_ffmpeg.get_ffmpeg_exe())" 2>/dev/null)
+  [ -n "$FF" ] && { mkdir -p "$OUT/ffbin_$(hostname)"; ln -sf "$FF" "$OUT/ffbin_$(hostname)/ffmpeg"; export PATH="$OUT/ffbin_$(hostname):$PATH"; }
+}
+command -v ffmpeg >/dev/null 2>&1 || { echo "[FATAL] no ffmpeg and no imageio fallback"; exit 1; }
 SPEC=${SPEC:?}
 SERVER_GPU=${SERVER_GPU:-0}; SIM_GPU=${SIM_GPU:-1}; XLA_FRAC=${XLA_FRAC:-0.55}
 MAN="$OUT/manifest_$(hostname).json"
