@@ -392,8 +392,13 @@ def collect_rollouts(TASK_ENV, args, model, usr_args, collect_num, instruction_t
                 try:
                     cd.finalize_grounding(args["save_path"], ep_idx,
                                           obj_pad=args.get("table_obj_pad"))
-                except Exception as _me:  # noqa: BLE001
-                    print(f"\033[93m[rollout] grounding failed (episode {ep_idx}): {_me}\033[0m")
+                except (Exception, SystemExit) as _me:  # noqa: BLE001
+                    # masking_resolve raises SystemExit when the hdf5 lacks an
+                    # actor_bbox group (bench configs don't record it); a bare
+                    # `except Exception` let that kill the process between the
+                    # episode save and the seed.txt write. Same fix as the GB10
+                    # collection tree that produced the HF training data.
+                    print(f"\033[93m[rollout] grounding skipped (episode {ep_idx}): {_me}\033[0m")
             with open(seed_file, "a", encoding="utf-8") as f:
                 f.write(f"{seed} ")
 
