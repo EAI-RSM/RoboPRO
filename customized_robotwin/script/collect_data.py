@@ -416,7 +416,13 @@ def run(TASK_ENV, args):
                     continue
                 # episode kept -> derive grounding from the HDF5: masking sidecar +
                 # baked target/bin masks in the HDF5 (all frames, all cameras).
-                if finalize_grounding is not None:
+                # Grounding needs the per-frame actor_bbox group, which is only
+                # written when data_type.actor_bbox is on (default False, and only
+                # a handful of configs enable it). Without it masking_resolve
+                # raises SystemExit -- which, being a BaseException, escapes the
+                # except-Exception guards below and kills the whole run after the
+                # first episode. Skip the step instead when the flag is off.
+                if finalize_grounding is not None and (args.get("data_type") or {}).get("actor_bbox", False):
                     try:
                         finalize_grounding(args["save_path"], episode_idx,
                                            obj_pad=args.get("table_obj_pad"))

@@ -101,10 +101,10 @@ class put_milktea_on_shelf(Office_base_task):
 
     def check_success(self):
         tp = self.target_obj.get_pose().p
-        dp = self.des_obj.get_pose().p          # shelf target marker (X, Y)
+        xmin, ymin, xmax, ymax = self.office_info["shelf_lims"]
         eps = 0.02
-        eps_xy = 0.06  # NOTE(author): XY tolerance around the shelf target; was UNCHECKED. Tune to intended strictness.
+        on_shelf_xy = (xmin <= tp[0] <= xmax) and (ymin <= tp[1] <= ymax)
         return (abs(tp[2] - self.office_info["shelf_heights"][0]) < eps
-                and abs(tp[0] - dp[0]) < eps_xy and abs(tp[1] - dp[1]) < eps_xy
+                and on_shelf_xy
                 and self.robot.is_left_gripper_open()
                 and self.robot.is_right_gripper_open())
