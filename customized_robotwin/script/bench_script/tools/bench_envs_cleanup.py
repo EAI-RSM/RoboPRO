@@ -76,6 +76,11 @@ def _line_edits(text: str, edits: Iterable[tuple[int, int, str]]) -> str:
         if replacement and not replacement.endswith("\n"):
             replacement_lines[-1] += "\n"
         lines[start - 1 : end] = replacement_lines
+        if not replacement and end >= len(text.splitlines()):
+            while lines and not lines[-1].strip():
+                lines.pop()
+            if lines and not lines[-1].endswith("\n"):
+                lines[-1] += "\n"
     return "".join(lines)
 
 
