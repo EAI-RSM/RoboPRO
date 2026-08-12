@@ -36,10 +36,25 @@ class PI0:
         entries = os.listdir(specified_path)
         assets_id = entries[0]
 
+        ckpt_dir = f"policy/pi05/checkpoints/{self.train_config_name}/{self.model_name}/{self.checkpoint_id}"
+        is_pytorch_ckpt = os.path.exists(os.path.join(ckpt_dir, "model.safetensors"))
+
         config = _config.get_config(self.train_config_name)
+        # PI05_FORCE_FP32 is a JAX/XLA-only workaround: on GB10/Blackwell bf16 inference aborts in XLA
+        # (bf16->f16 lowering bug), so force float32 compute for the JAX backend. Must NOT be applied to
+        # the PyTorch backend (it runs paligemma in bf16 to match training; forcing fp32 only on the
+        # action head would be a precision mismatch that degrades actions). Keep PyTorch at native bf16.
+        # Default ON to match the training-data reference (the GB10 collection ran fp32); export
+        # PI05_FORCE_FP32=0 explicitly to opt into bf16.
+        if not is_pytorch_ckpt and os.environ.get("PI05_FORCE_FP32", "1") == "1":
+            import dataclasses as _dc
+            config = _dc.replace(config, model=_dc.replace(config.model, dtype="float32"))
+            print("[pi_model] PI05_FORCE_FP32=1 -> model compute dtype = float32")
+        elif is_pytorch_ckpt:
+            print("[pi_model] pytorch checkpoint -> native bf16 inference (PI05_FORCE_FP32 not applied)")
         self.policy = _policy_config.create_trained_policy(
             config,
-            f"policy/pi05/checkpoints/{self.train_config_name}/{self.model_name}/{self.checkpoint_id}",
+            ckpt_dir,
             robotwin_repo_id=assets_id,
             )
         print("loading model success!")
