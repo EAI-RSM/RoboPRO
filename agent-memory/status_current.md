@@ -7,51 +7,39 @@ metadata:
 
 **This is the only memory allowed to hold volatile state.** Last rewritten 2026-08-12.
 
-## Branch and worktree
+## Branch and worktrees
 
-Branch: `peng-dev-new`, tracking `origin/peng-dev-new`. S1 through S4 are complete. S4's runtime
-implementation is split into four reviewable commits before the final completion record:
+Branch: `peng-dev-new`, tracking `origin/peng-dev-new`. S1 through S5 are complete. S5 is split into
+six reviewable local commits: tool/import gate `7b86360`, T1 `1cc381f`, T4 `aa58e03`, T2 `12b55fc`,
+T3 `ba83c6a`, and T5 `d7a8609`. The source line remains backed up at
+`origin/backup/peng-training-branch`; tag `pre-rehaul-2026-08-11` remains on `e3a09ce`.
 
-- `14be2e3` — expose the exact collision-world entry count after `robot.update_world` succeeds;
-- `9b60bbd` — explicitly include clutter on the ring path and record default/full counts per rollout;
-- `ff82142` — guard the gitignored vendored CuRobo patch with patch-specific sentinels, including in
-  `run_approach_mode_ab.sh`;
-- `acd4976` — add the built-scene geometry validator and record the staged GPU handoff.
+Two temporary worktrees remain and are disposable after review:
 
-The source line remains backed up at `origin/backup/peng-training-branch`; tag
-`pre-rehaul-2026-08-11` remains on `e3a09ce`. The temporary comparison worktree remains at
-`/tmp/robopro-s4.yUGVZp/peng-training`; it is disposable after review.
+- S4 comparison: `/tmp/robopro-s4.yUGVZp/peng-training`.
+- S5 upstream: `/tmp/robopro-s5.AkfeOd/cleanup`, branch `cleanup/bench-envs-mechanical`, clean and
+  pushed. PR [#72](https://github.com/EAI-RSM/RoboPRO/pull/72) is open against `dev`; do not merge
+  that branch into `peng-dev-new`.
 
-## S4 completion evidence
+## S5 completion evidence
 
-CPU gates from `customized_robotwin/script/bench_script/`:
+- Current upstream baseline is `origin/dev@600089d`; its two post-plan commits did not touch
+  `benchmark/bench_envs`.
+- Shared-tree diff from the pre-transform local ref: **80 files, +34/−880**. It removes 58 exact
+  boilerplate overrides, 13 dead defs, unused imports in 77 files, and 18 commented info blocks,
+  then atomically renames the collision option in one reader and three writers.
+- `python -m tools.bench_envs_cleanup --check`: `no changes`.
+- Manifest-subtraction equivalence: 92 modules. Every one of 160 leaf `check_success`/`play_once`
+  ASTs matches current dev.
+- Permanent import gate: **95 imported, 0 failed** locally. Upstream imports **94/0** because dev
+  does not contain the research-only `eval_video.py`.
+- Full CPU baseline: **51 passed, 1 skipped** with one existing Sapien deprecation warning.
+- All 20 top-level bench-script files accept `--help`; the old typo is absent from Python code.
+- Upstream commit order is load-bearing hook `266091e`, then T1–T5: `e728bd5`, `ac1a118`,
+  `5075952`, `3f3a988`, `c8bf785`.
 
-- `../../../.venv/bin/python -m pytest -q`: **50 passed, 1 skipped** (51 items; only
-  `checks/smoke_test_seed_2a.py::test_seed_2a_smoke` is skipped; one existing Sapien warning).
-- `../../../.venv/bin/python -m checks.test_curobo_patch`: pass.
-- `checks/test_vla_office_smoke.py`: **8 passed**, including excluded=2 versus full=3 world-entry
-  instrumentation on a fake scene.
-
-User-run GPU/runtime gates:
-
-- Built geometry at `s4_make_it_run/geometry/20260812-121536/`: requested gap 0.100 m, measured
-  collision-hull gap 0.109905 m, error 0.009905 m within the 0.010 m gate, with 0.125012 m z overlap.
-  Raw actor segmentation resolved target id 75 and 207 target pixels. The initialized-scene PNG
-  visibly overlays the intended bottle.
-- Ring smoke at `occluder_visibility/s4_ring/20260812-135100/`: seed 0, one 0.10 m-gap occluder,
-  clutter density 8, direct/direct. The rollout succeeded in 114.0 s, wrote records/video/HDF5,
-  retained the expected empty direct-mode `rollout_seed_stats`, and recorded zero physics
-  collisions. Treatment delivery is explicit: CuRobo world **11 full > 2 default**.
-- Unconfounded standard/direct comparison on matched seeds 0–4: `peng-dev-new` and
-  `peng-training-branch` were identical per seed. Seeds 0,1,3 succeeded; seed 2 failed at `grasp`
-  after the same six unreachable rotations; seed 4 failed at `placement:pre_place_descent` with the
-  same `MotionGenStatus.FINETUNE_TRAJOPT_FAIL`. Both branches were **3/5**. This rules out gross port
-  divergence for the smoke set; n=5 cannot detect modest success-rate changes.
-
-No runtime reconciliation commit was needed. The audit also established that visibility masks use
-raw actor segmentation (RGB is only the overlay), no second bare ring `update_world` exists, and
-aggregate collision metrics initialize without a stream double-start. Optional per-contact JSONL
-streams have no callers, but existing records consume aggregate `get_collision_metrics()`.
+No GPU or rollout was run for S5. Its proof is structural (AST, import, regression suite), not a
+runtime SAPIEN equivalence result.
 
 ## Preserved research state
 
@@ -63,5 +51,5 @@ rewritten; untracked results total about 13 GB.
 
 ## Next action
 
-Execute S5's approved 84-file mechanical cleanup plan. S5 is independent of S6–S12; no later
-rehaul section has started.
+Review the user-supplied `S6_S8_ROUGH_PLAN.md`, then execute the next approved detailed rehaul
+subplan. No S6 or later implementation has started.

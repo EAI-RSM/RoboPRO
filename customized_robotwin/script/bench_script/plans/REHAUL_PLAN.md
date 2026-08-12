@@ -378,25 +378,23 @@ port divergence for the smoke set; n=5 does not measure modest success-rate chan
 
 ---
 
-### S5 — 84-file cleanup script
+### S5 — bench_envs mechanical cleanup script
 **SHARED files, but mechanical. Depends on: S3. Independent of S6–S12.**
 
-Reproduce our systematic cleanup as a **scripted pass on top of dev's versions** — do not port the
-files. Net +265/−1,000 across 88 files, six mechanical kinds, no per-file design content:
-delete the boilerplate `setup_demo` override (80 files); prune unused imports (`glob` ×59,
-`math` ×58, `deepcopy` ×57, `sapien` ×49); delete commented-out `self.info["info"]` blocks
-(18 files); `include_collison` → `include_collision`; delete four dead per-task helpers; normalise
-trailing whitespace.
+📄 **Detailed technical plan: [S5_BENCH_ENVS_CLEANUP_PLAN.md](S5_BENCH_ENVS_CLEANUP_PLAN.md)** —
+**completed 2026-08-12**. The detailed plan corrects the original estimates and holds the execution
+record.
 
-**Out of scope.** `study/put_cup_on_coaster.py` — both sides fixed the same missing-`abs` bug and
-dev's is equivalent. Skip it.
+The cleanup was re-derived on current dev files rather than ported: 58 AST-exact `setup_demo`
+overrides, 13 unreferenced helpers, unused imports in 77 modules, 18 commented-out info blocks, and
+the atomic four-file collision-key rename. The 22 content-bearing `setup_demo` overrides and all
+whitespace-only cleanup stayed out of scope. The shared-tree result is **80 files, +34/−880**.
 
-**Critical.** dev spent six weeks fixing `check_success` false positives in 22 of these files
-(`d7427da`, `0dce73c`, `6697bb4`, `82a776d`), including one where every seed IK-failed. Those live at
-lines ~95–200; our edits live at lines 1–35. **Do not touch `check_success` or `play_once` bodies.**
-
-**Done when** 80 files have lost their `setup_demo` override, dev's `check_success` bodies are
-byte-identical to `origin/dev`, and `--help` still passes.
+**Completed evidence.** The tool is idempotent; the CPU suite is **51 passed, 1 skipped**; the
+permanent import gate reports **95 imported, 0 failed**; all 20 top-level commands accept `--help`;
+and manifest subtraction plus all **160** `check_success`/`play_once` ASTs match current
+`origin/dev@600089d`. Upstream PR [#72](https://github.com/EAI-RSM/RoboPRO/pull/72) targets `dev`
+and carries the load-bearing base hook as its first commit.
 
 ---
 
