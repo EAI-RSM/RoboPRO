@@ -18,9 +18,6 @@ class move_cups_into_box(Study_base_task):
     def _get_target_object_names(self) -> set[str]:
         return {t[-1].get_name() for t in self.target_objects}
 
-    def setup_demo(self, is_test=False, **kwargs):
-        kwargs["collision_cache"] = {"mesh": 100, "obb": 3}
-        super()._init_task_env_(**kwargs)
 
     def load_actors(self):
         with open(os.path.join(os.environ["BENCH_ROOT"],'bench_task_config', 'task_objects.yml'), "r", encoding="utf-8") as f:

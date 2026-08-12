@@ -16,9 +16,6 @@ class put_bowl_in_sink_ks(KitchenS_base_task):
     # Sink is always at sink_x >= +0.10, so the bowl spawns on the right
     # half of the counter and the right arm does the full carry.
 
-    def setup_demo(self, is_test=False, **kwargs):
-        kwargs["collision_cache"] = {"mesh": 100, "obb": 3}
-        super()._init_task_env_(**kwargs)
 
     def _get_target_object_names(self) -> set[str]:
         return {self.target_obj.get_name()}
