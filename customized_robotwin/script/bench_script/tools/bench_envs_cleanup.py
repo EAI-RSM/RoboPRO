@@ -39,6 +39,14 @@ T4_TARGETS = {
     ),
 }
 
+T5_TARGETS = {
+    "study/_study_base_task.py",
+    "study/move_book_onto_table.py",
+    "study/move_seal_onto_book.py",
+    "study/put_cup_in_box.py",
+}
+T5_OLD_KEY = "include_" "collison"
+
 # These files carried legitimate pre-S5 research/base changes relative to dev.
 VERIFY_BASE_EXCEPTIONS = {
     "_bench_base_task.py",
@@ -304,6 +312,8 @@ def _normalize_allowed(path: Path, text: str) -> ast.Module:
         normalized = _line_edits(normalized, edits)
     normalized, _ = _t2(path, normalized)
     normalized, _ = _t3(path, normalized)
+    if rel in T5_TARGETS:
+        normalized = normalized.replace(T5_OLD_KEY, "include_collision")
     return _parse(path, normalized)
 
 

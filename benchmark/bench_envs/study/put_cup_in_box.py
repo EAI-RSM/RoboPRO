@@ -12,7 +12,7 @@ class put_cup_in_box(Study_base_task):
 
     def setup_demo(self, is_test=False, **kwargs):
         kwargs["collision_cache"] = {"mesh": 100, "obb": 3}
-        kwargs["include_collison"] = True
+        kwargs["include_collision"] = True
         super()._init_task_env_(**kwargs)
 
     def load_actors(self):
