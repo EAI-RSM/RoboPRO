@@ -182,13 +182,6 @@ class set_up_table(Office_base_task):
         
         self.move(self.move_by_displacement(arm_tag=arm_tag2, y=-0.05))
 
-        # Record information about the objects and arm used in the task
-        # self.info["info"] = {
-        #     "{A}": f"047_mouse/base{self.mouse_id}",
-        #     "{B}": f"{self.color_name}",
-        #     "{a}": str(arm_tag),
-        # }
-        # return self.info
 
     def check_success(self):
         end_pose_actual1 = self.target_obj_1.get_pose().p

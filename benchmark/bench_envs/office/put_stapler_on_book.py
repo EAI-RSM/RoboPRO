@@ -89,13 +89,6 @@ class put_stapler_on_book(Office_base_task):
             local_up_axis=[0,0,1],
         ))
 
-        # Record information about the objects and arm used in the task
-        # self.info["info"] = {
-        #     "{A}": f"047_mouse/base{self.mouse_id}",
-        #     "{B}": f"{self.color_name}",
-        #     "{a}": str(arm_tag),
-        # }
-        # return self.info
 
     def check_success(self):
         end_pose_actual = self.target_obj.get_pose().p

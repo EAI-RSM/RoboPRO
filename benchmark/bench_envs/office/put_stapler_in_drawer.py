@@ -73,13 +73,6 @@ class put_stapler_in_drawer(Office_base_task):
         ))
         
 
-        # Record information about the objects and arm used in the task
-        # self.info["info"] = {
-        #     "{A}": f"047_mouse/base{self.mouse_id}",
-        #     "{B}": f"{self.color_name}",
-        #     "{a}": str(arm_tag),
-        # }
-        # return self.info
 
     def check_success(self):
         end_pose_actual = self.target_obj.get_pose().p
