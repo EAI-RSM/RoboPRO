@@ -14,9 +14,6 @@ class place_bowl_in_dishrack_ks(KitchenS_base_task):
     # grasp_actor_from_table recipe instead of the scripted rim pinch
     # required for plates.
 
-    def setup_demo(self, is_test=False, **kwargs):
-        kwargs["collision_cache"] = {"mesh": 100, "obb": 3}
-        super()._init_task_env_(**kwargs)
 
     def _get_target_object_names(self) -> set[str]:
         return {self.target_obj.get_name()}

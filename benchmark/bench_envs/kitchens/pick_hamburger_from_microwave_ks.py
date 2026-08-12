@@ -16,9 +16,6 @@ class pick_hamburger_from_microwave_ks(KitchenS_base_task):
     # for the pick grasp. Only scenes 0/1 (microwave on the left) are used.
     allowed_scene_ids = (0, 1)
 
-    def setup_demo(self, is_test=False, **kwargs):
-        kwargs["collision_cache"] = {"mesh": 100, "obb": 3}
-        super()._init_task_env_(**kwargs)
 
     def _get_target_object_names(self) -> set[str]:
         return {self.target_obj.get_name()}
