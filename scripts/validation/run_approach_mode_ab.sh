@@ -143,13 +143,10 @@ if [[ ! -x "$PYTHON" ]]; then
 fi
 
 # Guard against the vendored-curobo seed patch having been reverted (envs/curobo is
-# gitignored, so a reinstall silently drops it). Without it the seed is accepted and
-# then IGNORED -- the 'seed' cell would quietly measure 'direct' and the A/B would
-# report a true null for the wrong reason. Fail loudly instead.
-if ! grep -q "seed_traj" "$CUSTOMIZED/envs/curobo/src/curobo/wrap/reacher/motion_gen.py" 2>/dev/null; then
-  echo "ERROR: vendored curobo is missing the seed_traj patch -- the 'seed' cell would" >&2
-  echo "       silently run unseeded. Re-apply it with:" >&2
-  echo "  git -C $CUSTOMIZED/envs/curobo apply script/bench_script/curobo_seed_traj.patch" >&2
+# gitignored, so a reinstall silently drops it). The CPU check uses patch-specific
+# sentinels; a generic grep for seed_traj is insufficient because pristine CuRobo has
+# unrelated locals with that name.
+if ! "$PYTHON" "$CUSTOMIZED/script/bench_script/checks/test_curobo_patch.py"; then
   exit 1
 fi
 
