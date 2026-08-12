@@ -329,6 +329,25 @@ cd customized_robotwin/script/bench_script && python -m pytest -q
 ### S4 — Make it run
 **SHARED files. Depends on: S3. Needs one GPU run from the user.**
 
+📄 **Detailed technical plan: [S4_MAKE_IT_RUN_PLAN.md](S4_MAKE_IT_RUN_PLAN.md)** — **completed
+2026-08-12**. The summary below is orientation; the detailed plan holds the execution record.
+
+**Three things planning settled that this summary did not know:**
+
+- The `update_world` fix is **one argument in one exclusive file** (`task/occluder_task.py:198` →
+  `exclude_obstacles=False`). Dev's `_office_base_task` guards its own bare call behind
+  `if not exclude_obs`, so it is self-consistent — **do not touch it.**
+- **Segmentation needed runtime confirmation.** The target mask actually comes from dev's raw actor
+  segmentation path; RGB is only used to draw the overlay. The built-scene check resolved target id
+  75 and measured 207 target pixels, so the ported raw-ID path works.
+- **The pre-rehaul comparison must run on the 0-occluder `standard` config.** Comparing the ring
+  path across branches is confounded — S3's edge-to-edge change means the same nominal offset builds
+  a physically different scene, so a success-rate diff would measure the geometry, not the port.
+
+Also: `customized_robotwin/envs/curobo` is **gitignored**, so the `seed_traj` patch is untracked and
+`uv sync` silently reverts it. S4 adds a CPU check module, moving the suite baseline to
+**50 passed / 1 skipped**.
+
 S3 makes it import; this makes it work against six weeks of dev changes.
 
 **In scope.**
@@ -348,6 +367,14 @@ S3 makes it import; this makes it work against six weeks of dev changes.
 **Done when** one `analyze_occluder_visibility.py` run completes end to end with `records.jsonl` and
 `rollout_seed_stats` populated, and `test_ring_config` passes. Note its formation baselines **will**
 change once edge-to-edge spacing lands — review that diff, do not suppress it.
+
+**Completed evidence.** CPU baseline: **50 passed, 1 skipped**. The live geometry check measured a
+requested 0.100 m collision-mesh gap as 0.109905 m (within the 0.010 m gate) with a nonempty raw
+target mask. The cluttered ring rollout succeeded, wrote records/video/HDF5, recorded zero physics
+collisions, and proved clutter delivery with CuRobo world entries **11 full > 2 default**. On matched
+zero-occluder standard seeds 0–4, `peng-dev-new` and `peng-training-branch` were identical: **3/5**
+success, seed 2 failed at `grasp`, and seed 4 at `placement:pre_place_descent`. This rules out gross
+port divergence for the smoke set; n=5 does not measure modest success-rate changes.
 
 ---
 
