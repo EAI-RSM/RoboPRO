@@ -117,14 +117,6 @@ class put_sauce_can_in_cabinet(Kitchen_base_large):
             self._ensure_sauce_can_grasp_metadata()
             self.add_prohibit_area(self.sauce_can, padding=0.04, area="table")
 
-    def _cabinet_inside_target_pose(self) -> list[float]:
-        base_pose = self.cabinet.get_link_pose("base_link")
-        base_tf = base_pose.to_transformation_matrix()
-        base_R = np.array(base_tf[:3, :3], dtype=float)
-        base_p = np.array(base_tf[:3, 3], dtype=float)
-        world_inside = base_p + base_R @ self.CABINET_PLACE_LOCAL
-        obj_q = self.sauce_can.get_pose().q.tolist()
-        return world_inside.tolist() + obj_q
 
     def _sauce_can_local_in_cabinet(self) -> np.ndarray | None:
         if self.sauce_can is None or self.cabinet is None:

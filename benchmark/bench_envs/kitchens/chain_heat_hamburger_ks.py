@@ -1,12 +1,9 @@
 from bench_envs.kitchens._kitchens_base_task import KitchenS_base_task
 from envs.utils import *
-import sapien
 import math
 import os
 import transforms3d as t3d
 from envs._GLOBAL_CONFIGS import *
-from copy import deepcopy
-import glob
 
 # Microwave door counts as closed only within 3 degrees of fully shut.
 DOOR_CLOSED_RAD = math.radians(3.0)
@@ -22,9 +19,6 @@ class chain_heat_hamburger_ks(KitchenS_base_task):
     # objects, or the door cannot be closed.
     microwave_front_keepout = True
 
-    def setup_demo(self, is_test=False, **kwargs):
-        kwargs["collision_cache"] = {"mesh": 100, "obb": 3}
-        super()._init_task_env_(**kwargs)
 
     def _get_target_object_names(self) -> set[str]:
         return {self.target_obj.get_name()}

@@ -1,7 +1,5 @@
 # from envs._base_task import Base_Task
 import sapien
-import math
-import glob
 import yaml
 import os
 import numpy as np
@@ -9,7 +7,6 @@ import numpy as np
 from bench_envs.study._study_base_task import Study_base_task
 from envs.utils import *
 from envs._GLOBAL_CONFIGS import *
-from copy import deepcopy
 from bench_envs.utils.scene_gen_utils import get_position_limits, get_actor_boundingbox, get_collison_with_objs
 from bench_envs.utils.scene_gen_utils import place_actor
 from transforms3d.euler import euler2quat
@@ -27,7 +24,7 @@ class move_seal_onto_book(Study_base_task):
 
     def setup_demo(self, is_test=False, **kwargs):
         kwargs["collision_cache"] = {"mesh": 100, "obb": 3}
-        kwargs["include_collison"] = False
+        kwargs["include_collision"] = False
         super()._init_task_env_(**kwargs)
 
     def load_actors(self):

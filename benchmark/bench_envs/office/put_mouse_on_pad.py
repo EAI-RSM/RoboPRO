@@ -1,18 +1,11 @@
 # from envs._base_task import Base_Task
 from bench_envs.office._office_base_task import Office_base_task
 from envs.utils import *
-import sapien
-import math
 from envs._GLOBAL_CONFIGS import *
-from copy import deepcopy
-import glob
 
 
 class put_mouse_on_pad(Office_base_task):
 
-    def setup_demo(self, is_test=False, **kwargs):
-        kwargs["collision_cache"] = {"mesh": 100, "obb": 3}
-        super()._init_task_env_(**kwargs)
 
     def _get_target_object_names(self) -> set[str]:
         return {self.target_obj.get_name(), self.des_obj.get_name()}
@@ -134,13 +127,6 @@ class put_mouse_on_pad(Office_base_task):
                 dis=0.005,
             ))
 
-        # Record information about the objects and arm used in the task
-        # self.info["info"] = {
-        #     "{A}": f"047_mouse/base{self.mouse_id}",
-        #     "{B}": f"{self.color_name}",
-        #     "{a}": str(arm_tag),
-        # }
-        # return self.info
 
     def check_success(self):
         end_pose_actual = self.target_obj.get_pose().p

@@ -3,13 +3,9 @@ import os
 import yaml
 
 from bench_envs.kitchenl._kitchen_base_large import Kitchen_base_large
-from bench_envs.utils.scene_gen_utils import get_actor_boundingbox, get_actor_boundingbox_urdf, get_random_place_pose, place_actor, point_to_box_distance, print_c
-from bench_envs.utils.scene_gen_utils import get_actor_boundingbox_urdf
+from bench_envs.utils.scene_gen_utils import place_actor, print_c
 from envs.utils import *
-import math
 import numpy as np
-import sapien
-import transforms3d as t3d
 
 
 class put_can_infront_of_microwave(Kitchen_base_large):

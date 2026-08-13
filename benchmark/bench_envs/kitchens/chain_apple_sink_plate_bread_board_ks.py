@@ -1,8 +1,7 @@
 from bench_envs.kitchens._kitchens_base_task import KitchenS_base_task
 from envs.utils import *
-import sapien, math, os, glob
+import sapien, os
 from envs._GLOBAL_CONFIGS import *
-from copy import deepcopy
 
 
 class chain_apple_sink_plate_bread_board_ks(KitchenS_base_task):
@@ -13,9 +12,6 @@ class chain_apple_sink_plate_bread_board_ks(KitchenS_base_task):
     TOP_DOWN_Q = [-0.5, 0.5, -0.5, -0.5]
     TCP_OFFSET = 0.12
 
-    def setup_demo(self, is_test=False, **kwargs):
-        kwargs["collision_cache"] = {"mesh": 100, "obb": 3}
-        super()._init_task_env_(**kwargs)
 
     def _get_target_object_names(self) -> set[str]:
         return {self.apple.get_name(), self.bread.get_name()}

@@ -1,9 +1,7 @@
 from bench_envs.kitchens._kitchens_base_task import KitchenS_base_task
 from envs.utils import *
-import sapien, math, os, glob
+import os
 from envs._GLOBAL_CONFIGS import *
-from copy import deepcopy
-from transforms3d.euler import euler2quat
 
 
 class chain_apple_bin_bowl_rack_spoon_sink_ks(KitchenS_base_task):
@@ -11,9 +9,6 @@ class chain_apple_bin_bowl_rack_spoon_sink_ks(KitchenS_base_task):
     Chain: apple → bin, bowl → dishrack, spoon → sink.
     """
 
-    def setup_demo(self, is_test=False, **kwargs):
-        kwargs["collision_cache"] = {"mesh": 100, "obb": 3}
-        super()._init_task_env_(**kwargs)
 
     def _get_target_object_names(self) -> set[str]:
         return {self.apple.get_name(), self.bowl.get_name(), self.spoon.get_name()}

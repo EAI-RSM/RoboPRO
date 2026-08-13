@@ -1,15 +1,11 @@
 import os
 import re
 import sapien.core as sapien
-from sapien.render import clear_cache as sapien_clear_cache
-from sapien.utils.viewer import Viewer
 import numpy as np
 import gymnasium as gym
-import pdb
 import toppra as ta
 import json
 import transforms3d as t3d
-from collections import OrderedDict
 import torch, random
 import xml.etree.ElementTree as ET
 
@@ -17,21 +13,14 @@ from bench_envs._bench_base_task import Bench_base_task
 from envs.utils import *
 from bench_envs.utils import *
 import math
-from envs.robot import Robot
-from envs.camera import Camera
-from envs.utils.actor_utils import Actor, ArticulationActor
+from envs.utils.actor_utils import ArticulationActor
 
-from copy import deepcopy
-import subprocess
 from pathlib import Path
-import trimesh
-import imageio
 import glob
 
 
 from envs._GLOBAL_CONFIGS import *
 
-from typing import Optional, Literal
 
 current_file_path = os.path.abspath(__file__)
 parent_directory = os.path.dirname(current_file_path)
@@ -741,60 +730,6 @@ class Kitchen_base_large(Bench_base_task):
             self.cabinet.set_name("cabinet")
             self.add_prohibit_area(self.cabinet, padding=0.02, area="cabinet")
             self._init_cabinet_states()
-    def _entity_aabb(self, entity):
-        # Actor path: reuse existing utility.
-        if hasattr(entity, "get_components"):
-            return get_actor_boundingbox(entity)
-
-        # Articulation path: aggregate all link collision-shape vertices.
-        if not hasattr(entity, "get_links"):
-            return None, None
-
-        all_points = []
-        for link in entity.get_links():
-            try:
-                link_pose = link.pose
-            except Exception:
-                link_pose = link.get_pose()
-            link_mat = link_pose.to_transformation_matrix()
-
-            try:
-                shapes = link.get_collision_shapes()
-            except Exception:
-                shapes = []
-
-            for shape in list(shapes):
-                try:
-                    local_v = np.array(shape.get_vertices(), dtype=float)
-                except Exception:
-                    try:
-                        hs = np.array(shape.half_size, dtype=float)
-                    except Exception:
-                        continue
-                    local_v = np.array(
-                        [[x, y, z] for x in (-hs[0], hs[0]) for y in (-hs[1], hs[1]) for z in (-hs[2], hs[2])],
-                        dtype=float,
-                    )
-
-                try:
-                    local_v = local_v * np.array(shape.scale, dtype=float)
-                except Exception:
-                    pass
-
-                try:
-                    shape_mat = shape.get_local_pose().to_transformation_matrix()
-                except Exception:
-                    shape_mat = np.eye(4, dtype=float)
-
-                world_mat = link_mat @ shape_mat
-                homo_v = np.pad(local_v, ((0, 0), (0, 1)), constant_values=1.0)
-                world_v = (world_mat @ homo_v.T).T[:, :3]
-                all_points.append(world_v)
-
-        if not all_points:
-            return None, None
-        points_cloud = np.vstack(all_points)
-        return points_cloud.min(axis=0), points_cloud.max(axis=0)
 
     def _add_cabinet_wall_filler(self):
         """
@@ -1164,21 +1099,9 @@ class Kitchen_base_large(Bench_base_task):
     # Drawer-related APIs are deprecated and no longer used now that the
     # base kitchen does not spawn any drawer units. They are retained only
     # so older code that imports them does not break.
-    def _init_drawer_states(self):
-        self.drawer_closed_qpos = None
-        self.drawer_open_qpos = None
 
-    def set_drawer_closed(self):
-        """Deprecated: drawers are no longer part of the base kitchen."""
-        return
 
-    def set_drawer_open(self):
-        """Deprecated: drawers are no longer part of the base kitchen."""
-        return
 
-    def is_drawer_open(self, threshold: float = 0.01) -> bool:
-        """Deprecated: always returns False because no drawers exist."""
-        return False
     
     def _load_kitchen_appliances(self, table_height: float):
         # Fridge on the left side of the counter
@@ -1234,11 +1157,6 @@ class Kitchen_base_large(Bench_base_task):
                 continue
         return available_ids
 
-    def _sample_model_id(self, modelname: str, fallback: int = 0) -> int:
-        ids = self._get_available_model_ids(modelname)
-        if not ids:
-            return fallback
-        return int(np.random.choice(ids))
 
     def get_cluttered_surfaces(self):
         # clutter surfaces with additional random obstacles

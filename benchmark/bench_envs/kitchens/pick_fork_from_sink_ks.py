@@ -5,8 +5,6 @@ import math
 import os
 import transforms3d as t3d
 from envs._GLOBAL_CONFIGS import *
-from copy import deepcopy
-import glob
 
 
 class pick_fork_from_sink_ks(KitchenS_base_task):
@@ -22,9 +20,6 @@ class pick_fork_from_sink_ks(KitchenS_base_task):
     FORK_CENTER_MESH = np.array([0.006306729695638125, 0.7365346359265317, -0.020780860566354562])
     FORK_SCALE = 0.15
 
-    def setup_demo(self, is_test=False, **kwargs):
-        kwargs["collision_cache"] = {"mesh": 100, "obb": 3}
-        super()._init_task_env_(**kwargs)
 
     def _get_target_object_names(self) -> set[str]:
         return {self.target_obj.get_name()}

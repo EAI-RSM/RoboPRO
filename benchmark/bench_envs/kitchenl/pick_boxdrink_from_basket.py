@@ -1,12 +1,9 @@
 import os
 
 from bench_envs.kitchenl._kitchen_base_large import Kitchen_base_large
-from bench_envs.utils.scene_gen_utils import get_random_place_pose, get_actor_boundingbox, print_c
+from bench_envs.utils.scene_gen_utils import get_random_place_pose, get_actor_boundingbox
 from envs.utils import *
-import math
 import numpy as np
-import sapien
-import transforms3d as t3d
 
 
 class pick_boxdrink_from_basket(Kitchen_base_large):
@@ -44,11 +41,6 @@ class pick_boxdrink_from_basket(Kitchen_base_large):
             [[6.123233995736766e-17, -6.123233995736766e-17, -1.0, 0.0], [1.0, 3.749399456654644e-33, 6.123233995736766e-17, y_center], [0.0, -1.0, 6.123233995736766e-17, 0.0], [0.0, 0.0, 0.0, 1.0]],
         ]
 
-    @staticmethod
-    def _world_point_in_entity_local(entity, world_xyz: np.ndarray) -> np.ndarray:
-        inv_tf = np.linalg.inv(entity.get_pose().to_transformation_matrix())
-        h = inv_tf @ np.array([world_xyz[0], world_xyz[1], world_xyz[2], 1.0], dtype=float)
-        return np.array(h[:3], dtype=float)
 
     def _ensure_boxdrink_grasp_metadata(self) -> None:
         if self.boxdrink is None or not isinstance(self.boxdrink.config, dict):
@@ -103,15 +95,6 @@ class pick_boxdrink_from_basket(Kitchen_base_large):
         p = np.array(self.table.get_pose().p, dtype=float)
         return np.array([p[0] + self._place_world_x_off, p[1] + self._place_world_y_off], dtype=float)
 
-    def _ee_pose_above_place_target(self, arm_tag: ArmTag) -> np.ndarray:
-        ee_pose = np.array(self.get_arm_pose(arm_tag), dtype=float)
-        table_p = np.array(self.table.get_pose().p, dtype=float)
-        xy_w = self._place_target_world_xy()
-        target = ee_pose.copy()
-        target[0] = float(xy_w[0])
-        target[1] = float(xy_w[1])
-        target[2] = float(table_p[2] + self.PLACE_HEIGHT_ABOVE_TABLE)
-        return target
 
     def load_actors(self):
         self._sample_place_world_offsets()

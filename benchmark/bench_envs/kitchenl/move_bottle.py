@@ -1,7 +1,4 @@
 # from envs._base_task import Base_Task
-import sapien
-import math
-import glob
 import yaml
 import os
 import numpy as np
@@ -9,18 +6,14 @@ from envs._GLOBAL_CONFIGS import *
 from copy import deepcopy
 from bench_envs.kitchenl._kitchen_base_large import Kitchen_base_large
 from envs.utils import *
-from bench_envs.utils.scene_gen_utils import get_position_limits, get_actor_boundingbox
+from bench_envs.utils.scene_gen_utils import get_actor_boundingbox
 from bench_envs.utils.scene_gen_utils import print_c, place_actor
-from transforms3d.euler import euler2quat
 
 class move_bottle(Kitchen_base_large):
 
     def _get_target_object_names(self) -> set[str]:
         return {self.target_obj.get_name()}  # place_actor("001_bottle") → name = "001_bottle"
 
-    def setup_demo(self, is_test=False, **kwargs):
-        kwargs["collision_cache"] = {"mesh": 100, "obb": 3}
-        super()._init_task_env_(**kwargs)
 
     def load_actors(self):
         with open(os.path.join(os.environ["BENCH_ROOT"],'bench_task_config', 'task_objects.yml'), "r", encoding="utf-8") as f:

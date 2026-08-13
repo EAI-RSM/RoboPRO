@@ -1,11 +1,7 @@
 from bench_envs.kitchens._kitchens_base_task import KitchenS_base_task
 from envs.utils import *
-import sapien
-import math
 import os
 from envs._GLOBAL_CONFIGS import *
-from copy import deepcopy
-import glob
 
 
 class place_bowl_in_dishrack_ks(KitchenS_base_task):
@@ -14,9 +10,6 @@ class place_bowl_in_dishrack_ks(KitchenS_base_task):
     # grasp_actor_from_table recipe instead of the scripted rim pinch
     # required for plates.
 
-    def setup_demo(self, is_test=False, **kwargs):
-        kwargs["collision_cache"] = {"mesh": 100, "obb": 3}
-        super()._init_task_env_(**kwargs)
 
     def _get_target_object_names(self) -> set[str]:
         return {self.target_obj.get_name()}
