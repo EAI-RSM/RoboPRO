@@ -619,6 +619,7 @@ class Base_Task(gym.Env):
             "observation": {},
             "pointcloud": [],
             "joint_action": {},
+            "joint_state": {},
             "endpose": {},
         }
 
@@ -691,6 +692,16 @@ class Base_Task(gym.Env):
             pkl_dic["joint_action"]["right_arm"] = right_jointstate[:-1]
             pkl_dic["joint_action"]["right_gripper"] = right_jointstate[-1]
             pkl_dic["joint_action"]["vector"] = np.array(left_jointstate + right_jointstate)
+
+            # physics qpos (entity.get_qpos), counterpart of endpose's global_pose.
+            # joint_action above is the drive target, not the realized joint angles.
+            left_real = self.robot.get_left_arm_real_jointState()
+            right_real = self.robot.get_right_arm_real_jointState()
+            pkl_dic["joint_state"]["left_arm"] = left_real[:-1]
+            pkl_dic["joint_state"]["left_gripper"] = left_real[-1]
+            pkl_dic["joint_state"]["right_arm"] = right_real[:-1]
+            pkl_dic["joint_state"]["right_gripper"] = right_real[-1]
+            pkl_dic["joint_state"]["vector"] = np.array(left_real + right_real)
         # object state
         if self.data_type.get("object_state", self.save_data):
             pkl_dic["object_state"] = {
