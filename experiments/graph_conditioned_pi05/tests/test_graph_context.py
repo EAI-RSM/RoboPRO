@@ -358,16 +358,17 @@ def test_prepare_instruction_preserves_visual_only_and_fits_graph(tmp_path):
         InputCondition.VISUAL_RETRIEVED_GRAPH,
         RetrievalContract(),
     )
-    assert grasp.instruction == "put target in box"
+    assert grasp.instruction == (
+        "Task objective: put target in box\n"
+        "Current stage: Pick up the target."
+    )
     assert grasp.prompt_phase == "grasp"
-    assert grasp.retrieved_fact_count == 0
-    assert grasp.selected_fact_count == 0
+    assert grasp.retrieved_fact_count == 1
+    assert grasp.selected_fact_count == 1
     assert grasp.selected_node_count == 0
-    assert grasp.graph_token_count == 0
+    assert grasp.graph_token_count > 0
     assert grasp.destination_seed_available
-    # Grasp is call-equivalent to visual-only: no tokenizer/packer RPC and no
-    # graph text, while the graph-aware controller still observes every frame.
-    assert model.calls == []
+    assert len(model.calls) == 1
 
     held = np.zeros((5, 2), dtype=bool)
     held[0, 0] = True
@@ -380,10 +381,11 @@ def test_prepare_instruction_preserves_visual_only_and_fits_graph(tmp_path):
     assert placement.prompt_phase == "placement"
     assert placement.selected_fact_count == 1
     assert placement.instruction == (
-        "put target in box\n"
-        "Keep holding the object. Move it forward and left into the box."
+        "Task objective: put target in box\n"
+        "Current stage: Keep holding the object. "
+        "Move it forward and left into the box."
     )
-    assert len(model.calls) == 1
+    assert len(model.calls) == 2
     held_event = live_task_state(task, observation, RetrievalContract())
     assert held_event.target_held and held_event.held_arm == "left"
     assert not held_event.target_inside_destination
@@ -401,7 +403,7 @@ def test_prepare_instruction_preserves_visual_only_and_fits_graph(tmp_path):
         RetrievalContract(), previous_phase=placement.prompt_phase,
     )
     assert latched.prompt_phase == "placement"
-    assert len(model.calls) == 2
+    assert len(model.calls) == 3
 
     state["in"] = np.zeros((5, 5), dtype=bool)
     state["containment_valid"] = np.ones((5, 5), dtype=bool)
@@ -418,7 +420,8 @@ def test_prepare_instruction_preserves_visual_only_and_fits_graph(tmp_path):
     )
     assert release.prompt_phase == "release"
     assert release.instruction == (
-        "put target in box\nRelease the held object in the box."
+        "Task objective: put target in box\n"
+        "Current stage: Release the held object in the box."
     )
 
     # Held above the container rim: not contained yet, but close enough that

@@ -900,13 +900,19 @@ def prepare_instruction(
     prompt_phase = previous_phase
     if not guidance_supported:
         prompt_phase = "grasp"
-    # Preserve the original instruction during grasping. After grasp, append
-    # only the compact phase action: retrieved nodes and relation prose remain
-    # excluded so this treatment isolates the effect of staged action language.
+    # Separate the persistent objective from one atomic current-stage command.
+    # Use the same two-field natural-language schema in every supported phase.
     guidance_items = []
-    if prompt_phase in {"placement", "release"}:
+    if guidance_supported:
+        target_id = next(
+            int(object_id)
+            for object_id, is_target in zip(retriever.object_ids, retriever.is_target)
+            if bool(is_target)
+        )
+        target_label = retriever._label_by_id[target_id]
         destination_label = retriever._label_by_id[destination_ids[0]]
         guidance = {
+            "grasp": f"Pick up the {target_label}.",
             "placement": compact_placement_hint(
                 retriever, destination_ids, relation=goal.relation
             ),
@@ -917,7 +923,7 @@ def prepare_instruction(
         }[prompt_phase]
         guidance_items.append(
             PackedItem(
-                text=guidance,
+                text=f"Current stage: {guidance}",
                 rank=len(RELATION_PRIORITY),
                 section="goal",
                 mandatory=True,
@@ -950,7 +956,7 @@ def prepare_instruction(
     ]
     response = model.fit_graph_prompt(
         {
-            "instruction": base_instruction,
+            "instruction": f"Task objective: {base_instruction}",
             "state": observation["joint_action"]["vector"],
             "items": items,
             "graph_token_budget": contract.graph_token_budget,
