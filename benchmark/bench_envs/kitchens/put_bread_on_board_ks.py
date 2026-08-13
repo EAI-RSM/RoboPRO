@@ -1,4 +1,5 @@
 from bench_envs.kitchens._kitchens_base_task import KitchenS_base_task
+from bench_envs.utils.scene_gen_utils import get_actor_boundingbox
 from envs.utils import *
 import sapien
 import math
@@ -103,11 +104,20 @@ class put_bread_on_board_ks(KitchenS_base_task):
             ))
 
     def check_success(self):
-        end_pose_actual = self.target_obj.get_pose().p
-        end_pose_desired = self.des_obj.get_pose().p
-        eps1 = 0.03
-        eps2 = 0.03
+        # Success = bread is on the board (footprint + resting height), not near a
+        # target center. Board is ~13–19 cm; a 3 cm XY gate around the origin
+        # rejected valid off-center placements.
+        bread_p = np.asarray(self.target_obj.get_pose().p)
+        board_bb = get_actor_boundingbox(self.des_obj)
+        if board_bb[0] is None:
+            return False
 
-        return (np.all(abs(end_pose_actual[:2] - end_pose_desired[:2]) < np.array([eps1, eps2]))
-                and self.robot.is_left_gripper_open()
-                and self.robot.is_right_gripper_open())
+        bread_on_board_xy = (board_bb[0][0] <= bread_p[0] <= board_bb[1][0] and
+                             board_bb[0][1] <= bread_p[1] <= board_bb[1][1])
+        dz = float(bread_p[2] - board_bb[1][2])
+        # Bread is ~5–6 cm; its center sits a few cm above the board top.
+        bread_on_board_z = 0 <= dz <= 0.06
+
+        return bool(bread_on_board_xy and bread_on_board_z
+                    and self.robot.is_left_gripper_open()
+                    and self.robot.is_right_gripper_open())

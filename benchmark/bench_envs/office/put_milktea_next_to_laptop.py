@@ -72,6 +72,15 @@ class put_milktea_next_to_laptop(Office_base_task):
         )
         self.add_prohibit_area(self.des_obj, padding=0.01, area="table")
         self.add_operating_area(self.des_obj.get_pose().p)
+
+        # 25cm center-to-center from the laptop. Sampler checks obj_radius+margin
+        # against this AABB, so shrink the box to keep the on-axis gap at 25cm.
+        milktea_obj_radius = 0.03
+        milktea_obj_margin = 0.005
+        min_milktea_laptop_dist = 0.25
+        keepout = min_milktea_laptop_dist - (milktea_obj_radius + milktea_obj_margin)
+        lx, ly = self.laptop.get_pose().p[:2]
+        self.prohibited_area["table"].append([lx - keepout, ly - keepout, lx + keepout, ly + keepout])
         
         success, self.target_obj = rand_create_cluttered_actor(
             scene=self.scene,
@@ -84,7 +93,7 @@ class put_milktea_next_to_laptop(Office_base_task):
             rotate_rand=False,
             rotate_lim=[0, 1, 0],
             qpos=euler2quat(np.pi/2,0, 0, axes='sxyz'),
-            obj_radius=0.03,
+            obj_radius=milktea_obj_radius,
             z_offset=0,
             z_max=0.1,
             prohibited_area=self.prohibited_area["table"],
