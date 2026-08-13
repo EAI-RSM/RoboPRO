@@ -96,6 +96,10 @@ class put_milktea_next_to_laptop(Office_base_task):
         if not success:
             raise RuntimeError("Failed to load target_obj")
         self.target_obj.set_mass(0.06)
+        # Spawn orientation is upright by construction; remember which LOCAL axis
+        # points world-up so check_success can measure tilt without assuming an
+        # asset axis convention.
+        self._target_init_quat = np.array(self.target_obj.get_pose().q, dtype=np.float64)
         self.add_prohibit_area(self.target_obj, padding=0.01, area="table")
         self.add_operating_area(self.target_obj.get_pose().p)
 
@@ -139,11 +143,27 @@ class put_milktea_next_to_laptop(Office_base_task):
         # return self.info
 
     def check_success(self):
-        end_pose_actual = self.target_obj.get_pose().p
+        pose = self.target_obj.get_pose()
+        end_pose_actual = pose.p
         end_pose_desired = self.des_obj.get_pose().p
         eps1 = 0.04
         eps2 = 0.04
 
+        # UPRIGHT requirement (2026-08-12): a collapsed/tipped milktea within
+        # 4cm of the marker used to count as success. Require the local axis
+        # that pointed world-up at spawn (upright by construction) to stay
+        # within eps_tilt_deg of world-up. Yaw spins pass; tipped/fallen fails.
+        # Retro-audit on the HF training rollouts: flips 11/300 successes, 9 of
+        # them fully fallen (>84 deg); survivors median tilt 3.5 deg.
+        eps_tilt_deg = 15.0  # NOTE: tunable strictness, same convention as d7427da
+        from transforms3d.quaternions import quat2mat
+        R0 = quat2mat(self._target_init_quat)
+        Rn = quat2mat(np.array(pose.q, dtype=np.float64))
+        up_local = R0.T @ np.array([0.0, 0.0, 1.0])   # local axis that was world-up
+        up_now = Rn @ up_local
+        upright = up_now[2] > np.cos(np.deg2rad(eps_tilt_deg))
+
         return (np.all(abs(end_pose_actual[:2] - end_pose_desired[:2]) < np.array([eps1, eps2]))
+                and upright
                 and self.robot.is_left_gripper_open()
                 and self.robot.is_right_gripper_open())
