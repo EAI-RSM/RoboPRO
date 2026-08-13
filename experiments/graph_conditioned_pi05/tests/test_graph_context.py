@@ -464,12 +464,21 @@ def test_grasp_hint_selects_only_a_valid_uniquely_clear_gripper(tmp_path):
     state["blocks_by_effector"][1, 0] = [True, False]
     state["blocks_by_effector_valid"][:, 0, :] = True
     assert compact_grasp_hint(retriever, 10) == (
+        "The box is backward and left of the right gripper. "
         "Approach the target with the right gripper and pick it up."
     )
 
     # Unknown opposite-side evidence must not be described as available.
     state["blocks_by_effector_valid"][:, 0, 1] = False
     assert compact_grasp_hint(retriever, 10) == "Pick up the target."
+
+    # Missing obstacle geometry preserves the approach-side instruction.
+    state["blocks_by_effector"][1, 0] = [True, False]
+    state["blocks_by_effector_valid"][:, 0, :] = True
+    retriever._poses_world.pop(20)
+    assert compact_grasp_hint(retriever, 10) == (
+        "Approach the target with the right gripper and pick it up."
+    )
 
     # No preference when both paths are valid and clear.
     state["blocks_by_effector"][:, 0, :] = False

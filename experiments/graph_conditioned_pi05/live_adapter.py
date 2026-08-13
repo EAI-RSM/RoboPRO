@@ -521,9 +521,54 @@ def compact_grasp_hint(
     )
     if not side:
         return fallback
-    return (
+    approach = (
         f"Approach the {target_label} with the {side} gripper "
         f"and pick it up."
+    )
+    blocked_index = next(
+        index for index, state in enumerate(evidence)
+        if state is Evidence.TRUE
+    )
+    active_blockers = blocker_indices[
+        by_effector[blocker_indices, target_index, blocked_index]
+        & valid[blocker_indices, target_index, blocked_index]
+    ]
+    effector_id = -2 if side == "left" else -3
+    effector_pose = retriever._poses_world.get(effector_id)
+    robot_pose = retriever._poses_world.get(-1)
+    if effector_pose is None or robot_pose is None or not len(active_blockers):
+        return approach
+    positioned = [
+        int(index) for index in active_blockers
+        if int(retriever.object_ids[index]) in retriever._poses_world
+    ]
+    if not positioned:
+        return approach
+    blocker_index = min(
+        positioned,
+        key=lambda index: float(np.linalg.norm(
+            retriever._poses_world[int(retriever.object_ids[index])][:3]
+            - effector_pose[:3]
+        )),
+    )
+    blocker_id = int(retriever.object_ids[blocker_index])
+    blocker_pose = retriever._poses_world[blocker_id]
+    rotation_world_from_base = _rotation_matrix_from_wxyz(robot_pose[3:7])
+    forward, left, _ = rotation_world_from_base.T @ (
+        blocker_pose[:3] - effector_pose[:3]
+    )
+    directions = []
+    if abs(forward) >= 0.05:
+        directions.append("forward" if forward > 0 else "backward")
+    if abs(left) >= 0.05:
+        directions.append("left" if left > 0 else "right")
+    if not directions:
+        return approach
+    blocker_label = retriever._label_by_id.get(blocker_id, "obstacle")
+    relative = " and ".join(directions)
+    return (
+        f"The {blocker_label} is {relative} of the {side} gripper. "
+        f"{approach}"
     )
 
 
