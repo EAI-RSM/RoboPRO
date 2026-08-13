@@ -44,7 +44,6 @@ class GraphEvent(str, Enum):
     REACHABILITY_RESTORED = "reachability_restored"
     VISIBILITY_LOST = "visibility_lost"
     VISIBILITY_RESTORED = "visibility_restored"
-    COLLISION_STARTED = "collision_started"
 
 
 @dataclass(frozen=True)
@@ -55,9 +54,7 @@ class ActionGraphState:
     path_blocked: Evidence = Evidence.UNKNOWN
     reachable: Evidence = Evidence.UNKNOWN
     visible: Evidence = Evidence.UNKNOWN
-    robot_collision: Evidence = Evidence.UNKNOWN
     held_arm: str | None = None
-    collision_objects: tuple[str, ...] = ()
 
     def predicates(self) -> Mapping[str, Evidence]:
         return {
@@ -67,7 +64,6 @@ class ActionGraphState:
             "blocks": self.path_blocked,
             "reachable_by": self.reachable,
             "visible_to": self.visible,
-            "robot_collision_with": self.robot_collision,
         }
 
 
@@ -98,7 +94,6 @@ _TRANSITIONS = {
     ("reachable_by", Evidence.FALSE, Evidence.TRUE): GraphEvent.REACHABILITY_RESTORED,
     ("visible_to", Evidence.TRUE, Evidence.FALSE): GraphEvent.VISIBILITY_LOST,
     ("visible_to", Evidence.FALSE, Evidence.TRUE): GraphEvent.VISIBILITY_RESTORED,
-    ("robot_collision_with", Evidence.FALSE, Evidence.TRUE): GraphEvent.COLLISION_STARTED,
 }
 
 
@@ -118,7 +113,6 @@ class GraphDeltaDetector:
             GraphEvent.REACHABILITY_RESTORED: 2,
             GraphEvent.VISIBILITY_LOST: 3,
             GraphEvent.VISIBILITY_RESTORED: 2,
-            GraphEvent.COLLISION_STARTED: 1,
         }
         if thresholds:
             defaults.update(thresholds)
@@ -168,7 +162,6 @@ class ReplanPolicy:
         GraphEvent.GRASP_LOST,
         GraphEvent.GRASP_ACQUIRED,
         GraphEvent.GOAL_LOST,
-        GraphEvent.COLLISION_STARTED,
         GraphEvent.PATH_BLOCKED,
         GraphEvent.REACHABILITY_LOST,
         GraphEvent.VISIBILITY_LOST,
@@ -181,7 +174,6 @@ class ReplanPolicy:
         GraphEvent.GRASP_LOST,
         GraphEvent.RELEASE_READY,
         GraphEvent.GOAL_REACHED,
-        GraphEvent.COLLISION_STARTED,
     }
 
     def __init__(self, minimum_actions: int = 4):
@@ -233,11 +225,6 @@ class ReplanPolicy:
             PromptPhase.PLACEMENT,
         }:
             return phase
-        if event is GraphEvent.COLLISION_STARTED and phase in {
-            PromptPhase.GRASP,
-            PromptPhase.PLACEMENT,
-        }:
-            return phase
         if event in {
             GraphEvent.REACHABILITY_LOST,
             GraphEvent.REACHABILITY_RESTORED,
@@ -257,7 +244,6 @@ class GraphControllerState:
     detector: GraphDeltaDetector = field(default_factory=GraphDeltaDetector)
     policy: ReplanPolicy = field(default_factory=ReplanPolicy)
     pending_events: set[GraphEvent] = field(default_factory=set)
-    collision_prompt_objects: tuple[str, ...] = ()
 
     def observe(self, state: ActionGraphState, remaining_actions: int) -> tuple[ReplanDecision, dict]:
         self.frame += 1
@@ -299,11 +285,6 @@ class GraphControllerState:
             "next_phase": decision.next_phase.value,
         }
         if decision.requires_replan:
-            self.collision_prompt_objects = (
-                state.collision_objects
-                if decision.event is GraphEvent.COLLISION_STARTED
-                else ()
-            )
             self.phase = decision.next_phase
             self.actions_since_replan = 0
             self.pending_events.clear()

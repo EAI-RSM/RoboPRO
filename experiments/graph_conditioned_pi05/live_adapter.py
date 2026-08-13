@@ -162,41 +162,6 @@ def action_graph_state(
             blocks[:, target_indices], blocks_valid[:, target_indices]
         )
 
-    robot_flags = np.asarray(
-        [bool(entry.get("is_robot")) for entry in catalog], dtype=np.bool_
-    )
-    excluded_ids = set(goal.target_ids)
-    non_robot_indices = [
-        index
-        for index, (object_id, is_robot) in enumerate(
-            zip(retriever.object_ids.tolist(), robot_flags.tolist())
-        )
-        if not is_robot and int(object_id) not in excluded_ids
-    ]
-    robot_indices = np.flatnonzero(robot_flags).tolist()
-    collision = np.asarray(
-        relation_state.get("robot_collision_with", ()), dtype=np.bool_
-    )
-    collision_evidence = Evidence.UNKNOWN
-    collision_objects: tuple[str, ...] = ()
-    if collision.ndim == 2 and robot_indices and non_robot_indices:
-        collision_valid = retriever._valid("robot_collision_with", collision)
-        selection = np.ix_(robot_indices, non_robot_indices)
-        collision_evidence = _aggregate_evidence(
-            collision[selection], collision_valid[selection]
-        )
-        active_indices = [
-            object_index
-            for object_index in non_robot_indices
-            if np.any(
-                collision[robot_indices, object_index]
-                & collision_valid[robot_indices, object_index]
-            )
-        ]
-        collision_objects = tuple(
-            sorted({retriever.labels[index] for index in active_indices})
-        )
-
     legacy = live_task_state(task_env, observation, contract)
     return ActionGraphState(
         held=held_evidence,
@@ -207,9 +172,7 @@ def action_graph_state(
         path_blocked=blocked_evidence,
         reachable=reachable_evidence,
         visible=visible_evidence,
-        robot_collision=collision_evidence,
         held_arm=held_arm,
-        collision_objects=collision_objects,
     )
 
 
@@ -896,7 +859,6 @@ def prepare_instruction(
     condition: InputCondition | str,
     contract: RetrievalContract,
     previous_phase: str = "grasp",
-    collision_objects: Iterable[str] = (),
 ) -> PreparedInstruction:
     base_instruction = str(task_env.get_instruction())
     condition = InputCondition(condition)
@@ -939,17 +901,6 @@ def prepare_instruction(
     # only the compact phase action: retrieved nodes and relation prose remain
     # excluded so this treatment isolates the effect of staged action language.
     guidance_items = []
-    collision_objects = tuple(dict.fromkeys(map(str, collision_objects)))
-    if collision_objects:
-        object_text = " and ".join(collision_objects[:2])
-        guidance_items.append(
-            PackedItem(
-                text=f"Avoid the {object_text} and continue the task.",
-                rank=len(RELATION_PRIORITY) + 1,
-                section="goal",
-                mandatory=True,
-            )
-        )
     if prompt_phase in {"placement", "release"}:
         destination_label = retriever._label_by_id[destination_ids[0]]
         guidance = {
