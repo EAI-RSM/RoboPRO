@@ -381,7 +381,7 @@ def test_prepare_instruction_preserves_visual_only_and_fits_graph(tmp_path):
     assert placement.selected_fact_count == 1
     assert placement.instruction == (
         "put target in box\n"
-        "Move the held object forward and left into the box."
+        "Keep holding the object. Move it forward and left into the box."
     )
     assert len(model.calls) == 1
     held_event = live_task_state(task, observation, RetrievalContract())

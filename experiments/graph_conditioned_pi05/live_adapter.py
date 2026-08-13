@@ -444,7 +444,10 @@ def compact_placement_hint(
     destination_label = retriever._label_by_id.get(destination_id, "destination")
     preposition = "onto" if relation == "on" else "into"
     if motion:
-        return f"Move the held object {motion} {preposition} the {destination_label}."
+        return (
+            f"Keep holding the object. Move it {motion} "
+            f"{preposition} the {destination_label}."
+        )
     return f"Place the held object {preposition} the {destination_label}."
 
 
