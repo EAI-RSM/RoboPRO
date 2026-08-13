@@ -581,13 +581,31 @@ class Robot:
         jointState_list.append(self.get_right_gripper_val())
         return jointState_list
 
+    def _gripper_real_val(self, gripper, entity, scale) -> float:
+        """Normalized [0,1] opening from the base finger's physics qpos."""
+        if not gripper or None in gripper:
+            return 0.0
+        qpos = entity.get_qpos()
+        active = entity.get_active_joints()
+        raw = float(qpos[active.index(gripper[0][0])])
+        denom = scale[1] - scale[0]
+        if abs(denom) < 1e-9:
+            return 0.0
+        return float(np.clip((raw - scale[0]) / denom, 0.0, 1.0))
+
+    def get_left_gripper_real_val(self):
+        return self._gripper_real_val(self.left_gripper, self.left_entity, self.left_gripper_scale)
+
+    def get_right_gripper_real_val(self):
+        return self._gripper_real_val(self.right_gripper, self.right_entity, self.right_gripper_scale)
+
     def get_left_arm_real_jointState(self) -> list:
         jointState_list = []
         left_joints_qpos = self.left_entity.get_qpos()
         left_active_joints = self.left_entity.get_active_joints()
         for joint in self.left_arm_joints:
             jointState_list.append(left_joints_qpos[left_active_joints.index(joint)])
-        jointState_list.append(self.get_left_gripper_val())
+        jointState_list.append(self.get_left_gripper_real_val())
         return jointState_list
 
     def get_right_arm_real_jointState(self) -> list:
@@ -596,7 +614,7 @@ class Robot:
         right_active_joints = self.right_entity.get_active_joints()
         for joint in self.right_arm_joints:
             jointState_list.append(right_joints_qpos[right_active_joints.index(joint)])
-        jointState_list.append(self.get_right_gripper_val())
+        jointState_list.append(self.get_right_gripper_real_val())
         return jointState_list
 
     def get_left_gripper_val(self):
