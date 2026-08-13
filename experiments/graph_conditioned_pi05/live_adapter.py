@@ -451,6 +451,82 @@ def compact_placement_hint(
     return f"Place the held object {preposition} the {destination_label}."
 
 
+def compact_grasp_hint(
+    retriever: "LiveGraphRetriever",
+    target_id: int,
+) -> str:
+    """Prefer the gripper whose validated straight target corridor is clear."""
+    target_indices = np.flatnonzero(retriever.object_ids == int(target_id))
+    by_effector = np.asarray(
+        retriever.state.get("blocks_by_effector", ()), dtype=np.bool_
+    )
+    valid = np.asarray(
+        retriever.state.get(
+            "blocks_by_effector_valid", np.zeros_like(by_effector)
+        ),
+        dtype=np.bool_,
+    )
+    target_label = retriever._label_by_id[int(target_id)]
+    fallback = f"Pick up the {target_label}."
+    if (
+        len(target_indices) != 1
+        or by_effector.ndim != 3
+        or valid.shape != by_effector.shape
+        or by_effector.shape[2] != len(retriever.blocks_effector_names)
+    ):
+        return fallback
+
+    target_index = int(target_indices[0])
+    blocks = np.asarray(retriever.state.get("blocks", ()), dtype=np.bool_)
+    blocks_valid = np.asarray(
+        retriever.state.get("blocks_valid", np.zeros_like(blocks)),
+        dtype=np.bool_,
+    )
+    if blocks.ndim != 2 or blocks_valid.shape != blocks.shape:
+        return fallback
+    blocker_indices = np.flatnonzero(
+        blocks[:, target_index] & blocks_valid[:, target_index]
+    )
+    if not len(blocker_indices):
+        return fallback
+
+    evidence = []
+    for effector_index in range(by_effector.shape[2]):
+        corridor_valid = valid[
+            blocker_indices, target_index, effector_index
+        ]
+        if not np.all(corridor_valid):
+            evidence.append(Evidence.UNKNOWN)
+        elif np.any(
+            by_effector[blocker_indices, target_index, effector_index]
+        ):
+            evidence.append(Evidence.TRUE)
+        else:
+            evidence.append(Evidence.FALSE)
+
+    if evidence.count(Evidence.FALSE) != 1:
+        return fallback
+    clear_index = evidence.index(Evidence.FALSE)
+    if any(
+        state is not Evidence.TRUE
+        for index, state in enumerate(evidence)
+        if index != clear_index
+    ):
+        return fallback
+    effector_name = retriever.blocks_effector_names[clear_index].lower()
+    side = (
+        "left" if "left" in effector_name
+        else "right" if "right" in effector_name
+        else ""
+    )
+    if not side:
+        return fallback
+    return (
+        f"Approach the {target_label} with the {side} gripper "
+        f"and pick it up."
+    )
+
+
 class LiveGraphRetriever:
     """Retrieve current-frame nodes and facts from an observation snapshot.
 
@@ -909,10 +985,9 @@ def prepare_instruction(
             for object_id, is_target in zip(retriever.object_ids, retriever.is_target)
             if bool(is_target)
         )
-        target_label = retriever._label_by_id[target_id]
         destination_label = retriever._label_by_id[destination_ids[0]]
         guidance = {
-            "grasp": f"Pick up the {target_label}.",
+            "grasp": compact_grasp_hint(retriever, target_id),
             "placement": compact_placement_hint(
                 retriever, destination_ids, relation=goal.relation
             ),

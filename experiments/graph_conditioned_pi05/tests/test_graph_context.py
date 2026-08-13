@@ -19,6 +19,7 @@ from experiments.graph_conditioned_pi05.graph_serializer import (
 )
 from experiments.graph_conditioned_pi05.live_adapter import (
     LiveGraphRetriever,
+    compact_grasp_hint,
     destination_ids_from_task,
     goal_geometry_pack_item,
     keep_active_gripper_closed,
@@ -450,6 +451,32 @@ def test_prepare_instruction_preserves_visual_only_and_fits_graph(tmp_path):
     assert edge.release_ready
 
 
+def test_grasp_hint_selects_only_a_valid_uniquely_clear_gripper(tmp_path):
+    with _graph_file(tmp_path / "graph.hdf5") as root:
+        catalog, state, object_state = _live_inputs(root)
+    retriever = LiveGraphRetriever(
+        catalog, state, object_state, RetrievalContract()
+    )
+    retriever.is_target = np.isin(retriever.object_ids, [10])
+
+    # Left path blocked, right path valid and clear.
+    state["blocks_by_effector"][:, 0, :] = False
+    state["blocks_by_effector"][1, 0] = [True, False]
+    state["blocks_by_effector_valid"][:, 0, :] = True
+    assert compact_grasp_hint(retriever, 10) == (
+        "Approach the target with the right gripper and pick it up."
+    )
+
+    # Unknown opposite-side evidence must not be described as available.
+    state["blocks_by_effector_valid"][:, 0, 1] = False
+    assert compact_grasp_hint(retriever, 10) == "Pick up the target."
+
+    # No preference when both paths are valid and clear.
+    state["blocks_by_effector"][:, 0, :] = False
+    state["blocks_by_effector_valid"][:, 0, :] = True
+    assert compact_grasp_hint(retriever, 10) == "Pick up the target."
+
+
 def test_transport_gripper_latch_changes_only_the_active_channel():
     action = np.linspace(0.1, 1.4, 14)
     left = keep_active_gripper_closed(action, "left")
@@ -589,10 +616,12 @@ def main():
         test_live_retrieval_matches_hdf5(Path(directory))
     with TemporaryDirectory() as directory:
         test_prepare_instruction_preserves_visual_only_and_fits_graph(Path(directory))
+    with TemporaryDirectory() as directory:
+        test_grasp_hint_selects_only_a_valid_uniquely_clear_gripper(Path(directory))
     test_transport_gripper_latch_changes_only_the_active_channel()
     with TemporaryDirectory() as directory:
         test_alignment_mismatch_fails(Path(directory))
-    print("17 graph-context tests passed")
+    print("18 graph-context checks passed")
 
 
 if __name__ == "__main__":
