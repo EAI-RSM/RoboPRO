@@ -596,11 +596,12 @@ def create_obj(
     builder.add_visual_from_file(filename=str(file_name), scale=scale)
     mesh = builder.build(name=modelname)
     mesh.set_pose(pose)
+    actor = Actor(mesh, model_data, scale=scale)
+    if not is_static:
+        actor.set_friction()
+    return actor
 
-    return Actor(mesh, model_data, scale=scale)
 
-
-# create glb model
 def create_glb(
         scene,
         pose: sapien.Pose,
@@ -651,8 +652,10 @@ def create_glb(
     builder.add_visual_from_file(filename=str(file_name), scale=scale)
     mesh = builder.build(name=modelname)
     mesh.set_pose(pose)
-
-    return Actor(mesh, model_data, scale=scale)
+    actor = Actor(mesh, model_data, scale=scale)
+    if not is_static:
+        actor.set_friction()
+    return actor
 
 
 def get_glb_or_obj_file(modeldir, model_id):
@@ -734,7 +737,10 @@ def create_actor(
     mesh = builder.build(name=modelname)
     mesh.set_name(modelname)
     mesh.set_pose(pose)
-    return Actor(mesh, model_data, scale=scale)
+    actor = Actor(mesh, model_data, scale=scale)
+    if not is_static:
+        actor.set_friction()
+    return actor
 
 
 # create urdf model

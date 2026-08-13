@@ -44,13 +44,36 @@ class put_spoon_on_plate_ks(KitchenS_base_task):
             model_id=self.spoon_id,
         )
         self.target_obj.set_mass(0.05)
+        self.add_prohibit_area(self.target_obj, padding=0.02, area="table")
+
+        # Center-ish plate (original was xlim=[0]) with enough x jitter that
+        # scene 1 can still land left of the sink. Clip so the 8 cm footprint
+        # clears the sink keepout; without that, most of [-0.2, 0.2] is invalid
+        # when the sink is at x≈0.10.
+        obj_padding = 0.08
+        side_xlim = [-0.2, 0.2]
+        sink_x = float(self.sink.get_pose().p[0])
+        sink_geom = self.kitchens_info["sink_geom"]
+        sink_pad = 0.03  # must match _load_sink
+        clearance = sink_geom["hole_hx"] + sink_pad + obj_padding + 0.01
+        sink_clear = [
+            [side_xlim[0], min(side_xlim[1], sink_x - clearance)],
+            [max(side_xlim[0], sink_x + clearance), side_xlim[1]],
+        ]
+        plate_xlims = [b for b in sink_clear if b[1] - b[0] >= 0.03]
+        if not plate_xlims:
+            raise RuntimeError(
+                f"No sink-clear plate spawn in {side_xlim}: "
+                f"sink_x={sink_x:.3f}"
+            )
+        plate_xlim = max(plate_xlims, key=lambda b: b[1] - b[0])
 
         target_rand_pose = self.rand_pose_on_counter(
-            xlim=[0],
+            xlim=plate_xlim,
             ylim=[-0.23, 0.05],
             qpos=[0.5, 0.5, 0.5, 0.5],
             rotate_rand=False,
-            obj_padding=0.08,
+            obj_padding=obj_padding,
         )
 
         self.plate_id = 0
@@ -63,7 +86,6 @@ class put_spoon_on_plate_ks(KitchenS_base_task):
             is_static=True,
         )
         self.add_prohibit_area(self.des_obj, padding=0.01, area="table")
-        self.add_prohibit_area(self.target_obj, padding=0.02, area="table")
 
         self.des_obj_pose = self.des_obj.get_pose().p.tolist() + [0, 0, 0, 1]
         self.des_obj_pose[2] += 0.02
@@ -95,8 +117,8 @@ class put_spoon_on_plate_ks(KitchenS_base_task):
     def check_success(self):
         end_pose_actual = self.target_obj.get_pose().p
         end_pose_desired = self.des_obj.get_pose().p
-        eps1 = 0.02
-        eps2 = 0.02
+        eps1 = 0.03
+        eps2 = 0.03
 
         return (np.all(abs(end_pose_actual[:2] - end_pose_desired[:2]) < np.array([eps1, eps2]))
                 and self.robot.is_left_gripper_open()

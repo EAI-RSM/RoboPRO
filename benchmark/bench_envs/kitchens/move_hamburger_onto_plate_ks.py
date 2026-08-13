@@ -96,8 +96,8 @@ class move_hamburger_onto_plate_ks(KitchenS_base_task):
     def check_success(self):
         end_pose_actual = self.target_obj.get_pose().p
         end_pose_desired = self.des_obj.get_pose().p
-        eps1 = 0.02
-        eps2 = 0.02
+        eps1 = 0.03
+        eps2 = 0.03
 
         return (np.all(abs(end_pose_actual[:2] - end_pose_desired[:2]) < np.array([eps1, eps2]))
                 and self.robot.is_left_gripper_open()

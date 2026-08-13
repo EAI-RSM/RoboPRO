@@ -44,9 +44,12 @@ class PI0:
         # (bf16->f16 lowering bug), so force float32 compute for the JAX backend. Must NOT be applied to
         # the PyTorch backend (it runs paligemma in bf16 to match training; forcing fp32 only on the
         # action head would be a precision mismatch that degrades actions). Keep PyTorch at native bf16.
-        # Default ON to match the training-data reference (the GB10 collection ran fp32); export
-        # PI05_FORCE_FP32=0 explicitly to opt into bf16.
-        if not is_pytorch_ckpt and os.environ.get("PI05_FORCE_FP32", "1") == "1":
+        # Default OFF: fp32 doubles the resident params, which does not fit on a 16GB card
+        # (12GB of params needs ~12GB resident plus a ~4.5GB transient buffer during the orbax
+        # restore, against a 0.85*16GB budget -> RESOURCE_EXHAUSTED before the server ever
+        # serves). Export PI05_FORCE_FP32=1 to opt in on GB10/Blackwell, or to reproduce the
+        # fp32 training-data reference where memory allows.
+        if not is_pytorch_ckpt and os.environ.get("PI05_FORCE_FP32", "0") == "1":
             import dataclasses as _dc
             config = _dc.replace(config, model=_dc.replace(config.model, dtype="float32"))
             print("[pi_model] PI05_FORCE_FP32=1 -> model compute dtype = float32")

@@ -62,7 +62,10 @@ def create_glb_actor(
     actor.set_pose(pose)
     actor.set_name(model_name)
 
-    return Simple_Actor(actor, mass=mass, scale=scale)
+    wrapped = Simple_Actor(actor, mass=mass, scale=scale)
+    if not is_static:
+        wrapped.set_friction()
+    return wrapped
 
 
 def create_multiple_obj_actor(

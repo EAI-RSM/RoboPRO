@@ -59,6 +59,10 @@ class put_milktea_on_shelf(Office_base_task):
             model_id=self.milktea_id, 
         )
         self.target_obj.set_mass(0.06)
+        # Spawn orientation is upright by construction; remember which LOCAL axis
+        # points world-up so check_success can measure tilt without assuming an
+        # asset axis convention.
+        self._target_init_quat = np.array(self.target_obj.get_pose().q, dtype=np.float64)
         self.add_prohibit_area(self.target_obj, padding=0)
         self.add_operating_area(self.target_obj.get_pose().p)
         self.des_obj_pose += self.target_obj.get_pose().q.tolist()
@@ -100,11 +104,25 @@ class put_milktea_on_shelf(Office_base_task):
         # return self.info
 
     def check_success(self):
-        tp = self.target_obj.get_pose().p
+        pose = self.target_obj.get_pose()
+        tp = pose.p
         xmin, ymin, xmax, ymax = self.office_info["shelf_lims"]
         eps = 0.02
         on_shelf_xy = (xmin <= tp[0] <= xmax) and (ymin <= tp[1] <= ymax)
+
+        # UPRIGHT requirement: same as put_milktea_next_to_laptop. Require the
+        # local axis that pointed world-up at spawn to stay within eps_tilt_deg
+        # of world-up. Yaw spins pass; tipped/fallen fails.
+        eps_tilt_deg = 15.0  # NOTE: tunable strictness, same convention as d7427da
+        from transforms3d.quaternions import quat2mat
+        R0 = quat2mat(self._target_init_quat)
+        Rn = quat2mat(np.array(pose.q, dtype=np.float64))
+        up_local = R0.T @ np.array([0.0, 0.0, 1.0])   # local axis that was world-up
+        up_now = Rn @ up_local
+        upright = up_now[2] > np.cos(np.deg2rad(eps_tilt_deg))
+
         return (abs(tp[2] - self.office_info["shelf_heights"][0]) < eps
                 and on_shelf_xy
+                and upright
                 and self.robot.is_left_gripper_open()
                 and self.robot.is_right_gripper_open())

@@ -1,4 +1,5 @@
 from bench_envs.kitchens._kitchens_base_task import KitchenS_base_task
+from bench_envs.utils.scene_gen_utils import get_actor_boundingbox
 from envs.utils import *
 import sapien, math, os, glob
 from envs._GLOBAL_CONFIGS import *
@@ -171,16 +172,20 @@ class chain_apple_sink_plate_bread_board_ks(KitchenS_base_task):
         self._bread_to_board()
 
     def check_success(self):
-        apple_p = self.apple.get_pose().p
-        plate_p = self.plate.get_pose().p
-        bread_p = self.bread.get_pose().p
-        board_p = self.board.get_pose().p
+        apple_p = np.asarray(self.apple.get_pose().p)
+        plate_p = np.asarray(self.plate.get_pose().p)
+        bread_p = np.asarray(self.bread.get_pose().p)
 
         apple_on_plate = (abs(apple_p[0] - plate_p[0]) < 0.08
                           and abs(apple_p[1] - plate_p[1]) < 0.08
                           and apple_p[2] > plate_p[2] - 0.02)
-        bread_on_board = (abs(bread_p[0] - board_p[0]) < 0.10
-                          and abs(bread_p[1] - board_p[1]) < 0.10
-                          and bread_p[2] > board_p[2] - 0.02)
 
-        return apple_on_plate and bread_on_board
+        board_bb = get_actor_boundingbox(self.board)
+        if board_bb[0] is None:
+            return False
+        bread_on_board_xy = (board_bb[0][0] <= bread_p[0] <= board_bb[1][0] and
+                             board_bb[0][1] <= bread_p[1] <= board_bb[1][1])
+        dz = float(bread_p[2] - board_bb[1][2])
+        bread_on_board = bread_on_board_xy and 0 <= dz <= 0.06
+
+        return bool(apple_on_plate and bread_on_board)
