@@ -1,0 +1,2 @@
+{"episode_index": 0, "tasks": ["put the milk tea next to the laptop"], "length": 300, "scene_index": 0, "scene_id": "clean/seed0", "tier": "clean", "seed": 0, "draw": 0, "success": false, "data_source": "robotwin_rollouts", "source_detail": "clean/seed0/episode0/pi05", "fps": 30}
+{"episode_index": 1, "tasks": ["put the milk tea next to the laptop"], "length": 161, "scene_index": 0, "scene_id": "clean/seed0", "tier": "clean", "seed": 0, "draw": 1, "success": true, "data_source": "robotwin_rollouts", "source_detail": "clean/seed0/episode1/pi05", "fps": 30}
