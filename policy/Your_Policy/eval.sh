@@ -11,10 +11,11 @@ gpu_id=${5}
 export CUDA_VISIBLE_DEVICES=${gpu_id}
 echo -e "\033[33mgpu id (to use): ${gpu_id}\033[0m"
 
-cd ../.. # move to root
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+cd "${REPO_ROOT}"
 
 PYTHONWARNINGS=ignore::UserWarning \
-python script/eval_policy.py --config policy/$policy_name/deploy_policy.yml \
+python eval/eval_policy.py --config policy/$policy_name/deploy_policy.yml \
     --overrides \
     --task_name ${task_name} \
     --task_config ${task_config} \

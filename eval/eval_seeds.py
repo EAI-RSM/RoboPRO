@@ -2,7 +2,7 @@
 
 Seed files live at:
     {BENCH_ROOT}/eval_seeds/{task}/{config}.txt
-and are space-separated integers (see script/precollect_eval_seeds.py).
+and are space-separated integers (see collect/precollect_eval_seeds.py).
 """
 
 from __future__ import annotations

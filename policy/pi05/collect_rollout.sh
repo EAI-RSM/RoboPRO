@@ -36,15 +36,15 @@ echo -e "\033[33mserver gpu: ${server_gpu}, client gpu: ${client_gpu}\033[0m"
 export ACTION_NOISE_VAR="${ACTION_NOISE_VAR:-0.0}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-export SIM_ROOT="${SIM_ROOT:-$(cd "${SCRIPT_DIR}/../.." && pwd)}"
-export BENCH_ROOT="${BENCH_ROOT:-$(cd "${SIM_ROOT}/../benchmark" && pwd)}"
-
-
-
+export WORKSPACE_ROOT="${WORKSPACE_ROOT:-$(cd "${SCRIPT_DIR}/../.." && pwd)}"
+export SIM_ROOT="${SIM_ROOT:-${WORKSPACE_ROOT}/sim}"
+export BENCH_ROOT="${BENCH_ROOT:-${WORKSPACE_ROOT}/benchmark}"
+export DATA_ROOT="${DATA_ROOT:-${WORKSPACE_ROOT}/data}"
+export POLICY_ROOT="${POLICY_ROOT:-${WORKSPACE_ROOT}/policy}"
 
 export CUDA_VISIBLE_DEVICES=${client_gpu}
 
-cd "${SCRIPT_DIR}/../.."  # -> sim/ (robust to invocation cwd)
+cd "${WORKSPACE_ROOT}"
 
 FREE_PORT=$(python3 - << 'EOF'
 import socket
@@ -64,7 +64,7 @@ PI05_VENV="$(pwd)/policy/pi05/.venv"
     export PYTHONWARNINGS=ignore::UserWarning
     export XLA_PYTHON_CLIENT_PREALLOCATE=false
     export XLA_PYTHON_CLIENT_MEM_FRACTION=0.85
-    exec "${PI05_VENV}/bin/python" script/policy_model_server.py \
+    exec "${PI05_VENV}/bin/python" eval/policy_model_server.py \
         --port ${FREE_PORT} \
         --config policy/${policy_name}/deploy_policy.yml \
         --overrides \
@@ -83,7 +83,7 @@ trap "echo -e '\033[31m[cleanup] Killing server PID=${SERVER_PID}\033[0m'; kill 
 # --- Client (RoboTwin conda env, current process) ---
 echo -e "\033[34m[client] Starting collect_rollout_client on port ${FREE_PORT}\033[0m"
 PYTHONWARNINGS=ignore::UserWarning \
-python script/collect_rollout_client.py \
+python "${WORKSPACE_ROOT}/collect/collect_rollout_client.py" \
     --port ${FREE_PORT} \
     --config policy/${policy_name}/deploy_policy.yml \
     --overrides \

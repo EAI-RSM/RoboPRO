@@ -1,35 +1,35 @@
-# Data-Gen Branch Handoff (`data-gen`)
+# Collect — data generation
 
-
-This branch adds a grounding **data-generation pipeline** on top of RoboPRO's
-`sim/` collector: per-object masks + depth + role annotations in every
-episode, ready for large-scale collection.
+How to collect RoboPRO episodes: per-object masks + depth + role annotations,
+ready for large-scale runs. The collector lives in this directory and drives
+the `sim/` runtime plus `benchmark/` tasks.
 
 **Going forward:**
 
 - ✅ **KEEP AS-IS (§2):** the perception/data plumbing — raw-id masks, ID→name/role maps,
-  PNG compression, depth-based 3D lift, viz tools. Verified end-to-end; please build on
+  PNG compression, depth-based 3D lift, grounding. Verified end-to-end; please build on
   top rather than modify.
 - 🔁 **YOURS TO BUILD (§3):** the labeling / collision-interpretation layer. We prototyped
   one (4-way outcome labels + filtering + planner-blindness for negative samples) and then
-  **removed it from the branch** so you start from a clean slate — §3 summarizes what it
+  **removed it from the collector** so you start from a clean slate — §3 summarizes what it
   was and where to find the full reference implementation in git history.
 - One commented example config remains: `benchmark/bench_task_config/datagen_template.yml`.
 
-Quick start for tools/collection commands: `visualization/README.md`.
+Quick start: `source set_env.sh && bash collect/collect_data.sh <task> <config> 0`.
+Grounding lives in `collect/masking_resolve.py` (called from the collector).
 
 ---
 
-## 1. Change map (every file this branch touches)
+## 1. Change map (files the collector pipeline touches)
 
 | File | What changed |
 |---|---|
 | `sim/envs/camera/camera.py` | segmentation returns **raw uint16 ids** (was palette-colorized RGB) |
 | `sim/envs/_base_task.py` | + `get_actor_id_map()`, + `get_role_names()`; + optional `data_type.actor_bbox` recording (exact per-frame 3D boxes from physx) |
 | `sim/envs/utils/pkl2hdf5.py` | + `seg_encoding()` — PNG-compresses uint16 masks into HDF5 |
-| `sim/script/collect_data.py` | writes id-map/role sidecar into `scene_info.json`; organized per-episode output + end-of-run summary; per-episode crash guards (one bad episode no longer kills a run) |
-| `visualization/` (viz_episode, export, inspect_hdf5, README) | standalone inspect / viz / **on-demand export** (point clouds, 2D/3D boxes, masks, overlays) tools |
-| `sim/time_run.sh` | timing helper (wall time → sec/episode → dataset projection) |
+| `collect/collect_data.py` | writes id-map/role sidecar into `scene_info.json`; organized per-episode output + end-of-run summary; per-episode crash guards (one bad episode no longer kills a run) |
+| `collect/masking_resolve.py` | offline grounding: stage target/bin roles + bake masks into HDF5 |
+| `collect/time_run.sh` | timing helper (wall time → sec/episode → dataset projection) |
 | `benchmark/bench_task_config/datagen_template.yml` | single commented example config |
 
 Nothing outside these files is modified — the `benchmark/bench_envs/` scene classes and
@@ -77,10 +77,10 @@ Decode on read with any PNG decoder (`cv2.imdecode` → uint16).
 - `data_type.pointcloud` stays **off**: the stock cloud is head-cam-only, FPS-downsampled
   to 1024 points. Dense labeled clouds are instead **rebuilt from depth + stored
   intrinsics/extrinsics** (that's also how the method itself lifts masks to 3D) —
-  on demand via `visualization/export.py`, or inside a dataloader (same math).
+  on demand inside a dataloader (same math).
 - Derived data policy: point clouds, 2D boxes, visible-surface 3D boxes, masks-as-images,
-  and overlays are all **computable from the HDF5 after the fact** →
-  `visualization/export.py`, zero collection-time cost. The one thing that can't be
+  and overlays are all **computable from the HDF5 after the fact** inside a dataloader,
+  zero collection-time cost. The one thing that can't be
   derived later, so it's a collection knob: `data_type.actor_bbox` (exact full-extent
   3D boxes from the physics engine, incl. occluded parts; ~KBs/ep).
 
@@ -89,16 +89,20 @@ Per-episode try/except (a CuRobo/mesh crash is logged, cleaned up, and the run
 continues) + a no-frames guard (a plan that produces no executable motion yields no
 HDF5 instead of crashing the pkl→HDF5 merge). Generic safety — worth keeping under any
 labeling scheme. Also: per-episode banners + an end-of-run `COLLECTION SUMMARY`
-(`sim/time_run.sh` parses those summary lines).
+(`collect/time_run.sh` parses those summary lines).
 
-### 2.6 Tools (`visualization/`)
-`inspect_hdf5.py` (HDF5 tree/shapes/attrs) · `viz_episode.py` (panel: RGB | depth |
-seg | role-overlay | 2D-boxes; + labeled .ply clouds + top-down; role colors
-target=red, dest=green, obstacle=orange, robot=blue) · `export.py` (on-demand:
-role-colored .ply point clouds, 2D boxes, visible-surface 3D boxes, **exact
-full-extent 3D boxes** from the `actor_bbox` HDF5 group, and a 6-row quick-look
-panel grid). Standalone; no engine imports.
-Timing helper: `sim/time_run.sh`.
+### 2.6 Grounding (`collect/masking_resolve.py`)
+Called automatically at collection time (`finalize_grounding`) when
+`data_type.actor_bbox` is on. Writes `masking/episodeN.json` and bakes
+`grounding_mask` into each camera group in the HDF5.
+
+Standalone re-run from the repo root:
+
+```
+python collect/masking_resolve.py <run_dir> [ep] [--write] [--panel]
+```
+
+Timing helper: `collect/time_run.sh`.
 
 ---
 
@@ -112,7 +116,7 @@ crashed-and-failed / failed-no-accident), a `keep_labels` config filter that kep
 the wanted labels per run, a collision-free seed-acceptance mode for exact positive
 counts, and the outcome stamped into each HDF5's attrs.
 
-**It was removed from this branch** (the 4-way taxonomy and the hard ± split don't
+**It was removed from the collector** (the 4-way taxonomy and the hard ± split don't
 generalize across teams). The full working implementation is preserved in git history at
 commit **`e248b2d`**:
 
@@ -143,7 +147,7 @@ episodes, the metrics blob names **which objects were actually hit** — free ca
 
 ## 4. Practical notes
 
-- Routing: run from `sim/` with `source set_env.sh`; configs resolve by *name* from `benchmark/bench_task_config/`.
+- Routing: run from the repo root with `source set_env.sh`; configs resolve by *name* from `benchmark/bench_task_config/`.
 - ARM / aarch64 hosts (GB10 / DGX Spark): SAPIEN 3.0.0b1 has no aarch64 wheel and must be
   built from source — see `docs/setup_sapien_aarch64.md`. This is purely an environment
   build step; it does not affect the data schema, grounding, or 3D boxes produced here.
@@ -153,20 +157,20 @@ episodes, the metrics blob names **which objects were actually hit** — free ca
 - Same scenes across two runs: stock `use_seed: true` + copying `seed.txt` from a
   finished run reproduces identical scenes/instructions (useful for matched-pair designs).
 - Known role-semantics gaps (open design points): some kitchen tasks hold the target in
-  task-specific attrs (viz falls back to `_get_target_object_names()`);
+  task-specific attrs (grounding falls back to `_get_target_object_names()`);
   `put_can_next_to_basket` has **no destination object** — its goal is a pose next to an
   anchor. Destination semantics for such tasks are still an open question.
 - Throughput anchor (1× RTX 4080, d10 clutter, put_cup_on_coaster): ≈ **82 s/kept
   episode** including seed-search rejects; seed replay without search ≈ 37 s/episode.
-  Episode ≈ 37 MB. `sim/time_run.sh` re-measures and projects.
+  Episode ≈ 37 MB. `collect/time_run.sh` re-measures and projects.
 
 ---
 
 ## 5. Dataset contents & format (current pipeline — 2026-07-09)
 
-Everything below is written by `bash collect_data.sh <task> <config> <gpu|gpu,gpu>`
+Everything below is written by `bash collect/collect_data.sh <task> <config> <gpu|gpu,gpu>`
 (single-GPU stock, or comma list = dynamic multi-GPU dispatch via
-`script/collect_parallel.py` + `script/collect_one_episode.py`). One run dir per
+`collect/collect_parallel.py` + `collect/collect_one_episode.py`). One run dir per
 (task, config):
 
 ```
@@ -289,13 +293,12 @@ python script/replay_trajectory.py <task> <collection_config> --replay-config re
 rebuilds the seeded scene, restores `_traj_data/episodeN_init.json` (authoritative),
 re-runs the saved joint paths with `need_plan=False`, and records the extra
 `data_type` modalities from `replay_rich.yml` into
-`./data/replay_data/<task>/<config>_replay/`.
+`data/replay_data/<task>/<config>_replay/`.
 
 ### 5.4 Inspection
 
+Re-run grounding or render a masking panel from the repo root:
+
 ```
-python visualization/flag_timeline.py <run_dir> [ep] [--min-impulse 0.04]
+python collect/masking_resolve.py <run_dir> [ep] [--write] [--panel]
 ```
-prints impulse-filtered contact windows (+peak impulse), collision windows with
-each hit object's t0→window-end pose movement (cm, deg), and video timecodes;
-`visualization/inspect_hdf5.py` dumps raw hdf5 trees.

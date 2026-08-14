@@ -1,6 +1,6 @@
 """Pre-collect evaluation seeds for the RoboTwin benchmark.
 
-Mirrors the first-pass loop of script/collect_data.py but writes ONLY a seed
+Mirrors the first-pass loop of collect/collect_data.py but writes ONLY a seed
 file — no pkl, no hdf5, no mp4. Output:
 
     {BENCH_ROOT}/eval_seeds/{task}/{config}.txt
@@ -18,10 +18,8 @@ import tempfile
 from argparse import ArgumentParser
 from pathlib import Path
 
-sys.path.append("./")
-
-from script.bench_script.setup_paths import setup_paths
-setup_paths()
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import _env  # noqa: F401
 
 import yaml
 import sapien.core as sapien  # noqa: F401  -- import order matters for envs

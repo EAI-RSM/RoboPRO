@@ -13,7 +13,8 @@ policy_conda_env=${7}
 export CUDA_VISIBLE_DEVICES=${gpu_id}
 echo -e "\033[33mgpu id (to use): ${gpu_id}\033[0m"
 
-cd ../..
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+cd "${REPO_ROOT}"
 
 yaml_file="policy/${policy_name}/deploy_policy.yml"
 
@@ -36,7 +37,7 @@ conda activate "${policy_conda_env}"
 
 echo -e "\033[32m[server] Launching policy_model_server (PID will be recorded)...\033[0m"
 PYTHONWARNINGS=ignore::UserWarning \
-python script/policy_model_server.py \
+python eval/policy_model_server.py \
     --port ${FREE_PORT} \
     --policy_conda_env ${policy_conda_env} \
     --config policy/${policy_name}/deploy_policy.yml \
@@ -57,7 +58,7 @@ conda deactivate
 # Start the client in the foreground
 echo -e "\033[34m[client] Starting eval_policy_client on port ${FREE_PORT}...\033[0m"
 PYTHONWARNINGS=ignore::UserWarning \
-python script/eval_policy_client.py \
+python eval/eval_policy_client.py \
     --port ${FREE_PORT} \
     --policy_conda_env ${policy_conda_env} \
     --config policy/${policy_name}/deploy_policy.yml \

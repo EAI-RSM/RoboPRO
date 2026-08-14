@@ -1,6 +1,6 @@
 """Run ONE seed of the grounding-data collector (single-episode subprocess).
 
-The per-seed unit behind script/collect_parallel.py's dynamic GPU dispatch
+The per-seed unit behind collect/collect_parallel.py's dynamic GPU dispatch
 (targetted-failures style: workers pull seeds from a shared stream, all writing
 into ONE run dir). Mirrors exactly one search-iteration + one collect-iteration
 of collect_data.run(); concurrent-safe via an flock'd slot file:
@@ -16,12 +16,13 @@ Exit codes (read by the launcher):
   5  slot claimed but collection failed (slot burned — same gap semantics as
      the stock collector, which deletes the episode and moves on)
 
-Run from sim/ (env robopro):
-    python script/collect_one_episode.py <task_name> <task_config> --seed N
+    python collect/collect_one_episode.py <task_name> <task_config> --seed N
 """
 import sys
+from pathlib import Path
 
-sys.path.append("./")
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import _env  # noqa: F401
 
 import fcntl
 import json
@@ -29,7 +30,6 @@ import os
 import shutil
 import traceback
 from argparse import ArgumentParser
-from pathlib import Path
 
 import collect_data as cd
 from export_scene import export_scene

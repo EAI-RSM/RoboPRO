@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-"""Multi-GPU dispatcher for the data collector — invoked by collect_data.sh when
-its GPU argument is a comma list (e.g. `bash collect_data.sh <task> <config> 0,1`).
+"""Multi-GPU dispatcher for the data collector — invoked by collect/collect_data.sh when
+its GPU argument is a comma list (e.g. `bash collect/collect_data.sh <task> <config> 0,1`).
 
 Dynamic per-seed dispatch (targetted-failures style): workers pull candidate
 seeds from ONE shared stream and run each as its own subprocess
@@ -11,8 +11,8 @@ episodes come out contiguous (episode0..N-1) exactly like a sequential run.
 `episode_num` is read from the task config, so single- and multi-GPU runs collect
 the same amount. Reruns resume from the existing seed.txt / slot count.
 
-Usually you don't call this directly — use:  bash collect_data.sh <task> <config> 0,1
-Direct form:  python script/collect_parallel.py <task> <config> --gpus 0,1
+Usually you don't call this directly — use:  bash collect/collect_data.sh <task> <config> 0,1
+Direct form:  python collect/collect_parallel.py <task> <config> --gpus 0,1
 """
 import argparse
 import fcntl
@@ -28,10 +28,14 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
-SCRIPT_DIR = Path(__file__).resolve().parent        # sim/script
-SIM_ROOT = SCRIPT_DIR.parent                   # sim
-REPO_ROOT = SIM_ROOT.parent                    # repo root
-BENCH_ROOT = REPO_ROOT / "benchmark"
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import _env  # noqa: F401
+from _env import resolve_save_path, run_gen_instructions
+
+SCRIPT_DIR = Path(__file__).resolve().parent
+SIM_ROOT = Path(os.environ["SIM_ROOT"])
+REPO_ROOT = Path(os.environ["WORKSPACE_ROOT"])
+BENCH_ROOT = Path(os.environ["BENCH_ROOT"])
 BENCH_CFG_DIR = BENCH_ROOT / "bench_task_config"
 RUN_EPISODE = SCRIPT_DIR / "collect_one_episode.py"
 
@@ -185,6 +189,7 @@ def collect(args, task, config, gpu_ids, run_dir, index_path):
             env["SIM_ROOT"] = str(SIM_ROOT)
             env["WORKSPACE_ROOT"] = str(REPO_ROOT)
             env["BENCH_ROOT"] = str(BENCH_ROOT)
+            env["DATA_ROOT"] = os.environ["DATA_ROOT"]
             env["PYTHONWARNINGS"] = "ignore::UserWarning"
             env["PYTHONUNBUFFERED"] = "1"
             env["CUDA_VISIBLE_DEVICES"] = str(gpu)
@@ -244,14 +249,7 @@ def collect(args, task, config, gpu_ids, run_dir, index_path):
     n_final = read_slots(run_dir, args.episodes)["count"]
     lang_num = read_cfg_scalar(config, "language_num", "100")
     print(f"[parallel] {n_final}/{args.episodes} episodes — generating instructions")
-    with open(log_dir / "gen_instructions.log", "w", encoding="utf-8") as log:
-        subprocess.run(
-            ["bash", "-c",
-             f"cd description && bash gen_episode_instructions.sh "
-             f"{task} {config} {lang_num}"],
-            cwd=str(SIM_ROOT),
-            env={**os.environ, "BENCH_ROOT": str(BENCH_ROOT)},
-            stdout=log, stderr=subprocess.STDOUT, check=False)
+    run_gen_instructions(task, config, lang_num)
     return n_final
 
 
@@ -287,8 +285,7 @@ def main():
         sys.exit("[parallel] episode_num not found in config and --episodes not given")
 
     save_path = read_cfg_scalar(args.task_config, "save_path", "./data")
-    root = (SIM_ROOT / save_path).resolve() if not Path(save_path).is_absolute() \
-        else Path(save_path)
+    root = Path(resolve_save_path(save_path))
     run_dir = root / args.task_name / args.task_config
     index_path = root / "collect_parallel_index.jsonl"
 

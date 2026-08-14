@@ -42,13 +42,15 @@ Env vars:
 
 import sys
 import os
+from pathlib import Path
 
-sys.path.append("./")
-sys.path.append("./policy")
-sys.path.append("./description/utils")
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import _env  # noqa: F401
+from _env import run_gen_instructions
 
-from script.bench_script.setup_paths import setup_paths
-setup_paths()
+_sim = os.environ["SIM_ROOT"]
+sys.path.insert(0, os.environ.get("POLICY_ROOT", os.path.join(os.environ["WORKSPACE_ROOT"], "policy")))
+sys.path.insert(0, os.path.join(_sim, "description", "utils"))
 
 from envs.utils.create_actor import UnStableError  # noqa: F401
 
@@ -58,7 +60,6 @@ import time
 import traceback
 import argparse
 import importlib
-from pathlib import Path
 from typing import Any
 
 import base64
@@ -444,8 +445,7 @@ def collect_rollouts(TASK_ENV, args, model, usr_args, collect_num, instruction_t
                     raise RuntimeError(f"fixed seed {seed}: 3 consecutive failures — aborting")
 
     # end-of-run language instructions, same as the CuRobo collector
-    os.system(f"cd description && bash gen_episode_instructions.sh "
-              f"{args['task_name']} {args['task_config']} {args['language_num']}")
+    run_gen_instructions(args['task_name'], args['task_config'], args['language_num'])
     print(f"\nDone. {ep_idx} episodes -> {run_dir/'data'}  "
           f"(success {n_succ} / fail {n_fail})")
 

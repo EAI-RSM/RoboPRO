@@ -27,7 +27,12 @@ fi
 echo -e "\033[33mserver gpu: ${server_gpu}, client gpu: ${client_gpu}\033[0m"
 export CUDA_VISIBLE_DEVICES=${client_gpu}
 
-cd ../..  # → sim/
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+cd "${REPO_ROOT}"
+if [[ -z "${SIM_ROOT:-}" ]]; then
+    # shellcheck source=/dev/null
+    source "${REPO_ROOT}/set_env.sh"
+fi
 
 # Find an available port
 FREE_PORT=$(python3 - << 'EOF'
@@ -59,7 +64,7 @@ PI05_VENV="$(pwd)/policy/pi05/.venv"
     # ${SERVER_PID} points to python directly (otherwise `set -e` inhibits
     # bash's exec-optimization, leaving python reparented to init when we
     # `kill ${SERVER_PID}` on cleanup).
-    exec "${PI05_VENV}/bin/python" script/policy_model_server.py \
+    exec "${PI05_VENV}/bin/python" eval/policy_model_server.py \
         --port ${FREE_PORT} \
         --config policy/${policy_name}/deploy_policy.yml \
         --overrides \
@@ -78,7 +83,7 @@ trap "echo -e '\033[31m[cleanup] Killing server PID=${SERVER_PID}\033[0m'; kill 
 # --- Client (RoboTwin conda env, current process) ---
 echo -e "\033[34m[client] Starting eval_policy_client on port ${FREE_PORT}\033[0m"
 PYTHONWARNINGS=ignore::UserWarning \
-python script/eval_policy_client.py \
+python eval/eval_policy_client.py \
     --port ${FREE_PORT} \
     --config policy/${policy_name}/deploy_policy.yml \
     --overrides \

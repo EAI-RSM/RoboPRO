@@ -1,10 +1,9 @@
 import sys
 from pathlib import Path
 
-sys.path.append("./")
-
-from script.bench_script.setup_paths import setup_paths
-setup_paths()
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import _env  # noqa: F401  — SIM_ROOT / BENCH_ROOT / DATA_ROOT + sys.path
+from _env import resolve_save_path, run_gen_instructions
 
 import sapien.core as sapien
 from sapien.render import clear_cache
@@ -21,18 +20,7 @@ import h5py
 from argparse import ArgumentParser
 
 from export_scene import export_scene
-
-# grounding is a first-class per-episode output: from the just-written HDF5 + scene_info
-# we save masking/episode{i}.json (stage metadata) AND bake the target/bin masks into the
-# HDF5, so a dataloader gets everything by reading the files (no functions to call).
-_VIZ_DIR = os.path.abspath(os.path.join(
-    os.path.dirname(os.path.abspath(__file__)), "..", "..", "visualization"))
-sys.path.insert(0, _VIZ_DIR)
-try:
-    from masking_resolve import finalize_grounding
-except Exception as _e:  # noqa: BLE001
-    finalize_grounding = None
-    print(f"\033[93mmasking_resolve unavailable — grounding will be skipped: {_e}\033[0m")
+from masking_resolve import finalize_grounding
 
 current_file_path = os.path.abspath(__file__)
 parent_directory = os.path.dirname(current_file_path)
@@ -119,7 +107,8 @@ def build_task_and_args(task_name, task_config):
 
     args["embodiment_name"] = embodiment_name
     args['task_config'] = task_config
-    args["save_path"] = os.path.join(args["save_path"], str(args["task_name"]), args["task_config"])
+    args["save_path"] = os.path.join(
+        resolve_save_path(args["save_path"]), str(args["task_name"]), args["task_config"])
     return task, args
 
 
@@ -186,7 +175,7 @@ def run(TASK_ENV, args):
 
     # Debug mode: instead of iterating over seeds (reopening Sapien),
     # hold the viewer open on the first failure so targets/scene can be inspected.
-    # Enable with:  RT_DEBUG_STUCK=1 python -u script/collect_data.py ...
+    # Enable with:  RT_DEBUG_STUCK=1 python -u collect/collect_data.py ...
     debug_stuck = os.getenv("RT_DEBUG_STUCK") == "1"
 
     print(f"Task Name: \033[34m{args['task_name']}\033[0m")
@@ -406,7 +395,7 @@ def run(TASK_ENV, args):
                 # raises SystemExit -- which, being a BaseException, escapes the
                 # except-Exception guards below and kills the whole run after the
                 # first episode. Skip the step instead when the flag is off.
-                if finalize_grounding is not None and (args.get("data_type") or {}).get("actor_bbox", False):
+                if (args.get("data_type") or {}).get("actor_bbox", False):
                     try:
                         finalize_grounding(args["save_path"], episode_idx,
                                            obj_pad=args.get("table_obj_pad"))
@@ -435,8 +424,7 @@ def run(TASK_ENV, args):
                             pass
                 continue
 
-        command = f"cd description && bash gen_episode_instructions.sh {args['task_name']} {args['task_config']} {args['language_num']}"
-        os.system(command)
+        run_gen_instructions(args['task_name'], args['task_config'], args['language_num'])
 
         _banner(f"COLLECTION SUMMARY · {args['task_name']} / {args['task_config']}")
         print(f"  {'episodes attempted':26s} {attempted_num}")

@@ -1,17 +1,17 @@
 import sys
 import os
 import subprocess
+import json
+from pathlib import Path
 
-sys.path.append("./")
-sys.path.append(f"./policy")
-sys.path.append("./description/utils")
-from script.bench_script.setup_paths import setup_paths
-setup_paths()
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import _env  # noqa: F401
+from _env import eval_result_root
+
 from envs import CONFIGS_PATH
 from envs.utils.create_actor import UnStableError
 
 import numpy as np
-from pathlib import Path
 from collections import deque
 import traceback
 
@@ -22,96 +22,23 @@ import argparse
 import pdb
 
 from generate_episode_instructions import *
-from script.eval_seeds import resolve_eval_seeds, resolve_test_num, resolve_instruction_bank, resolve_expert_check
+from eval_seeds import resolve_eval_seeds, resolve_test_num, resolve_expert_check, resolve_instruction_bank
 
-
-import sys
-import os
-import subprocess
-import socket
-import json
-import threading
-import time
-import random
-import traceback
-import yaml
-from datetime import datetime
-import importlib
-import argparse
-from pathlib import Path
-from collections import deque
-
-import numpy as np
-import json
-from typing import Any
-
-current_file_path = os.path.abspath(__file__)
-parent_directory = os.path.dirname(current_file_path)
-
-import numpy as np
-import json
-from typing import Any
-import base64
-
-class NumpyEncoder(json.JSONEncoder):
-    """Enhanced json encoder for numpy types with array reconstruction info"""
-    def default(self, obj):
-        if isinstance(obj, np.ndarray):
-            if obj.dtype == np.float32:
-                dtype = 'float32'
-            elif obj.dtype == np.float64:
-                dtype = 'float64'
-            elif obj.dtype == np.int32:
-                dtype = 'int32'
-            elif obj.dtype == np.int64:
-                dtype = 'int64'
-            else:
-                dtype = str(obj.dtype)
-            
-            return {
-                '__numpy_array__': True,
-                'data': base64.b64encode(obj.tobytes()).decode('ascii'),
-                'dtype': dtype,
-                'shape': obj.shape
-            }
-        elif isinstance(obj, np.integer):
-            return int(obj)
-        elif isinstance(obj, np.floating):
-            return float(obj)
-        elif isinstance(obj, np.bool_):
-            return bool(obj)
-        return super().default(obj)
-
-def numpy_to_json(data: Any) -> str:
-    """Convert numpy-containing data to JSON string with reconstruction info"""
-    return json.dumps(data, cls=NumpyEncoder)
-
-def json_to_numpy(json_str: str) -> Any:
-    """Convert JSON string back to Python objects with numpy arrays"""
-    def object_hook(dct):
-        if '__numpy_array__' in dct:
-            data = base64.b64decode(dct['data'])
-            return np.frombuffer(data, dtype=dct['dtype']).reshape(dct['shape'])
-        return dct
-    
-    return json.loads(json_str, object_hook=object_hook)
 
 def class_decorator(task_name):
     from script.task_loader import load_task
     return load_task(task_name)
 
 
-def eval_function_decorator(policy_name, model_name, conda_env=None):
-    # conda_env is abandoned
+def eval_function_decorator(policy_name, model_name):
     try:
         policy_model = importlib.import_module(policy_name)
         return getattr(policy_model, model_name)
     except ImportError as e:
         raise e
 
-
 def get_camera_config(camera_type):
-    camera_config_path = os.path.join(parent_directory, "../task_config/_camera_config.yml")
+    camera_config_path = os.path.join(os.environ["SIM_ROOT"], "task_config", "_camera_config.yml")
 
     assert os.path.isfile(camera_config_path), "task config file is missing"
 
@@ -128,146 +55,6 @@ def get_embodiment_config(robot_file):
         embodiment_args = yaml.load(f.read(), Loader=yaml.FullLoader)
     return embodiment_args
 
-class ModelClient:
-    # Attributes that deploy_policy.py reads directly (not as methods).
-    # Mirrored on the client side because the server's RPC dispatch only
-    # supports method calls, and `model.x is None` cannot be satisfied by a
-    # callable proxy.
-    _MIRRORED_DEFAULTS = {"observation_window": None}
-
-    def __init__(self, host='localhost', port=9999, timeout=30, **mirrored):
-        self.host = host
-        self.port = port
-        self.timeout = timeout
-        self.sock = None
-        # Local mirrors. `mirrored` kwargs (e.g. pi0_step) are forwarded to
-        # client-side attributes so deploy_policy can read them without RPC.
-        for k, v in self._MIRRORED_DEFAULTS.items():
-            object.__setattr__(self, k, v)
-        for k, v in mirrored.items():
-            object.__setattr__(self, k, v)
-        self._connect()
-
-    def _connect(self):
-        attempts = 0
-        max_attempts = 1000
-        retry_delay = 5
-        
-        while attempts < max_attempts:
-            try:
-                self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                self.sock.settimeout(self.timeout)
-                self.sock.connect((self.host, self.port))
-                print(f"🔗 Connected to model server at {self.host}:{self.port}")
-                return
-            except Exception as e:
-                attempts += 1
-                if self.sock:
-                    self.sock.close()
-                if attempts < max_attempts:
-                    print(f"⚠️ Connection attempt {attempts} failed: {str(e)}")
-                    print(f"🔄 Retrying in {retry_delay} seconds...")
-                    time.sleep(retry_delay)
-                else:
-                    raise ConnectionError(
-                        f"Failed to connect to server after {max_attempts} attempts: {str(e)}"
-                    )
-
-    def _send_recv(self, data):
-        """Send request and receive response with numpy array support"""
-        try:
-            # Serialize with numpy support
-            json_data = numpy_to_json(data).encode('utf-8')
-            
-            # Send data length and data
-            self.sock.sendall(len(json_data).to_bytes(4, 'big'))
-            self.sock.sendall(json_data)
-            
-            # Receive and deserialize response
-            response = self._recv_response()
-            return response
-            
-        except Exception as e:
-            self.close()
-            raise ConnectionError(f"Communication error: {str(e)}")
-
-    def _recv_response(self):
-        """Receive response with numpy array reconstruction"""
-        # Read response length
-        len_data = self.sock.recv(4)
-        if not len_data:
-            raise ConnectionError("Connection closed by server")
-        
-        size = int.from_bytes(len_data, 'big')
-        
-        # Read complete response
-        chunks = []
-        received = 0
-        while received < size:
-            chunk = self.sock.recv(min(size - received, 4096))
-            if not chunk:
-                raise ConnectionError("Incomplete response received")
-            chunks.append(chunk)
-            received += len(chunk)
-        
-        # Deserialize with numpy reconstruction
-        return json_to_numpy(b''.join(chunks).decode('utf-8'))
-
-    def call(self, func_name=None, obs=None):
-        response = self._send_recv({"cmd": func_name, "obs": obs})
-        if 'res' not in response:
-            # Server caught an exception and returned {"error", "traceback"}
-            # (see policy_model_server.py). Surface it instead of masking it
-            # behind a KeyError: 'res'.
-            err = response.get('error', '<no error field in response>')
-            tb = response.get('traceback', '')
-            raise RuntimeError(
-                f"Server error during RPC '{func_name}':\n{err}\n--- server traceback ---\n{tb}")
-        return response['res']
-
-    def __getattr__(self, name):
-        # __getattr__ only fires for missing attributes, so mirrored fields
-        # set via object.__setattr__ are untouched.
-        if name.startswith("_") or name in {"host", "port", "timeout", "sock"}:
-            raise AttributeError(name)
-
-        def _proxy(*args, **kwargs):
-            if kwargs:
-                raise TypeError("ModelClient RPC does not support kwargs")
-            if len(args) == 0:
-                obs = None
-            elif len(args) == 1:
-                obs = args[0]
-            else:
-                # Multi-arg → wrap in dict; server unpacks with `_args` key.
-                obs = {"_args": list(args)}
-            result = self.call(func_name=name, obs=obs)
-            # Update client-side mirrors after methods that change state.
-            if name == "reset_obsrvationwindows" or name == "reset_model":
-                object.__setattr__(self, "observation_window", None)
-            elif name == "update_observation_window":
-                # Sentinel: any non-None value satisfies `is None` checks.
-                object.__setattr__(self, "observation_window", True)
-            return result
-        return _proxy
-
-    def close(self):
-        """Close the connection"""
-        if self.sock:
-            try:
-                self.sock.close()
-            except:
-                pass
-            finally:
-                self.sock = None
-                print("🔌 Connection closed")
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        self.close()
-
 
 def main(usr_args):
     current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -277,14 +64,11 @@ def main(usr_args):
     # checkpoint_num = usr_args['checkpoint_num']
     policy_name = usr_args["policy_name"]
     instruction_type = usr_args["instruction_type"]
-    port = usr_args["port"]
     save_dir = None
     video_save_dir = None
     video_size = None
 
-    policy_conda_env = usr_args.get("policy_conda_env", None)
-
-    get_model = eval_function_decorator(policy_name, "get_model", conda_env=policy_conda_env)
+    get_model = eval_function_decorator(policy_name, "get_model")
 
     from script.task_loader import bench_config_path
     with open(bench_config_path(task_config), "r", encoding="utf-8") as f:
@@ -333,10 +117,8 @@ def main(usr_args):
     else:
         embodiment_name = str(embodiment_type[0]) + "+" + str(embodiment_type[1])
 
-    save_dir = Path(f"eval_result/{task_name}/{policy_name}/{task_config}/{ckpt_setting}/{current_time}")
+    save_dir = eval_result_root() / task_name / policy_name / task_config / ckpt_setting / current_time
     save_dir.mkdir(parents=True, exist_ok=True)
-    episode_log_path = os.path.join(save_dir, "_episodes.jsonl")
-    print(f"Per-episode stats will be appended to {episode_log_path}")
 
     if args["eval_video_log"]:
         video_save_dir = save_dir
@@ -344,7 +126,7 @@ def main(usr_args):
         video_size = str(camera_config["w"]) + "x" + str(camera_config["h"])
         video_save_dir.mkdir(parents=True, exist_ok=True)
         args["eval_video_save_dir"] = video_save_dir
-
+    
     # output camera config
     print("============= Config =============\n")
     print("\033[95mMessy Table:\033[0m " + str(args["domain_randomization"]["cluttered_table"]))
@@ -374,7 +156,7 @@ def main(usr_args):
     st_seed = 100000 * (1 + seed)
     suc_nums = []
     seed_list = resolve_eval_seeds(task_name, task_config, usr_args)
-    test_num = resolve_test_num(usr_args, seed_list, default=100)
+    test_num = resolve_test_num(usr_args, seed_list, default=1)
     expert_check = resolve_expert_check(usr_args, default=True)
     topk = 1
 
@@ -385,12 +167,7 @@ def main(usr_args):
         print(f"\033[96mNo eval seed file; scanning from st_seed={st_seed} "
               f"(test_num={test_num})\033[0m")
 
-    # model = get_model(usr_args)
-    # Mirror config-derived attributes that deploy_policy reads directly.
-    model_mirrored = {}
-    if "pi0_step" in usr_args:
-        model_mirrored["pi0_step"] = usr_args["pi0_step"]
-    model = ModelClient(port=port, **model_mirrored)
+    model = get_model(usr_args)
     st_seed, suc_num, used_seeds = eval_policy(
         task_name,
         TASK_ENV,
@@ -400,8 +177,6 @@ def main(usr_args):
         test_num=test_num,
         video_size=video_size,
         instruction_type=instruction_type,
-        policy_conda_env=policy_conda_env,
-        episode_log_path=episode_log_path,
         seed_list=seed_list,
         expert_check=expert_check,
     )
@@ -429,8 +204,6 @@ def eval_policy(task_name,
                 test_num=100,
                 video_size=None,
                 instruction_type=None,
-                policy_conda_env=None,
-                episode_log_path=None,
                 seed_list=None,
                 expert_check=True):
     print(f"\033[34mTask Name: {args['task_name']}\033[0m")
@@ -442,21 +215,14 @@ def eval_policy(task_name,
     TASK_ENV.suc = 0
     TASK_ENV.test_num = 0
 
-    # Per-episode stats are appended to episode_log_path after every episode.
-    # Collision metrics are enabled on the policy rollout only — never on the
-    # expert pre-check, because enable_collision_metrics also switches
-    # update_world to exclude clutter obstacles from the planner, which would
-    # change which seeds pass the expert check.
-    collision_metrics_enabled = os.environ.get("EVAL_COLLISION_METRICS", "1") != "0"
-    collision_metrics_active = False
-
     now_id = 0
     succ_seed = 0
     suc_test_seed_list = []
     seed_idx = 0
 
     policy_name = args["policy_name"]
-    eval_func = eval_function_decorator(policy_name, "eval", conda_env=policy_conda_env)
+    eval_func = eval_function_decorator(policy_name, "eval")
+    reset_func = eval_function_decorator(policy_name, "reset_model")
 
     now_seed = st_seed
     task_total_reward = 0
@@ -479,31 +245,31 @@ def eval_policy(task_name,
                 TASK_ENV.setup_demo(now_ep_num=now_id, seed=now_seed, is_test=True, **args)
                 episode_info = TASK_ENV.play_once()
                 if episode_info is None:
-                    # Bench tasks don't `return self.info` from play_once;
-                    # use the env's info dict directly.
                     episode_info = getattr(TASK_ENV, "info", {"info": {}})
                     if "info" not in episode_info:
                         episode_info = {"info": episode_info}
                 TASK_ENV.close_env()
             except UnStableError as e:
-                print(" -------------")
-                print("Error: ", e)
-                print(" -------------")
+                # print(" -------------")
+                # print("Error: ", e)
+                # print(" -------------")
                 TASK_ENV.close_env()
                 now_seed += 1
                 args["render_freq"] = render_freq
                 continue
             except Exception as e:
-                stack_trace = traceback.format_exc()
-                print(" -------------")
-                print("Error: ", stack_trace)
-                print(" -------------")
+                # stack_trace = traceback.format_exc()
+                # print(" -------------")
+                # print("Error: ", e)
+                # print(" -------------")
                 TASK_ENV.close_env()
                 now_seed += 1
                 args["render_freq"] = render_freq
                 print("error occurs !")
                 continue
         else:
+            # Seed-list mode: no expert replay; instructions use empty placeholders
+            # (bench plain_instructions) or the language bank when enabled.
             episode_info = {"info": {}}
 
         if (not expert_check) or (TASK_ENV.plan_success and TASK_ENV.check_success()):
@@ -516,33 +282,9 @@ def eval_policy(task_name,
 
         args["render_freq"] = render_freq
 
-        if collision_metrics_enabled:
-            try:
-                TASK_ENV.setup_demo(now_ep_num=now_id, seed=now_seed, is_test=True,
-                                    **{**args, "enable_collision_metrics": True})
-            except NotImplementedError:
-                # Task class lacks _get_target_object_names(); run without
-                # collision metrics for the rest of the eval.
-                print(f"\033[93m[collision-metrics] {args['task_name']} does not define "
-                      f"_get_target_object_names(); collision column will be null\033[0m")
-                collision_metrics_enabled = False
-                try:
-                    TASK_ENV.close_env()
-                except Exception:
-                    pass
-                TASK_ENV.setup_demo(now_ep_num=now_id, seed=now_seed, is_test=True, **args)
-        else:
-            TASK_ENV.setup_demo(now_ep_num=now_id, seed=now_seed, is_test=True, **args)
+        TASK_ENV.setup_demo(now_ep_num=now_id, seed=now_seed, is_test=True, **args)
 
-        # Active only when the env actually built its tracking sets (bench
-        # envs with the flag supported; legacy envs/ tasks silently skip).
-        collision_metrics_active = (
-            collision_metrics_enabled
-            and getattr(TASK_ENV, "enable_collision_metrics", False)
-            and hasattr(TASK_ENV, "get_collision_metrics")
-            and hasattr(TASK_ENV, "robot_link_names")
-        )
-
+        # Language perturbation: use instruction bank if enabled
         lang_perturb = args.get("domain_randomization", {}).get("language_perturbation", {})
         if lang_perturb.get("enabled", False) and lang_perturb.get("instruction_bank"):
             bank_path = resolve_instruction_bank(lang_perturb["instruction_bank"])
@@ -596,11 +338,7 @@ def eval_policy(task_name,
             TASK_ENV._set_eval_video_ffmpeg(ffmpeg)
 
         succ = False
-        # Use the proxy (not .call directly) so the client-side
-        # observation_window mirror resets to None — otherwise set_language
-        # is skipped from episode 2 onward and the server raises
-        # "Prompt is required" on the first get_action.
-        model.reset_model()
+        reset_func(model)
         while TASK_ENV.take_action_cnt < TASK_ENV.step_lim:
             observation = TASK_ENV.get_obs()
             eval_func(TASK_ENV, model, observation)
@@ -616,25 +354,6 @@ def eval_policy(task_name,
             print("\033[92mSuccess!\033[0m")
         else:
             print("\033[91mFail!\033[0m")
-
-        if episode_log_path is not None:
-            record = {
-                "episode": TASK_ENV.test_num,
-                "seed": now_seed,
-                "success": bool(succ),
-            }
-            if collision_metrics_active:
-                col = TASK_ENV.get_collision_metrics()
-                record["collision"] = bool(col["is_collision"])
-                record["hard_success"] = bool(succ) and not col["is_collision"]
-                record["collision_count"] = int(col["total_collision_count"])
-                record["collision_names"] = (col["robot_to_furniture_names"]
-                                             + col["robot_to_static_object_names"]
-                                             + col["target_to_static_object_names"])
-            else:
-                record["collision"] = None
-            with open(episode_log_path, "a") as f:
-                f.write(json.dumps(record) + "\n")
 
         now_id += 1
         TASK_ENV.close_env(clear_cache=((succ_seed + 1) % clear_cache_freq == 0))
@@ -657,15 +376,12 @@ def eval_policy(task_name,
 
 def parse_args_and_config():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--port", type=int)
     parser.add_argument("--config", type=str, required=True)
     parser.add_argument("--overrides", nargs=argparse.REMAINDER)
     args = parser.parse_args()
 
     with open(args.config, "r", encoding="utf-8") as f:
         config = yaml.safe_load(f)
-
-    config['port'] = args.port
 
     # Parse overrides
     def parse_override_pairs(pairs):

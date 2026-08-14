@@ -1,28 +1,34 @@
 #!/usr/bin/env bash
 # time_run.sh — time one collect_data.sh run and project full-dataset generation time.
 #
-# Usage (from sim/):
-#   bash time_run.sh <task> <config> [gpu]
+# Usage (from repo root):
+#   bash collect/time_run.sh <task> <config> [gpu]
 # Example:
-#   bash time_run.sh put_cup_on_coaster datagen_template 1
+#   bash collect/time_run.sh put_cup_on_coaster datagen_template 1
 #
 # Prints: wall time, episodes attempted vs kept, seconds per attempt / per kept,
 # and a projection for TARGET_EPISODES total kept episodes on 1/4/20 GPUs.
 set -u
+
+COLLECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [[ -z "${SIM_ROOT:-}" ]]; then
+    # shellcheck source=/dev/null
+    source "${COLLECT_DIR}/../set_env.sh"
+fi
 
 TASK="${1:?usage: time_run.sh <task> <config> [gpu]}"
 CONFIG="${2:?usage: time_run.sh <task> <config> [gpu]}"
 GPU="${3:-0}"
 
 # full-dataset target (kept episodes); override per call:
-#   TARGET_EPISODES=24000 bash time_run.sh ...
+#   TARGET_EPISODES=24000 bash collect/time_run.sh ...
 TARGET_EPISODES="${TARGET_EPISODES:-16000}"
 
 LOG="$(mktemp /tmp/collect_time_XXXXXX.log)"
-echo "▶ timing: bash collect_data.sh $TASK $CONFIG $GPU   (log: $LOG)"
+echo "▶ timing: bash collect/collect_data.sh $TASK $CONFIG $GPU   (log: $LOG)"
 echo "────────────────────────────────────────────────────────────────────"
 start=$(date +%s)
-bash collect_data.sh "$TASK" "$CONFIG" "$GPU" 2>&1 | tee "$LOG"
+bash "${COLLECT_DIR}/collect_data.sh" "$TASK" "$CONFIG" "$GPU" 2>&1 | tee "$LOG"
 rc=${PIPESTATUS[0]}
 end=$(date +%s)
 wall=$(( end - start ))

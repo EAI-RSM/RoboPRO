@@ -14,9 +14,9 @@ import argparse
 from pathlib import Path
 from collections import deque
 
-sys.path.append("./")
-sys.path.append(f"./policy")
-sys.path.append("./description/utils")
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import _env  # noqa: F401
+
 from envs._GLOBAL_CONFIGS import CONFIGS_PATH
 
 import numpy as np
@@ -202,7 +202,7 @@ def eval_function_decorator(policy_name, model_name, conda_env=None):
 
 def get_camera_config(camera_type):
     """Load camera configuration from YAML file"""
-    cfg_path = os.path.join(os.path.dirname(__file__), "../task_config/_camera_config.yml")
+    cfg_path = os.path.join(os.environ["SIM_ROOT"], "task_config", "_camera_config.yml")
     if not os.path.isfile(cfg_path):
         raise FileNotFoundError("Camera config file not found")
     with open(cfg_path, 'r', encoding='utf-8') as f:

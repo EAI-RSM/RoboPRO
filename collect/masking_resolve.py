@@ -36,10 +36,9 @@ import h5py
 import numpy as np
 
 # --- self-contained io + palette -------------------------------------------
-# This module is the standalone grounding ENGINE: the resolver + the region/OBB logic
-# that BAKES target/bin masks into the HDF5 at collection time (finalize_grounding).
-# It depends only on numpy / h5py / cv2 / json -- NOT on any visualization tool.
-# viz_episode.py and export.py import these io helpers FROM here (dependency inversion).
+# This module is the grounding engine: the resolver + the region/OBB logic
+# that bakes target/bin masks into the HDF5 at collection time (finalize_grounding).
+# It depends only on numpy / h5py / cv2 / json.
 SCENE_NAMES = {"ground", "wall", "table", "floor"}   # shell: never a target/bin/obstacle
 ROBOT_COLOR = np.array([80, 130, 230], np.uint8)
 OTHER_COLOR = np.array([130, 220, 220], np.uint8)
