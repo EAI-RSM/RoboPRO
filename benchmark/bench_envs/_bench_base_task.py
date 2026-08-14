@@ -560,9 +560,9 @@ class Bench_base_task(Base_Task):
 
             # add to collision list
             if cluttered_item_info[obj_name]["type"] == "urdf":
-                path = f"{os.environ['BENCH_ROOT']}/assets/objects/objaverse/{obj_name}/{obj_idx}/coacd_collision.obj"
+                path = f"{os.environ['ASSETS_ROOT']}/objects/objaverse/{obj_name}/{obj_idx}/coacd_collision.obj"
             else:
-                path = f"{os.environ['BENCH_ROOT']}/assets/objects/{obj_name}/collision/base{obj_idx}.glb"
+                path = f"{os.environ['ASSETS_ROOT']}/objects/{obj_name}/collision/base{obj_idx}.glb"
             self.collision_list.append({
                 "actor": self.cluttered_obj,
                 "collision_path": path,
@@ -685,9 +685,9 @@ class Bench_base_task(Base_Task):
 
             # add to collision list
             if cluttered_item_info[obj_name]["type"] == "urdf":
-                path = f"{os.environ['BENCH_ROOT']}/assets/objects/objaverse/{obj_name}/{obj_idx}/coacd_collision.obj"
+                path = f"{os.environ['ASSETS_ROOT']}/objects/objaverse/{obj_name}/{obj_idx}/coacd_collision.obj"
             else:
-                path = f"{os.environ['BENCH_ROOT']}/assets/objects/{obj_name}/collision/base{obj_idx}.glb"
+                path = f"{os.environ['ASSETS_ROOT']}/objects/{obj_name}/collision/base{obj_idx}.glb"
             self.collision_list.append({
                 "actor": self.cluttered_obj,
                 "collision_path": path,
