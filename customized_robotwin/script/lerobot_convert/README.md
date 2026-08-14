@@ -1,4 +1,4 @@
-"""RoboTwin / LeRobot conversion.
+"""RoboPRO / RoboTwin → LeRobot conversion.
 
 Layout
 ------

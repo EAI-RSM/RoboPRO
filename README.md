@@ -143,7 +143,7 @@ Episodes land in `customized_robotwin/data/<task_name>/<task_config>/`.
 
 ### Convert HDF5 to LeRobot
 
-[`customized_robotwin/script/lerobot_convert/`](customized_robotwin/script/lerobot_convert/) turns a scene-organised RoboTwin dump (`<tier>/seedN/data/episode*.hdf5`) into a LeRobot v2.1 dataset (parquet + `countertop`/`left`/`right` videos, 1:1 at 30 fps). The task prompt is the HDF5 `task_name` looked up in `benchmark/bench_description/plain_instructions.json` (or `--task-text`).
+[`customized_robotwin/script/lerobot_convert/`](customized_robotwin/script/lerobot_convert/) turns a scene-organised RoboPRO / RoboTwin dump (`<tier>/seedN/data/episode*.hdf5`) into a LeRobot v2.1 dataset (parquet + `countertop`/`left`/`right` videos, 1:1 at 30 fps). The task prompt is the HDF5 `task_name` looked up in `benchmark/bench_description/plain_instructions.json` (or `--task-text`).
 
 From the repo root (env with `cv2`, `av`, `h5py`, `pandas`, `numpy`):
 
@@ -153,8 +153,6 @@ PYTHONPATH=customized_robotwin/script python -m lerobot_convert.convert_scenes \
     --out /path/to/lerobot_out \
     --limit 2 --overwrite
 ```
-
-A 2-episode smoke output is under `customized_robotwin/script/lerobot_convert/examples/milktea_next_to_laptop_smoke/`.
 
 ### Run inference (policy eval)
 
