@@ -24,6 +24,7 @@ from .graph_replanning import ActionGraphState, Evidence, TaskGoal
 
 
 RELEASE_READY_VERTICAL_CLEARANCE_M = 0.10
+IMMINENT_GRIPPER_OBSTACLE_CLEARANCE_M = 0.20
 
 
 def _decode(values: Any) -> list[str]:
@@ -522,7 +523,7 @@ def compact_grasp_hint(
     if not side:
         return fallback
     approach = (
-        f"Approach the {target_label} with the {side} gripper "
+        f"Use the {side} gripper to approach the {target_label} "
         f"and pick it up."
     )
     blocked_index = next(
@@ -533,41 +534,41 @@ def compact_grasp_hint(
         by_effector[blocker_indices, target_index, blocked_index]
         & valid[blocker_indices, target_index, blocked_index]
     ]
-    effector_id = -2 if side == "left" else -3
-    effector_pose = retriever._poses_world.get(effector_id)
-    robot_pose = retriever._poses_world.get(-1)
-    if effector_pose is None or robot_pose is None or not len(active_blockers):
+    blocked_name = retriever.blocks_effector_names[blocked_index].lower()
+    blocked_side = (
+        "left" if "left" in blocked_name
+        else "right" if "right" in blocked_name
+        else ""
+    )
+    blocked_effector_id = -2 if blocked_side == "left" else -3
+    blocked_effector_pose = retriever._poses_world.get(blocked_effector_id)
+    if not blocked_side or blocked_effector_pose is None or not len(active_blockers):
         return approach
     positioned = [
         int(index) for index in active_blockers
-        if int(retriever.object_ids[index]) in retriever._poses_world
+        if int(retriever.object_ids[index]) in retriever._aabb_bounds
     ]
     if not positioned:
         return approach
+
+    def point_aabb_clearance(index: int) -> float:
+        lower, upper = retriever._aabb_bounds[
+            int(retriever.object_ids[index])
+        ]
+        point = blocked_effector_pose[:3]
+        separation = np.maximum(np.maximum(lower - point, point - upper), 0.0)
+        return float(np.linalg.norm(separation))
+
     blocker_index = min(
         positioned,
-        key=lambda index: float(np.linalg.norm(
-            retriever._poses_world[int(retriever.object_ids[index])][:3]
-            - effector_pose[:3]
-        )),
+        key=point_aabb_clearance,
     )
-    blocker_id = int(retriever.object_ids[blocker_index])
-    blocker_pose = retriever._poses_world[blocker_id]
-    rotation_world_from_base = _rotation_matrix_from_wxyz(robot_pose[3:7])
-    forward, left, _ = rotation_world_from_base.T @ (
-        blocker_pose[:3] - effector_pose[:3]
-    )
-    directions = []
-    if abs(forward) >= 0.05:
-        directions.append("forward" if forward > 0 else "backward")
-    if abs(left) >= 0.05:
-        directions.append("left" if left > 0 else "right")
-    if not directions:
+    if point_aabb_clearance(blocker_index) > IMMINENT_GRIPPER_OBSTACLE_CLEARANCE_M:
         return approach
+    blocker_id = int(retriever.object_ids[blocker_index])
     blocker_label = retriever._label_by_id.get(blocker_id, "obstacle")
-    relative = " and ".join(directions)
     return (
-        f"The {blocker_label} is {relative} of the {side} gripper. "
+        f"Collision risk: the {blocker_label} blocks the {blocked_side} gripper. "
         f"{approach}"
     )
 
@@ -643,6 +644,7 @@ class LiveGraphRetriever:
         self._positions: dict[int, tuple[float, float, float]] = {}
         self._poses_world: dict[int, np.ndarray] = {}
         self._bbox_sizes: dict[int, tuple[float, float, float] | None] = {}
+        self._aabb_bounds: dict[int, tuple[np.ndarray, np.ndarray]] = {}
         for index, object_id in enumerate(self.object_ids.tolist()):
             object_id = int(object_id)
             if index < len(is_present) and not bool(is_present[index]):
@@ -652,6 +654,10 @@ class LiveGraphRetriever:
                 _round1(value) for value in pose_world[index, :3]
             )
             if index < len(has_aabb) and bool(has_aabb[index]):
+                self._aabb_bounds[object_id] = (
+                    aabb_lower[index].copy(),
+                    aabb_upper[index].copy(),
+                )
                 self._bbox_sizes[object_id] = tuple(
                     _round2(upper - lower)
                     for lower, upper in zip(aabb_lower[index], aabb_upper[index])

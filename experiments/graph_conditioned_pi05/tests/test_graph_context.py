@@ -463,9 +463,21 @@ def test_grasp_hint_selects_only_a_valid_uniquely_clear_gripper(tmp_path):
     state["blocks_by_effector"][:, 0, :] = False
     state["blocks_by_effector"][1, 0] = [True, False]
     state["blocks_by_effector_valid"][:, 0, :] = True
+    # The box blocks the left corridor but is not imminent to the left
+    # gripper, so choose the clear right arm without a distracting warning.
     assert compact_grasp_hint(retriever, 10) == (
-        "The box is backward and left of the right gripper. "
-        "Approach the target with the right gripper and pick it up."
+        "Use the right gripper to approach the target and pick it up."
+    )
+
+    # Only an imminent blocker produces a warning, and it is attributed to
+    # the arm whose corridor it actually blocks.
+    retriever._aabb_bounds[20] = (
+        np.array([0.55, -0.10, 0.40]),
+        np.array([0.65, 0.10, 0.60]),
+    )
+    assert compact_grasp_hint(retriever, 10) == (
+        "Collision risk: the box blocks the left gripper. "
+        "Use the right gripper to approach the target and pick it up."
     )
 
     # Unknown opposite-side evidence must not be described as available.
@@ -475,9 +487,9 @@ def test_grasp_hint_selects_only_a_valid_uniquely_clear_gripper(tmp_path):
     # Missing obstacle geometry preserves the approach-side instruction.
     state["blocks_by_effector"][1, 0] = [True, False]
     state["blocks_by_effector_valid"][:, 0, :] = True
-    retriever._poses_world.pop(20)
+    retriever._aabb_bounds.pop(20)
     assert compact_grasp_hint(retriever, 10) == (
-        "Approach the target with the right gripper and pick it up."
+        "Use the right gripper to approach the target and pick it up."
     )
 
     # No preference when both paths are valid and clear.
