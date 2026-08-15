@@ -8,6 +8,13 @@ from typing import Any, Iterable
 
 import numpy as np
 
+from .action_intent import (
+    ActionIntent,
+    IntentOperation,
+    MotionDirection,
+    PlacementRelation,
+)
+
 from .contract import (
     INVERSE_RELATIONS,
     RELATION_PRIORITY,
@@ -49,6 +56,7 @@ class PreparedInstruction:
     full_prompt_token_count_estimate: int
     destination_seed_available: bool
     prompt_phase: str = "grasp"
+    action_intent: ActionIntent | None = None
 
 
 @dataclass(frozen=True)
@@ -411,12 +419,12 @@ def keep_active_gripper_closed(action: np.ndarray, held_arm: str | None) -> np.n
     return result
 
 
-def compact_placement_hint(
+def placement_intent(
     retriever: "LiveGraphRetriever",
     destination_object_ids: Iterable[int],
     relation: str = "in",
-) -> str:
-    """Describe target-to-destination motion in short instruction-like language."""
+) -> ActionIntent:
+    """Build structured target-to-destination placement intent."""
     destination_ids = tuple(map(int, destination_object_ids))
     target_ids = [
         int(object_id)
@@ -438,25 +446,37 @@ def compact_placement_hint(
     # Suppress centimeter-scale jitter and express only coarse task geometry.
     directions = []
     if abs(forward) >= 0.05:
-        directions.append("forward" if forward > 0 else "backward")
-    if abs(left) >= 0.05:
-        directions.append("left" if left > 0 else "right")
-    motion = " and ".join(directions)
-    destination_label = retriever._label_by_id.get(destination_id, "destination")
-    preposition = "onto" if relation == "on" else "into"
-    if motion:
-        return (
-            f"Keep holding the object. Move it {motion} "
-            f"{preposition} the {destination_label}."
+        directions.append(
+            MotionDirection.FORWARD if forward > 0 else MotionDirection.BACKWARD
         )
-    return f"Place the held object {preposition} the {destination_label}."
+    if abs(left) >= 0.05:
+        directions.append(MotionDirection.LEFT if left > 0 else MotionDirection.RIGHT)
+    destination_label = retriever._label_by_id.get(destination_id, "destination")
+    return ActionIntent(
+        operation=IntentOperation.PLACE,
+        target_label=retriever._label_by_id.get(target_id, "object"),
+        destination_label=destination_label,
+        placement_relation=PlacementRelation(relation),
+        motion_directions=tuple(directions),
+    )
 
 
-def compact_grasp_hint(
+def compact_placement_hint(
+    retriever: "LiveGraphRetriever",
+    destination_object_ids: Iterable[int],
+    relation: str = "in",
+) -> str:
+    """Compatibility wrapper rendering structured placement intent."""
+    return placement_intent(
+        retriever, destination_object_ids, relation
+    ).render_stage_instruction()
+
+
+def grasp_intent(
     retriever: "LiveGraphRetriever",
     target_id: int,
-) -> str:
-    """Prefer the gripper whose validated straight target corridor is clear."""
+) -> ActionIntent:
+    """Build grasp intent from validated arm-specific obstacle evidence."""
     target_indices = np.flatnonzero(retriever.object_ids == int(target_id))
     by_effector = np.asarray(
         retriever.state.get("blocks_by_effector", ()), dtype=np.bool_
@@ -468,7 +488,7 @@ def compact_grasp_hint(
         dtype=np.bool_,
     )
     target_label = retriever._label_by_id[int(target_id)]
-    fallback = f"Pick up the {target_label}."
+    fallback = ActionIntent(IntentOperation.GRASP, target_label)
     if (
         len(target_indices) != 1
         or by_effector.ndim != 3
@@ -522,9 +542,8 @@ def compact_grasp_hint(
     )
     if not side:
         return fallback
-    approach = (
-        f"Use the {side} gripper to approach the {target_label} "
-        f"and pick it up."
+    approach = ActionIntent(
+        IntentOperation.GRASP, target_label, preferred_arm=side
     )
     blocked_index = next(
         index for index, state in enumerate(evidence)
@@ -567,10 +586,46 @@ def compact_grasp_hint(
         return approach
     blocker_id = int(retriever.object_ids[blocker_index])
     blocker_label = retriever._label_by_id.get(blocker_id, "obstacle")
-    return (
-        f"Collision risk: the {blocker_label} blocks the {blocked_side} gripper. "
-        f"{approach}"
+    return ActionIntent(
+        IntentOperation.GRASP,
+        target_label,
+        preferred_arm=side,
+        blocked_arm=blocked_side,
+        obstacle_label=blocker_label,
+        collision_imminent=True,
     )
+
+
+def compact_grasp_hint(
+    retriever: "LiveGraphRetriever",
+    target_id: int,
+) -> str:
+    """Compatibility wrapper rendering structured grasp intent."""
+    return grasp_intent(retriever, target_id).render_stage_instruction()
+
+
+def action_intent_for_phase(
+    phase: str,
+    retriever: "LiveGraphRetriever",
+    target_id: int,
+    destination_id: int,
+    relation: str,
+) -> ActionIntent:
+    """Create one validated atomic intent for the controller's current phase."""
+    if phase == "grasp":
+        return grasp_intent(retriever, target_id)
+    if phase == "placement":
+        return placement_intent(retriever, (destination_id,), relation)
+    if phase == "release":
+        return ActionIntent(
+            operation=IntentOperation.RELEASE,
+            target_label=retriever._label_by_id.get(target_id, "object"),
+            destination_label=retriever._label_by_id.get(
+                destination_id, "destination"
+            ),
+            placement_relation=PlacementRelation(relation),
+        )
+    raise ValueError(f"unknown graph prompt phase: {phase}")
 
 
 class LiveGraphRetriever:
@@ -1030,23 +1085,21 @@ def prepare_instruction(
     # Separate the persistent objective from one atomic current-stage command.
     # Use the same two-field natural-language schema in every supported phase.
     guidance_items = []
+    action_intent = None
     if guidance_supported:
         target_id = next(
             int(object_id)
             for object_id, is_target in zip(retriever.object_ids, retriever.is_target)
             if bool(is_target)
         )
-        destination_label = retriever._label_by_id[destination_ids[0]]
-        guidance = {
-            "grasp": compact_grasp_hint(retriever, target_id),
-            "placement": compact_placement_hint(
-                retriever, destination_ids, relation=goal.relation
-            ),
-            "release": (
-                f"Release the held object "
-                f"{'on' if goal.relation == 'on' else 'in'} the {destination_label}."
-            ),
-        }[prompt_phase]
+        action_intent = action_intent_for_phase(
+            prompt_phase,
+            retriever,
+            target_id,
+            destination_ids[0],
+            goal.relation,
+        )
+        guidance = action_intent.render_stage_instruction()
         guidance_items.append(
             PackedItem(
                 text=f"Current stage: {guidance}",
@@ -1068,6 +1121,7 @@ def prepare_instruction(
             full_prompt_token_count_estimate=0,
             destination_seed_available=bool(destination_ids),
             prompt_phase=prompt_phase,
+            action_intent=action_intent,
         )
     items = [
         {
@@ -1102,4 +1156,5 @@ def prepare_instruction(
         full_prompt_token_count_estimate=int(response["full_prompt_token_count_estimate"]),
         destination_seed_available=bool(destination_ids),
         prompt_phase=prompt_phase,
+        action_intent=action_intent,
     )

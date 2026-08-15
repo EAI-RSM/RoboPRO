@@ -84,6 +84,9 @@ def _prepare_graph_prompt(task_env, model, observation, controller):
         task_env._graph_active_prompt = prepared.instruction
     task_env._graph_prompt_phase = controller.phase.value
     task_env._graph_held_arm = controller.held_arm
+    task_env._graph_active_intent = (
+        prepared.action_intent.as_dict() if prepared.action_intent else None
+    )
     stats = getattr(task_env, "_graph_conditioning_stats", None)
     if stats is None:
         stats = []
@@ -102,6 +105,7 @@ def _prepare_graph_prompt(task_env, model, observation, controller):
             "prompt_phase": controller.phase.value,
             "prompt_updated": prompt_updated,
             "prompt": prepared.instruction,
+            "action_intent": task_env._graph_active_intent,
         }
     )
 
@@ -159,6 +163,7 @@ def _record_action_trace(task_env, raw_action, executed_action, observation, con
         executed_action=executed_action,
         observation=observation,
         evidence=evidence,
+        action_intent=getattr(task_env, "_graph_active_intent", None),
     )
 
 

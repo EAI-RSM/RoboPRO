@@ -657,6 +657,7 @@ def eval_policy(task_name,
         TASK_ENV._graph_treatment_version = None
         TASK_ENV._graph_prompt_phase = "grasp"
         TASK_ENV._graph_active_prompt = None
+        TASK_ENV._graph_active_intent = None
         TASK_ENV._graph_held_arm = None
         TASK_ENV._graph_held_loss_count = 0
         TASK_ENV._graph_chunk_interrupts = 0
@@ -733,6 +734,9 @@ def eval_policy(task_name,
                         item["prompt_updated"] for item in graph_stats
                     )),
                     "prompts": [item["prompt"] for item in graph_stats],
+                    "action_intents": [
+                        item["action_intent"] for item in graph_stats
+                    ],
                     "chunk_interrupt_count": int(TASK_ENV._graph_chunk_interrupts),
                     "delta_events": list(TASK_ENV._graph_delta_events),
                 }

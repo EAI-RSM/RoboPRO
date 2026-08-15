@@ -28,6 +28,7 @@ def _record(recorder, frame, *, held=False, contact=False):
             "held_by_right": False,
             "held_arm": "left" if held else "",
         },
+        action_intent={"operation": "grasp", "preferred_arm": "left"},
     )
 
 
@@ -54,6 +55,7 @@ def test_npz_round_trip_keeps_actions_and_text():
             assert trace["executed_action"].shape == (1, 14)
             assert trace["prompt"][0].startswith("Task objective:")
             assert trace["phase"].tolist() == ["grasp"]
+            assert '"operation": "grasp"' in trace["action_intent"][0]
 
 
 def test_empty_trace_has_a_safe_summary_and_archive():

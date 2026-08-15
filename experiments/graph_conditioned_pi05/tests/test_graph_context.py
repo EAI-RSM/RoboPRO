@@ -5,6 +5,8 @@ import numpy as np
 from contextlib import contextmanager
 from tempfile import TemporaryDirectory
 
+from experiments.graph_conditioned_pi05.action_intent import IntentOperation
+
 from experiments.graph_conditioned_pi05.contract import GraphNode, InputCondition, RetrievalContract
 from experiments.graph_conditioned_pi05.graph_retriever import GraphFact, HDF5GraphRetriever
 from experiments.graph_conditioned_pi05.graph_serializer import (
@@ -364,6 +366,8 @@ def test_prepare_instruction_preserves_visual_only_and_fits_graph(tmp_path):
         "Current stage: Pick up the target."
     )
     assert grasp.prompt_phase == "grasp"
+    assert grasp.action_intent.operation is IntentOperation.GRASP
+    assert grasp.action_intent.phase == grasp.prompt_phase
     assert grasp.retrieved_fact_count == 1
     assert grasp.selected_fact_count == 1
     assert grasp.selected_node_count == 0
@@ -380,6 +384,8 @@ def test_prepare_instruction_preserves_visual_only_and_fits_graph(tmp_path):
         RetrievalContract(), previous_phase="placement",
     )
     assert placement.prompt_phase == "placement"
+    assert placement.action_intent.operation is IntentOperation.PLACE
+    assert placement.action_intent.phase == placement.prompt_phase
     assert placement.selected_fact_count == 1
     assert placement.instruction == (
         "Task objective: put target in box\n"
@@ -420,6 +426,8 @@ def test_prepare_instruction_preserves_visual_only_and_fits_graph(tmp_path):
         RetrievalContract(), previous_phase="release",
     )
     assert release.prompt_phase == "release"
+    assert release.action_intent.operation is IntentOperation.RELEASE
+    assert release.action_intent.phase == release.prompt_phase
     assert release.instruction == (
         "Task objective: put target in box\n"
         "Current stage: Release the held object in the box."

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Any
 
@@ -81,6 +82,7 @@ class ActionTraceRecorder:
         executed_action: np.ndarray,
         observation: dict[str, Any],
         evidence: dict[str, Any] | None = None,
+        action_intent: dict[str, Any] | None = None,
     ) -> None:
         raw = np.asarray(raw_action, dtype=np.float32).copy()
         executed = np.asarray(executed_action, dtype=np.float32).copy()
@@ -90,6 +92,7 @@ class ActionTraceRecorder:
         row = {
             "frame": int(frame), "prompt": str(prompt), "phase": str(phase),
             "raw_action": raw, "executed_action": executed,
+            "action_intent": json.dumps(action_intent, sort_keys=True),
         }
         for arm, action_index in GRIPPER_INDICES.items():
             row[f"raw_{arm}_gripper"] = float(raw[action_index])
@@ -139,7 +142,7 @@ class ActionTraceRecorder:
         arrays = {}
         for key in keys:
             values = [row.get(key, np.nan) for row in self.rows]
-            if key in {"prompt", "phase", "held_arm"}:
+            if key in {"prompt", "phase", "held_arm", "action_intent"}:
                 arrays[key] = np.asarray(values, dtype=str)
             else:
                 arrays[key] = np.asarray(values)
