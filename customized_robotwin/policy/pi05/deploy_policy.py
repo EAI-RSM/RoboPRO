@@ -22,6 +22,7 @@ from experiments.graph_conditioned_pi05.graph_replanning import (
     GraphControllerState,
     PromptPhase,
 )
+from experiments.graph_conditioned_pi05.action_diagnostics import graph_evidence
 
 parent_directory = os.path.dirname(os.path.abspath(__file__))
 sys.path.append(parent_directory)
@@ -130,6 +131,7 @@ def _execute_action_chunk(task_env, model, observation, actions, controller):
         task_env.take_action(executed_action)
         controller.actions_since_replan += 1
         observation = task_env.get_obs()
+        _record_action_trace(task_env, action, executed_action, observation, controller)
         input_rgb_arr, input_state = encode_obs(observation)
         model.update_observation_window(input_rgb_arr, input_state)
         state = action_graph_state(task_env, observation, _GRAPH_CONTRACT)
@@ -137,6 +139,27 @@ def _execute_action_chunk(task_env, model, observation, actions, controller):
             task_env, controller, state, len(actions) - index - 1
         ):
             break
+
+
+def _record_action_trace(task_env, raw_action, executed_action, observation, controller=None):
+    recorder = getattr(task_env, "_action_trace_recorder", None)
+    if recorder is None:
+        return
+    try:
+        evidence = graph_evidence(task_env, observation)
+    except (AttributeError, KeyError, TypeError, ValueError):
+        # Diagnostics must not make an otherwise valid rollout fail. Missing
+        # graph support remains visible as absent/NaN fields in the trace.
+        evidence = {}
+    recorder.record(
+        frame=task_env.take_action_cnt,
+        prompt=getattr(task_env, "_graph_active_prompt", None) or task_env.get_instruction(),
+        phase=(controller.phase.value if controller is not None else "task"),
+        raw_action=raw_action,
+        executed_action=executed_action,
+        observation=observation,
+        evidence=evidence,
+    )
 
 
 def eval(TASK_ENV, model, observation):
@@ -162,6 +185,7 @@ def eval(TASK_ENV, model, observation):
     for action in actions:
         TASK_ENV.take_action(action)
         observation = TASK_ENV.get_obs()
+        _record_action_trace(TASK_ENV, action, action, observation)
         input_rgb_arr, input_state = encode_obs(observation)
         model.update_observation_window(input_rgb_arr, input_state)
 

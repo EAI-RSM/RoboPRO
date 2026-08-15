@@ -647,6 +647,10 @@ def eval_policy(task_name,
         # is skipped from episode 2 onward and the server raises
         # "Prompt is required" on the first get_action.
         model.reset_model()
+        from experiments.graph_conditioned_pi05.action_diagnostics import (
+            ActionTraceRecorder,
+        )
+        TASK_ENV._action_trace_recorder = ActionTraceRecorder()
         TASK_ENV._graph_conditioning_stats = []
         TASK_ENV._graph_delta_events = []
         TASK_ENV._graph_controller = None
@@ -682,6 +686,15 @@ def eval_policy(task_name,
                 "graph_treatment_version": getattr(
                     TASK_ENV, "_graph_treatment_version", None
                 ),
+            }
+            trace_path = Path(episode_log_path).parent / (
+                f"episode{TASK_ENV.test_num}_action_trace.npz"
+            )
+            recorder = TASK_ENV._action_trace_recorder
+            recorder.save_npz(trace_path)
+            record["action_trace"] = {
+                "path": trace_path.name,
+                **recorder.summary(),
             }
             if graph_stats:
                 record["graph_conditioning"] = {
