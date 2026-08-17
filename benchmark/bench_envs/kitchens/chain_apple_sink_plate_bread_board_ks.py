@@ -42,11 +42,13 @@ class chain_apple_sink_plate_bread_board_ks(KitchenS_base_task):
         # so the right arm does the apple→plate leg.
         self.apple_arm = ArmTag("right")
 
-        # Plate on mid-right counter.
+        # Plate on the front-right counter, not in the basin (the apple is
+        # picked from the sink). allow_sink only ignores keep-out padding.
         plate_pose = self.rand_pose_on_counter(
-            xlim=[0.10, 0.30], ylim=[-0.20, 0.00],
+            xlim=[0.16, 0.30], ylim=[-0.22, -0.12],
             qpos=[0.5, 0.5, 0.5, 0.5], rotate_rand=False,
             obj_padding=0.08,
+            allow_sink=True,
         )
         self.plate = create_actor(
             scene=self, pose=plate_pose, modelname="003_plate",
@@ -55,12 +57,14 @@ class chain_apple_sink_plate_bread_board_ks(KitchenS_base_task):
         self.plate.set_mass(0.1)
         self.add_prohibit_area(self.plate, padding=0.02, area="table")
 
-        # Board on left / mid-left counter (static destination for bread).
+        # Front-center band (static; may overlap sink keep-out padding).
+        # Keep it in front of the basin so it does not block the apple pick.
         self.board_id = int(np.random.choice([0, 1, 2, 3]))
         board_pose = self.rand_pose_on_counter(
-            xlim=[-0.30, -0.10], ylim=[-0.23, 0.00],
+            xlim=[-0.12, 0.12], ylim=[-0.23, -0.14],
             qpos=[0.5, 0.5, 0.5, 0.5], rotate_rand=True, rotate_lim=[0, np.pi/4, 0],
             obj_padding=0.10,
+            allow_sink=True,
         )
         self.board = create_actor(
             scene=self, pose=board_pose, modelname="104_board",
@@ -70,16 +74,17 @@ class chain_apple_sink_plate_bread_board_ks(KitchenS_base_task):
         self.board.set_name("board")
         self.add_prohibit_area(self.board, padding=0.02, area="table")
 
-        # Bread on left counter. Mirror put_bread_on_board_ks's reachability
-        # filter (|x| >= 0.3) so the left-arm side grasp can reach it.
+        # Bread on either side (|x| >= 0.3), same reachability filter as
+        # put_bread_on_board_ks. Left-only [-0.40, -0.25] sat against the
+        # microwave and the grasp descent failed.
         bread_pose = self.rand_pose_on_counter(
-            xlim=[-0.40, -0.25], ylim=[-0.15, 0.05],
+            xlim=[-0.32, 0.32], ylim=[-0.23, -0.08],
             qpos=[0.5, 0.5, 0.5, 0.5], rotate_rand=True, rotate_lim=[0, np.pi/2, 0],
             obj_padding=0.05,
         )
-        while abs(bread_pose.p[0]) < 0.25:
+        while abs(bread_pose.p[0]) < 0.3:
             bread_pose = self.rand_pose_on_counter(
-                xlim=[-0.40, -0.25], ylim=[-0.15, 0.05],
+                xlim=[-0.4, 0.4], ylim=[-0.23, -0.08],
                 qpos=[0.5, 0.5, 0.5, 0.5], rotate_rand=True, rotate_lim=[0, np.pi/2, 0],
                 obj_padding=0.05,
             )
@@ -97,6 +102,14 @@ class chain_apple_sink_plate_bread_board_ks(KitchenS_base_task):
     # -----------------------------------------------------------------
     def _apple_from_sink_to_plate(self):
         arm_tag = self.apple_arm
+        self.enable_table(enable=False)
+        # Board/plate are in the Curobo world and block the top-down dip
+        # into the basin if they sit near the sink.
+        self.collision_list = [
+            e for e in self.collision_list
+            if e.get("actor") not in (self.plate, self.board)
+        ]
+        self.update_world()
         self.enable_table(enable=False)
         self.move(self.open_gripper(arm_tag, pos=1.0))
 

@@ -50,6 +50,8 @@ class put_bread_on_board_ks(KitchenS_base_task):
         )
         self.target_obj.set_mass(0.05)
 
+        # Static board may sit over the middle sink; keep the original center
+        # band so either arm can place onto it.
         target_rand_pose = self.rand_pose_on_counter(
             xlim=[-0.12, 0.12],
             ylim=[-0.23, 0.05],
@@ -57,6 +59,7 @@ class put_bread_on_board_ks(KitchenS_base_task):
             rotate_rand=True,
             rotate_lim=[0, np.pi / 4, 0],
             obj_padding=0.10,
+            allow_sink=True,
         )
 
         # Real cutting-board asset (104_board). Mesh y is thickness (~0.17–0.19 in
@@ -83,6 +86,8 @@ class put_bread_on_board_ks(KitchenS_base_task):
         arm_tag = ArmTag("right" if self.target_obj.get_pose().p[0] > 0 else "left")
 
         self.grasp_actor_from_table(self.target_obj, arm_tag=arm_tag, pre_grasp_dis=0.07)
+        if not self.plan_success:
+            return
 
         self.move(self.move_by_displacement(arm_tag=arm_tag, z=0.1))
 

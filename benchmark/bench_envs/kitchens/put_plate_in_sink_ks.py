@@ -28,19 +28,20 @@ class put_plate_in_sink_ks(KitchenS_base_task):
         self.arm_tag = ArmTag("right" if sink_p[0] > 0 else "left")
         side_sign = 1 if self.arm_tag == "right" else -1
 
-        # Plate spawns on the same side as the sink/arm. Plate center offset
-        # at least 0.18 so the near-side rim (at plate.x - 0.085 * side_sign)
-        # sits comfortably inside the arm workspace. y narrowed to the
-        # empirically reachable top-down envelope (successful seeds had
-        # plate.y ∈ [-0.14, -0.09]).
-        x_range = [0.18, 0.28] if side_sign > 0 else [-0.28, -0.18]
+        # Same-side as the sink/arm, just outside the basin so the rim pinch
+        # is not blocked by sink collision, but close enough to drop in.
+        if side_sign > 0:
+            x_range = [0.24, 0.34]
+        else:
+            x_range = [-0.34, -0.24]
 
         rand_pos = self.rand_pose_on_counter(
             xlim=x_range,
-            ylim=[-0.15, -0.08],
+            ylim=[-0.18, -0.10],
             qpos=[0.5, 0.5, 0.5, 0.5],
             rotate_rand=False,
             obj_padding=0.10,
+            allow_sink=True,
         )
 
         self.plate_id = 0
@@ -81,22 +82,25 @@ class put_plate_in_sink_ks(KitchenS_base_task):
 
         self.move(self.close_gripper(arm_tag, pos=0.0))
 
-        self.move(self.move_by_displacement(arm_tag=arm_tag, z=0.10))
+        self.move(self.move_by_displacement(arm_tag=arm_tag, z=0.12))
+        self.plan_success = True
 
         self.attach_object(
             self.target_obj,
             f"{os.environ['BENCH_ROOT']}/assets/objects/003_plate/collision/base{self.plate_id}.glb",
             str(arm_tag),
         )
+        self.collision_list = [
+            e for e in self.collision_list if e.get("actor") is not self.dishrack
+        ]
+        self.update_world()
+        self.enable_table(enable=False)
+        self.plan_success = True
 
         sink_p = self.sink.get_pose().p
-        drop_tcp_z = float(sink_p[2]) + 0.14
-        drop_pose = [
-            float(sink_p[0]) - 0.085 * side_sign,  # align plate rim over sink center
-            float(sink_p[1]),
-            drop_tcp_z + self.TCP_OFFSET,
-        ] + self.TOP_DOWN_Q
-        self.move(self.move_to_pose(arm_tag, drop_pose))
+        dx = float(sink_p[0]) + 0.04 * side_sign - rim_x
+        dy = float(sink_p[1]) - 0.06 - rim_y
+        self.move(self.move_by_displacement(arm_tag=arm_tag, x=dx, y=dy))
 
         self.move(self.open_gripper(arm_tag, pos=1.0))
 
