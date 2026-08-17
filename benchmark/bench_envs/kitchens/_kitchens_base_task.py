@@ -285,6 +285,7 @@ class KitchenS_base_task(Bench_base_task):
         ylim_prop=False,
         obj_padding=0.02,
         attempts=80,
+        allow_sink=False,
     ):
         """Sample a pose in ``xlim × ylim`` that avoids every box already in
         ``self.prohibited_area["table"]``. If the requested range has no clear
@@ -293,11 +294,20 @@ class KitchenS_base_task(Bench_base_task):
         ``obj_padding`` is the half-extent used to treat the sampled point as
         a footprint (so the footprint, not just the center, must clear the
         existing prohibited boxes).
+
+        ``allow_sink`` skips the basin keep-out (static boards/bins may sit
+        over the middle sink if they rest stably). Microwave, rack, and
+        other object boxes still apply.
         """
         from envs.utils import rand_pose
 
         if zlim is None:
             zlim = [self.kitchens_info["table_height"] + self.table_z_bias + 0.001]
+
+        sink_xy = None
+        if allow_sink and getattr(self, "sink", None) is not None:
+            sp = self.sink.get_pose().p
+            sink_xy = (float(sp[0]), float(sp[1]))
 
         pose = None
         for _ in range(attempts):
@@ -315,6 +325,8 @@ class KitchenS_base_task(Bench_base_task):
             fy0, fy1 = y - obj_padding, y + obj_padding
             blocked = False
             for (x0, y0, x1, y1) in self.prohibited_area.get("table", []):
+                if sink_xy is not None and x0 <= sink_xy[0] <= x1 and y0 <= sink_xy[1] <= y1:
+                    continue
                 if fx1 >= x0 and fx0 <= x1 and fy1 >= y0 and fy0 <= y1:
                     blocked = True
                     break

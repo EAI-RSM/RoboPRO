@@ -51,18 +51,16 @@ class drop_apple_in_bin_ks(KitchenS_base_task):
         # [0.5,0.5,0.5,0.5] rotates mesh-y (height) → world-z so the opening
         # faces up. IDs 0 and 6 are straight-walled bins used elsewhere in the
         # benchmark; they keep the drop footprint rectangular and predictable.
-        # Center bin overlaps the scene-1 sink keepout (pad 0.12). Shift left
-        # of the basin only in that layout; scenes 0/2 keep the original band.
-        bin_xlim = [-0.12, 0.12]
-        if abs(float(self.sink.get_pose().p[0])) < 0.25:
-            bin_xlim = [-0.32, -0.20]
+        # Static bin may sit over the middle sink; keep the original center
+        # band so either arm can place into it.
         target_rand_pose = self.rand_pose_on_counter(
-            xlim=bin_xlim,
+            xlim=[-0.12, 0.12],
             ylim=[-0.23, 0.05],
             qpos=[0.5, 0.5, 0.5, 0.5],
             rotate_rand=True,
             rotate_lim=[0, np.pi / 4, 0],
             obj_padding=0.12,
+            allow_sink=True,
         )
         self.bin_id = int(np.random.choice([0, 6]))
         self.des_obj = create_actor(
@@ -88,6 +86,8 @@ class drop_apple_in_bin_ks(KitchenS_base_task):
         arm_tag = ArmTag("right" if self.target_obj.get_pose().p[0] > 0 else "left")
 
         self.grasp_actor_from_table(self.target_obj, arm_tag=arm_tag, pre_grasp_dis=0.07)
+        if not self.plan_success:
+            return
 
         self.move(self.move_by_displacement(arm_tag=arm_tag, z=0.10))
 
