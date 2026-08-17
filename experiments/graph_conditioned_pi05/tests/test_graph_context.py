@@ -6,6 +6,7 @@ from contextlib import contextmanager
 from tempfile import TemporaryDirectory
 
 from experiments.graph_conditioned_pi05.action_intent import IntentOperation
+from experiments.graph_conditioned_pi05.action_diagnostics import graph_evidence
 
 from experiments.graph_conditioned_pi05.contract import GraphNode, InputCondition, RetrievalContract
 from experiments.graph_conditioned_pi05.graph_retriever import GraphFact, HDF5GraphRetriever
@@ -21,6 +22,8 @@ from experiments.graph_conditioned_pi05.graph_serializer import (
 )
 from experiments.graph_conditioned_pi05.live_adapter import (
     LiveGraphRetriever,
+    action_graph_state,
+    build_live_graph_context,
     compact_grasp_hint,
     destination_ids_from_task,
     goal_geometry_pack_item,
@@ -306,6 +309,56 @@ def test_live_retrieval_matches_hdf5(tmp_path):
     assert target_node.bbox_size == (0.2, 0.2, 0.2)
     left_ee_node = next((node for node in actual_nodes if node.object_id == -2), None)
     assert left_ee_node is not None and left_ee_node.bbox_size is None
+
+
+def test_shared_live_context_has_value_parity_and_one_catalog_parse(tmp_path):
+    class Task:
+        def __init__(self, catalog):
+            self.catalog = catalog
+            self.catalog_reads = 0
+
+        def get_instruction(self):
+            return "put target in box"
+
+        def get_role_names(self):
+            return {"target_id": 10, "destination_id": 20}
+
+        def _get_benchmark_object_catalog(self):
+            self.catalog_reads += 1
+            return self.catalog
+
+    with _graph_file(tmp_path / "graph.hdf5") as root:
+        catalog, state, object_state = _live_inputs(root)
+    state["held_by"] = np.zeros((5, 2), dtype=bool)
+    state["held_by_valid"] = np.ones((5, 2), dtype=bool)
+    state["in"] = np.zeros((5, 5), dtype=bool)
+    state["containment_valid"] = np.ones((5, 5), dtype=bool)
+    state["raw_contact"] = np.zeros((5, 5), dtype=bool)
+    observation = {
+        "benchmark_support": {
+            "relation_state": state,
+            "object_state": object_state,
+        }
+    }
+    task = Task(catalog)
+    contract = RetrievalContract()
+
+    independent_control = action_graph_state(task, observation, contract)
+    independent_live = live_task_state(task, observation, contract)
+    independent_diagnostics = graph_evidence(task, observation)
+    assert task.catalog_reads == 3
+
+    task.catalog_reads = 0
+    context = build_live_graph_context(task, observation, contract)
+    shared_control = action_graph_state(
+        task, observation, contract, context=context
+    )
+    shared_live = live_task_state(task, observation, contract, context=context)
+    shared_diagnostics = graph_evidence(task, observation, context=context)
+    assert task.catalog_reads == 1
+    assert shared_control == independent_control
+    assert shared_live == independent_live
+    assert shared_diagnostics == independent_diagnostics
 
 
 def test_prepare_instruction_preserves_visual_only_and_fits_graph(tmp_path):
@@ -644,13 +697,15 @@ def main():
     with TemporaryDirectory() as directory:
         test_live_retrieval_matches_hdf5(Path(directory))
     with TemporaryDirectory() as directory:
+        test_shared_live_context_has_value_parity_and_one_catalog_parse(Path(directory))
+    with TemporaryDirectory() as directory:
         test_prepare_instruction_preserves_visual_only_and_fits_graph(Path(directory))
     with TemporaryDirectory() as directory:
         test_grasp_hint_selects_only_a_valid_uniquely_clear_gripper(Path(directory))
     test_transport_gripper_latch_changes_only_the_active_channel()
     with TemporaryDirectory() as directory:
         test_alignment_mismatch_fails(Path(directory))
-    print("18 graph-context checks passed")
+    print("19 graph-context checks passed")
 
 
 if __name__ == "__main__":

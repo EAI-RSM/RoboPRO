@@ -67,6 +67,19 @@ class LiveTaskState:
     release_ready: bool
 
 
+@dataclass(frozen=True)
+class LiveGraphContext:
+    """One parsed view of a single live observation, shared by its consumers."""
+
+    catalog: tuple[dict[str, Any], ...]
+    relation_state: dict[str, Any]
+    object_state: dict[str, Any]
+    goal: TaskGoal
+    retriever: "LiveGraphRetriever"
+    index_by_id: dict[int, int]
+    contract: RetrievalContract
+
+
 def _aggregate_evidence(values: np.ndarray, valid: np.ndarray) -> Evidence:
     """Reduce a relevant relation slice without converting unknown to false."""
     values = np.asarray(values, dtype=np.bool_)
@@ -101,23 +114,49 @@ def task_goal_from_env(task_env: Any, catalog: Iterable[dict[str, Any]]) -> Task
     return TaskGoal(tuple(sorted(target_ids)), destination_ids, str(relation).lower())
 
 
-def action_graph_state(
+def build_live_graph_context(
     task_env: Any,
     observation: dict[str, Any],
     contract: RetrievalContract,
-) -> ActionGraphState:
-    """Extract action-relevant graph predicates with three-valued validity."""
+) -> LiveGraphContext:
+    """Parse graph support exactly once for one observation frame."""
     support = observation.get("benchmark_support") or {}
     relation_state = support.get("relation_state")
     object_state = support.get("object_state")
     if relation_state is None or object_state is None:
         raise ValueError("Live observation is missing benchmark graph support")
-    catalog = task_env._get_benchmark_object_catalog()
-    retriever = LiveGraphRetriever(catalog, relation_state, object_state, contract)
+    catalog = tuple(task_env._get_benchmark_object_catalog())
     goal = task_goal_from_env(task_env, catalog)
-    index_by_id = {
-        int(object_id): index for index, object_id in enumerate(retriever.object_ids)
-    }
+    retriever = LiveGraphRetriever(
+        catalog, relation_state, object_state, contract
+    )
+    retriever.is_target = np.isin(retriever.object_ids, goal.target_ids)
+    return LiveGraphContext(
+        catalog=catalog,
+        relation_state=relation_state,
+        object_state=object_state,
+        goal=goal,
+        retriever=retriever,
+        index_by_id={
+            int(object_id): index
+            for index, object_id in enumerate(retriever.object_ids)
+        },
+        contract=contract,
+    )
+
+
+def action_graph_state(
+    task_env: Any,
+    observation: dict[str, Any],
+    contract: RetrievalContract,
+    context: LiveGraphContext | None = None,
+) -> ActionGraphState:
+    """Extract action-relevant graph predicates with three-valued validity."""
+    context = context or build_live_graph_context(task_env, observation, contract)
+    relation_state = context.relation_state
+    retriever = context.retriever
+    goal = context.goal
+    index_by_id = context.index_by_id
     target_indices = [index_by_id[value] for value in goal.target_ids if value in index_by_id]
     destination_indices = [
         index_by_id[value] for value in goal.destination_ids if value in index_by_id
@@ -155,8 +194,8 @@ def action_graph_state(
 
     visible = np.asarray(relation_state.get("visible_to", ()), dtype=np.bool_)
     visible_evidence = Evidence.UNKNOWN
-    if visible.ndim == 2 and contract.default_camera in retriever.camera_names:
-        camera_index = retriever.camera_names.index(contract.default_camera)
+    if visible.ndim == 2 and context.contract.default_camera in retriever.camera_names:
+        camera_index = retriever.camera_names.index(context.contract.default_camera)
         visible_valid = retriever._valid("visible_to", visible)
         visible_evidence = _aggregate_evidence(
             visible[target_indices, camera_index],
@@ -171,7 +210,7 @@ def action_graph_state(
             blocks[:, target_indices], blocks_valid[:, target_indices]
         )
 
-    legacy = live_task_state(task_env, observation, contract)
+    legacy = live_task_state(task_env, observation, contract, context=context)
     return ActionGraphState(
         held=held_evidence,
         release_ready=(
@@ -304,18 +343,15 @@ def live_task_state(
     task_env: Any,
     observation: dict[str, Any],
     contract: RetrievalContract,
+    context: LiveGraphContext | None = None,
 ) -> LiveTaskState:
     """Read event predicates used to interrupt an open-loop action chunk."""
-    support = observation.get("benchmark_support") or {}
-    relation_state = support.get("relation_state")
-    object_state = support.get("object_state")
-    if relation_state is None or object_state is None:
-        raise ValueError("Live observation is missing benchmark graph support")
-    catalog = task_env._get_benchmark_object_catalog()
-    goal = task_goal_from_env(task_env, catalog)
+    context = context or build_live_graph_context(task_env, observation, contract)
+    relation_state = context.relation_state
+    object_state = context.object_state
+    goal = context.goal
     destination_ids = goal.destination_ids
-    retriever = LiveGraphRetriever(catalog, relation_state, object_state, contract)
-    retriever.is_target = np.isin(retriever.object_ids, goal.target_ids)
+    retriever = context.retriever
 
     held = np.asarray(relation_state.get("held_by", ()), dtype=np.bool_)
     held_valid = retriever._valid("held_by", held) if held.ndim == 2 else held
@@ -335,12 +371,9 @@ def live_task_state(
         relation_state.get("containment_valid", np.zeros_like(inside)), dtype=np.bool_
     )
     if inside.ndim == 2 and valid.shape == inside.shape:
-        index_by_id = {
-            int(object_id): index for index, object_id in enumerate(retriever.object_ids)
-        }
         for target_index in np.flatnonzero(retriever.is_target):
             for destination_id in destination_ids:
-                destination_index = index_by_id.get(int(destination_id))
+                destination_index = context.index_by_id.get(int(destination_id))
                 if (
                     destination_index is not None
                     and bool(valid[target_index, destination_index])

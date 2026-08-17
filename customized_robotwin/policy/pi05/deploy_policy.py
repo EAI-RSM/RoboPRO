@@ -15,6 +15,7 @@ from experiments.graph_conditioned_pi05.contract import (
 )
 from experiments.graph_conditioned_pi05.live_adapter import (
     action_graph_state,
+    build_live_graph_context,
     keep_active_gripper_closed,
     prepare_instruction,
 )
@@ -135,22 +136,30 @@ def _execute_action_chunk(task_env, model, observation, actions, controller):
         task_env.take_action(executed_action)
         controller.actions_since_replan += 1
         observation = task_env.get_obs()
-        _record_action_trace(task_env, action, executed_action, observation, controller)
+        context = build_live_graph_context(task_env, observation, _GRAPH_CONTRACT)
+        _record_action_trace(
+            task_env, action, executed_action, observation, controller, context
+        )
         input_rgb_arr, input_state = encode_obs(observation)
         model.update_observation_window(input_rgb_arr, input_state)
-        state = action_graph_state(task_env, observation, _GRAPH_CONTRACT)
+        state = action_graph_state(
+            task_env, observation, _GRAPH_CONTRACT, context=context
+        )
         if _record_graph_observation(
             task_env, controller, state, len(actions) - index - 1
         ):
             break
 
 
-def _record_action_trace(task_env, raw_action, executed_action, observation, controller=None):
+def _record_action_trace(
+    task_env, raw_action, executed_action, observation, controller=None,
+    graph_context=None,
+):
     recorder = getattr(task_env, "_action_trace_recorder", None)
     if recorder is None:
         return
     try:
-        evidence = graph_evidence(task_env, observation)
+        evidence = graph_evidence(task_env, observation, context=graph_context)
     except (AttributeError, KeyError, TypeError, ValueError):
         # Diagnostics must not make an otherwise valid rollout fail. Missing
         # graph support remains visible as absent/NaN fields in the trace.

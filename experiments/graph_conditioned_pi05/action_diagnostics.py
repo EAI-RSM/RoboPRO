@@ -9,9 +9,10 @@ from typing import Any
 import numpy as np
 
 from experiments.graph_conditioned_pi05.live_adapter import (
-    LiveGraphRetriever,
-    task_goal_from_env,
+    LiveGraphContext,
+    build_live_graph_context,
 )
+from experiments.graph_conditioned_pi05.contract import RetrievalContract
 
 
 GRIPPER_INDICES = {"left": 6, "right": 13}
@@ -19,20 +20,26 @@ EFFECTOR_IDS = {"left": -2, "right": -3}
 GRIPPER_CLOSED_THRESHOLD = 0.2
 
 
-def graph_evidence(task_env: Any, observation: dict[str, Any]) -> dict[str, Any]:
+def graph_evidence(
+    task_env: Any,
+    observation: dict[str, Any],
+    context: LiveGraphContext | None = None,
+) -> dict[str, Any]:
     """Read target/effector geometry and contact evidence from an observation."""
-    support = observation.get("benchmark_support") or {}
-    relations = support.get("relation_state")
-    objects = support.get("object_state")
-    if relations is None or objects is None:
-        return {}
-    catalog = task_env._get_benchmark_object_catalog()
-    retriever = LiveGraphRetriever(catalog, relations, objects)
-    goal = task_goal_from_env(task_env, catalog)
+    if context is None:
+        support = observation.get("benchmark_support") or {}
+        if support.get("relation_state") is None or support.get("object_state") is None:
+            return {}
+        context = build_live_graph_context(
+            task_env, observation, RetrievalContract()
+        )
+    relations = context.relation_state
+    retriever = context.retriever
+    goal = context.goal
     target_id = goal.target_ids[0] if len(goal.target_ids) == 1 else None
     if target_id is None:
         return {}
-    index = {int(value): i for i, value in enumerate(retriever.object_ids)}
+    index = context.index_by_id
     target_index = index.get(int(target_id))
     target_pose = retriever._poses_world.get(int(target_id))
     held = np.asarray(relations.get("held_by", ()), dtype=np.bool_)
