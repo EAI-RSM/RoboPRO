@@ -20,6 +20,7 @@ from experiments.graph_conditioned_pi05.graph_serializer import (
     serialize_facts,
     serialize_graph,
 )
+from experiments.graph_conditioned_pi05.graph_replanning import GraspSubstage
 from experiments.graph_conditioned_pi05.live_adapter import (
     LiveGraphRetriever,
     action_graph_state,
@@ -372,6 +373,16 @@ def test_shared_live_context_has_value_parity_and_one_catalog_parse(tmp_path):
     assert evidence.held_arm == "left"
     assert evidence.left.target_held and evidence.left.target_contact
     assert not evidence.right.target_held and not evidence.right.target_contact
+    assert evidence.grasp_substage is GraspSubstage.CLOSE
+    assert evidence.grasp_arm == "left"
+
+    state["raw_contact"][:] = False
+    state["held_by"][:] = False
+    object_state["pose_world"][3, :3] = [0.15, 0.20, 0.35]
+    near_context = build_live_graph_context(task, observation, contract)
+    near_evidence = extract_simulator_evidence(near_context)
+    assert near_evidence.grasp_substage is GraspSubstage.ALIGN
+    assert near_evidence.grasp_arm == "left"
 
 
 def test_prepare_instruction_preserves_visual_only_and_fits_graph(tmp_path):
@@ -429,7 +440,7 @@ def test_prepare_instruction_preserves_visual_only_and_fits_graph(tmp_path):
     )
     assert grasp.instruction == (
         "Task objective: put target in box\n"
-        "Current stage: Pick up the target."
+        "Current stage: Move the gripper toward the target."
     )
     assert grasp.prompt_phase == "grasp"
     assert grasp.action_intent.operation is IntentOperation.GRASP
@@ -540,7 +551,7 @@ def test_grasp_hint_selects_only_a_valid_uniquely_clear_gripper(tmp_path):
     # The box blocks the left corridor but is not imminent to the left
     # gripper, so choose the clear right arm without a distracting warning.
     assert compact_grasp_hint(retriever, 10) == (
-        "Use the right gripper to approach the target and pick it up."
+        "Use the right gripper to approach the target."
     )
 
     # Only an imminent blocker produces a warning, and it is attributed to
@@ -551,25 +562,25 @@ def test_grasp_hint_selects_only_a_valid_uniquely_clear_gripper(tmp_path):
     )
     assert compact_grasp_hint(retriever, 10) == (
         "Collision risk: the box blocks the left gripper. "
-        "Use the right gripper to approach the target and pick it up."
+        "Use the right gripper to approach the target."
     )
 
     # Unknown opposite-side evidence must not be described as available.
     state["blocks_by_effector_valid"][:, 0, 1] = False
-    assert compact_grasp_hint(retriever, 10) == "Pick up the target."
+    assert compact_grasp_hint(retriever, 10) == "Move the gripper toward the target."
 
     # Missing obstacle geometry preserves the approach-side instruction.
     state["blocks_by_effector"][1, 0] = [True, False]
     state["blocks_by_effector_valid"][:, 0, :] = True
     retriever._aabb_bounds.pop(20)
     assert compact_grasp_hint(retriever, 10) == (
-        "Use the right gripper to approach the target and pick it up."
+        "Use the right gripper to approach the target."
     )
 
     # No preference when both paths are valid and clear.
     state["blocks_by_effector"][:, 0, :] = False
     state["blocks_by_effector_valid"][:, 0, :] = True
-    assert compact_grasp_hint(retriever, 10) == "Pick up the target."
+    assert compact_grasp_hint(retriever, 10) == "Move the gripper toward the target."
 
 
 def test_transport_gripper_latch_changes_only_the_active_channel():

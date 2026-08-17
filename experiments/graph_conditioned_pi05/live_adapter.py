@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import re
 from typing import Any, Iterable
 
@@ -27,7 +27,7 @@ from .contract import (
     stable_aliases,
 )
 from .graph_serializer import PackedItem
-from .graph_replanning import ActionGraphState, Evidence, TaskGoal
+from .graph_replanning import ActionGraphState, Evidence, GraspSubstage, TaskGoal
 from .simulator_evidence import (
     LiveTaskState,
     SimulatorEvidence,
@@ -464,10 +464,17 @@ def action_intent_for_phase(
     target_id: int,
     destination_id: int,
     relation: str,
+    grasp_substage: GraspSubstage = GraspSubstage.APPROACH,
+    grasp_arm: str | None = None,
 ) -> ActionIntent:
     """Create one validated atomic intent for the controller's current phase."""
     if phase == "grasp":
-        return grasp_intent(retriever, target_id)
+        intent = grasp_intent(retriever, target_id)
+        return replace(
+            intent,
+            grasp_substage=grasp_substage,
+            preferred_arm=(grasp_arm or intent.preferred_arm),
+        )
     if phase == "placement":
         return placement_intent(retriever, (destination_id,), relation)
     if phase == "release":
@@ -898,8 +905,11 @@ def prepare_instruction(
     condition: InputCondition | str,
     contract: RetrievalContract,
     previous_phase: str = "grasp",
+    grasp_substage: GraspSubstage | str = GraspSubstage.APPROACH,
+    grasp_arm: str | None = None,
 ) -> PreparedInstruction:
     base_instruction = str(task_env.get_instruction())
+    grasp_substage = GraspSubstage(grasp_substage)
     condition = InputCondition(condition)
     if condition is InputCondition.VISUAL_ONLY:
         return PreparedInstruction(
@@ -952,6 +962,8 @@ def prepare_instruction(
             target_id,
             destination_ids[0],
             goal.relation,
+            grasp_substage=grasp_substage,
+            grasp_arm=grasp_arm,
         )
         guidance = action_intent.render_stage_instruction()
         guidance_items.append(

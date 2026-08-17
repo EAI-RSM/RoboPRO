@@ -5,6 +5,7 @@ from experiments.graph_conditioned_pi05.graph_replanning import (
     GraphDelta,
     GraphDeltaDetector,
     GraphEvent,
+    GraspSubstage,
     PromptPhase,
     ReplanPolicy,
 )
@@ -125,3 +126,32 @@ def test_controller_accepts_one_way_release_ready_event():
     assert decision.event is GraphEvent.RELEASE_READY
     assert controller.phase is PromptPhase.RELEASE
     assert record["trigger_event"] == "release_ready"
+
+
+def test_grasp_substages_advance_monotonically_and_interrupt_chunks():
+    controller = GraphControllerState()
+    initial, _ = controller.observe(
+        state(grasp_substage=GraspSubstage.APPROACH, grasp_arm="left"), 0
+    )
+    assert not initial.requires_replan
+    pending, _ = controller.observe(
+        state(grasp_substage=GraspSubstage.ALIGN, grasp_arm="left"), 31
+    )
+    assert not pending.requires_replan
+    align, record = controller.observe(
+        state(grasp_substage=GraspSubstage.ALIGN, grasp_arm="left"), 30
+    )
+    assert align.requires_replan and align.reason == "grasp_substage:align"
+    assert controller.grasp_substage is GraspSubstage.ALIGN
+    assert record["discarded_actions"] == 30
+    # Noisy distance evidence cannot regress align back to approach.
+    regressed, _ = controller.observe(
+        state(grasp_substage=GraspSubstage.APPROACH, grasp_arm="left"), 30
+    )
+    assert not regressed.requires_replan
+    assert controller.grasp_substage is GraspSubstage.ALIGN
+    close, _ = controller.observe(
+        state(grasp_substage=GraspSubstage.CLOSE, grasp_arm="left"), 29
+    )
+    assert close.requires_replan and close.reason == "grasp_substage:close"
+    assert controller.grasp_substage is GraspSubstage.CLOSE

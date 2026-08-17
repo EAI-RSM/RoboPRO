@@ -6,14 +6,17 @@ from experiments.graph_conditioned_pi05.action_intent import (
     MotionDirection,
     PlacementRelation,
 )
+from experiments.graph_conditioned_pi05.graph_replanning import GraspSubstage
 
 
-def test_grasp_rendering_has_legacy_parity():
+def test_grasp_substages_render_atomic_instructions():
     fallback = ActionIntent(IntentOperation.GRASP, "sauce can")
-    assert fallback.render_stage_instruction() == "Pick up the sauce can."
+    assert fallback.render_stage_instruction() == (
+        "Move the gripper toward the sauce can."
+    )
     selected = replace(fallback, preferred_arm="left")
     assert selected.render_stage_instruction() == (
-        "Use the left gripper to approach the sauce can and pick it up."
+        "Use the left gripper to approach the sauce can."
     )
     warning = replace(
         selected,
@@ -23,8 +26,14 @@ def test_grasp_rendering_has_legacy_parity():
     )
     assert warning.render_stage_instruction() == (
         "Collision risk: the kettle blocks the right gripper. "
-        "Use the left gripper to approach the sauce can and pick it up."
+        "Use the left gripper to approach the sauce can."
     )
+    assert replace(
+        selected, grasp_substage=GraspSubstage.ALIGN
+    ).render_stage_instruction() == "Align the left gripper with the sauce can."
+    assert replace(
+        selected, grasp_substage=GraspSubstage.CLOSE
+    ).render_stage_instruction() == "Close the left gripper to grasp the sauce can."
 
 
 def test_place_and_release_rendering_have_legacy_parity():
@@ -71,12 +80,13 @@ def test_intent_is_serializable_and_self_consistent():
         "blocked_arm": None,
         "obstacle_label": None,
         "collision_imminent": False,
+        "grasp_substage": None,
         "phase": "placement",
     }
 
 
 def main():
-    test_grasp_rendering_has_legacy_parity()
+    test_grasp_substages_render_atomic_instructions()
     test_place_and_release_rendering_have_legacy_parity()
     test_intent_is_serializable_and_self_consistent()
     print("3 action-intent checks passed")

@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
-from .graph_replanning import ActionGraphState, Evidence
+from .graph_replanning import ActionGraphState, Evidence, GraspSubstage
 
 if TYPE_CHECKING:
     from .live_adapter import LiveGraphContext
@@ -15,6 +15,7 @@ if TYPE_CHECKING:
 
 RELEASE_READY_VERTICAL_CLEARANCE_M = 0.10
 EFFECTOR_IDS = {"left": -2, "right": -3}
+GRASP_ALIGNMENT_DISTANCE_M = 0.12
 
 
 def _aggregate(values: np.ndarray, valid: np.ndarray) -> Evidence:
@@ -59,6 +60,8 @@ class SimulatorEvidence:
     release_ready: bool
     left: EffectorEvidence
     right: EffectorEvidence
+    grasp_substage: GraspSubstage
+    grasp_arm: str | None
 
     def action_graph_state(self) -> ActionGraphState:
         return ActionGraphState(
@@ -69,6 +72,8 @@ class SimulatorEvidence:
             reachable=self.reachable,
             visible=self.visible,
             held_arm=self.held_arm,
+            grasp_substage=self.grasp_substage,
+            grasp_arm=self.grasp_arm,
         )
 
     def live_task_state(self) -> LiveTaskState:
@@ -218,6 +223,32 @@ def extract_simulator_evidence(context: "LiveGraphContext") -> SimulatorEvidence
         )
 
     release_ready = _release_ready(context, target_id, held_arm)
+    contact_arms = [
+        arm for arm in ("left", "right") if effectors[arm].target_contact
+    ]
+    finite_arms = [
+        arm for arm in ("left", "right")
+        if np.isfinite(effectors[arm].target_distance_m)
+    ]
+    nearest_arm = (
+        min(contact_arms, key=lambda arm: effectors[arm].target_distance_m)
+        if contact_arms
+        else min(finite_arms, key=lambda arm: effectors[arm].target_distance_m)
+        if finite_arms else None
+    )
+    if contact_arms:
+        grasp_substage = GraspSubstage.CLOSE
+        grasp_arm = nearest_arm
+    elif (
+        nearest_arm is not None
+        and effectors[nearest_arm].target_distance_m <= GRASP_ALIGNMENT_DISTANCE_M
+    ):
+        grasp_substage = GraspSubstage.ALIGN
+        grasp_arm = nearest_arm
+    else:
+        grasp_substage = GraspSubstage.APPROACH
+        # Far away, retain the collision-aware arm chosen by grasp_intent().
+        grasp_arm = None
     return SimulatorEvidence(
         target_id=target_id,
         held=held,
@@ -230,6 +261,8 @@ def extract_simulator_evidence(context: "LiveGraphContext") -> SimulatorEvidence
         release_ready=release_ready,
         left=effectors["left"],
         right=effectors["right"],
+        grasp_substage=grasp_substage,
+        grasp_arm=grasp_arm,
     )
 
 

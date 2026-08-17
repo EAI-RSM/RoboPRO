@@ -13,6 +13,12 @@ class PromptPhase(str, Enum):
     RELEASE = "release"
 
 
+class GraspSubstage(str, Enum):
+    APPROACH = "approach"
+    ALIGN = "align"
+    CLOSE = "close"
+
+
 class Evidence(str, Enum):
     UNKNOWN = "unknown"
     FALSE = "false"
@@ -55,6 +61,8 @@ class ActionGraphState:
     reachable: Evidence = Evidence.UNKNOWN
     visible: Evidence = Evidence.UNKNOWN
     held_arm: str | None = None
+    grasp_substage: GraspSubstage = GraspSubstage.APPROACH
+    grasp_arm: str | None = None
 
     def predicates(self) -> Mapping[str, Evidence]:
         return {
@@ -244,9 +252,35 @@ class GraphControllerState:
     detector: GraphDeltaDetector = field(default_factory=GraphDeltaDetector)
     policy: ReplanPolicy = field(default_factory=ReplanPolicy)
     pending_events: set[GraphEvent] = field(default_factory=set)
+    grasp_substage: GraspSubstage = GraspSubstage.APPROACH
+    grasp_arm: str | None = None
+    _grasp_candidate: GraspSubstage | None = None
+    _grasp_candidate_count: int = 0
 
     def observe(self, state: ActionGraphState, remaining_actions: int) -> tuple[ReplanDecision, dict]:
         self.frame += 1
+        prior_substage = self.grasp_substage
+        if self.phase is PromptPhase.GRASP:
+            order = {
+                GraspSubstage.APPROACH: 0,
+                GraspSubstage.ALIGN: 1,
+                GraspSubstage.CLOSE: 2,
+            }
+            if order[state.grasp_substage] > order[self.grasp_substage]:
+                if state.grasp_substage is self._grasp_candidate:
+                    self._grasp_candidate_count += 1
+                else:
+                    self._grasp_candidate = state.grasp_substage
+                    self._grasp_candidate_count = 1
+                threshold = 1 if state.grasp_substage is GraspSubstage.CLOSE else 2
+                if self._grasp_candidate_count >= threshold:
+                    self.grasp_substage = state.grasp_substage
+                    self.grasp_arm = state.grasp_arm or self.grasp_arm
+                    self._grasp_candidate = None
+                    self._grasp_candidate_count = 0
+            else:
+                self._grasp_candidate = None
+                self._grasp_candidate_count = 0
         if state.held is Evidence.TRUE and state.held_arm is not None:
             self.held_arm = state.held_arm
         delta = self.detector.observe(state)
@@ -273,6 +307,13 @@ class GraphControllerState:
         decision = self.policy.evaluate(
             self.phase, effective_delta, self.actions_since_replan, state=state
         )
+        substage_changed = self.grasp_substage is not prior_substage
+        if not decision.requires_replan and substage_changed and self.frame > 1:
+            decision = ReplanDecision(
+                True,
+                self.phase,
+                reason=f"grasp_substage:{self.grasp_substage.value}",
+            )
         record = {
             "frame": self.frame,
             "prior_phase": self.phase.value,
@@ -281,8 +322,12 @@ class GraphControllerState:
             "persistence": dict(delta.persistence),
             "requires_replan": decision.requires_replan,
             "trigger_event": decision.event.value if decision.event else None,
+            "reason": decision.reason,
             "discarded_actions": remaining_actions if decision.requires_replan else 0,
             "next_phase": decision.next_phase.value,
+            "prior_grasp_substage": prior_substage.value,
+            "next_grasp_substage": self.grasp_substage.value,
+            "grasp_arm": self.grasp_arm,
         }
         if decision.requires_replan:
             self.phase = decision.next_phase
@@ -290,4 +335,11 @@ class GraphControllerState:
             self.pending_events.clear()
             if self.phase is PromptPhase.GRASP:
                 self.held_arm = None
+                if decision.event is GraphEvent.GRASP_LOST:
+                    self.grasp_substage = GraspSubstage.APPROACH
+                    self.grasp_arm = None
+                    self._grasp_candidate = None
+                    self._grasp_candidate_count = 0
+            record["next_grasp_substage"] = self.grasp_substage.value
+            record["grasp_arm"] = self.grasp_arm
         return decision, record

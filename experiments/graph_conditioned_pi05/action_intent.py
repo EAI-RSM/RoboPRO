@@ -6,6 +6,8 @@ from dataclasses import asdict, dataclass
 from enum import Enum
 from typing import Any
 
+from .graph_replanning import GraspSubstage
+
 
 class IntentOperation(str, Enum):
     GRASP = "grasp"
@@ -38,6 +40,7 @@ class ActionIntent:
     blocked_arm: str | None = None
     obstacle_label: str | None = None
     collision_imminent: bool = False
+    grasp_substage: GraspSubstage | None = None
 
     def __post_init__(self) -> None:
         if not self.target_label:
@@ -55,6 +58,10 @@ class ActionIntent:
             raise ValueError("only place intent can carry motion directions")
         if self.collision_imminent and not (self.blocked_arm and self.obstacle_label):
             raise ValueError("collision warning requires blocked arm and obstacle")
+        if self.operation is IntentOperation.GRASP and self.grasp_substage is None:
+            object.__setattr__(self, "grasp_substage", GraspSubstage.APPROACH)
+        if self.operation is not IntentOperation.GRASP and self.grasp_substage is not None:
+            raise ValueError("only grasp intent can carry a grasp substage")
 
     @property
     def phase(self) -> str:
@@ -67,13 +74,18 @@ class ActionIntent:
     def render_stage_instruction(self) -> str:
         """Render the exact stage language used before this refactor."""
         if self.operation is IntentOperation.GRASP:
-            if self.preferred_arm:
+            arm = f"{self.preferred_arm} gripper" if self.preferred_arm else "gripper"
+            if self.grasp_substage is GraspSubstage.CLOSE:
+                instruction = f"Close the {arm} to grasp the {self.target_label}."
+            elif self.grasp_substage is GraspSubstage.ALIGN:
+                instruction = f"Align the {arm} with the {self.target_label}."
+            elif self.preferred_arm:
                 instruction = (
                     f"Use the {self.preferred_arm} gripper to approach the "
-                    f"{self.target_label} and pick it up."
+                    f"{self.target_label}."
                 )
             else:
-                instruction = f"Pick up the {self.target_label}."
+                instruction = f"Move the gripper toward the {self.target_label}."
             if self.collision_imminent:
                 return (
                     f"Collision risk: the {self.obstacle_label} blocks the "
@@ -107,5 +119,8 @@ class ActionIntent:
             self.placement_relation.value if self.placement_relation else None
         )
         result["motion_directions"] = [value.value for value in self.motion_directions]
+        result["grasp_substage"] = (
+            self.grasp_substage.value if self.grasp_substage else None
+        )
         result["phase"] = self.phase
         return result

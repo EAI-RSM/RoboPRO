@@ -730,6 +730,9 @@ def eval_policy(task_name,
                     "prompt_phases": [
                         item["prompt_phase"] for item in graph_stats
                     ],
+                    "grasp_substages": [
+                        item["grasp_substage"] for item in graph_stats
+                    ],
                     "prompt_update_count": int(sum(
                         item["prompt_updated"] for item in graph_stats
                     )),

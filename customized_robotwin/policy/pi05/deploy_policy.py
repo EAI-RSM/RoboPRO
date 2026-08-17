@@ -80,6 +80,8 @@ def _prepare_graph_prompt(task_env, model, observation, controller):
     prepared = prepare_instruction(
         task_env, model, observation, _GRAPH_CONDITION, _GRAPH_CONTRACT,
         previous_phase=controller.phase.value,
+        grasp_substage=controller.grasp_substage,
+        grasp_arm=controller.grasp_arm,
     )
     active_prompt = getattr(task_env, "_graph_active_prompt", None)
     prompt_updated = prepared.instruction != active_prompt
@@ -107,6 +109,7 @@ def _prepare_graph_prompt(task_env, model, observation, controller):
             "full_prompt_tokens_estimate": prepared.full_prompt_token_count_estimate,
             "destination_seed_available": prepared.destination_seed_available,
             "prompt_phase": controller.phase.value,
+            "grasp_substage": controller.grasp_substage.value,
             "prompt_updated": prompt_updated,
             "prompt": prepared.instruction,
             "action_intent": task_env._graph_active_intent,
