@@ -8,15 +8,18 @@ from typing import Any
 
 import numpy as np
 
+from experiments.graph_conditioned_pi05.contract import RetrievalContract
 from experiments.graph_conditioned_pi05.live_adapter import (
     LiveGraphContext,
     build_live_graph_context,
 )
-from experiments.graph_conditioned_pi05.contract import RetrievalContract
+from experiments.graph_conditioned_pi05.simulator_evidence import (
+    SimulatorEvidence,
+    extract_simulator_evidence,
+)
 
 
 GRIPPER_INDICES = {"left": 6, "right": 13}
-EFFECTOR_IDS = {"left": -2, "right": -3}
 GRIPPER_CLOSED_THRESHOLD = 0.2
 
 
@@ -24,53 +27,18 @@ def graph_evidence(
     task_env: Any,
     observation: dict[str, Any],
     context: LiveGraphContext | None = None,
+    evidence: SimulatorEvidence | None = None,
 ) -> dict[str, Any]:
     """Read target/effector geometry and contact evidence from an observation."""
-    if context is None:
+    if evidence is None and context is None:
         support = observation.get("benchmark_support") or {}
         if support.get("relation_state") is None or support.get("object_state") is None:
             return {}
         context = build_live_graph_context(
             task_env, observation, RetrievalContract()
         )
-    relations = context.relation_state
-    retriever = context.retriever
-    goal = context.goal
-    target_id = goal.target_ids[0] if len(goal.target_ids) == 1 else None
-    if target_id is None:
-        return {}
-    index = context.index_by_id
-    target_index = index.get(int(target_id))
-    target_pose = retriever._poses_world.get(int(target_id))
-    held = np.asarray(relations.get("held_by", ()), dtype=np.bool_)
-    held_valid = retriever._valid("held_by", held) if held.ndim == 2 else None
-    raw_contact = np.asarray(relations.get("raw_contact", ()), dtype=np.bool_)
-    result: dict[str, Any] = {"target_id": int(target_id), "held_arm": ""}
-    for arm_index, arm in enumerate(("left", "right")):
-        effector_pose = retriever._poses_world.get(EFFECTOR_IDS[arm])
-        result[f"target_{arm}_distance"] = (
-            float(np.linalg.norm(target_pose[:3] - effector_pose[:3]))
-            if target_pose is not None and effector_pose is not None else np.nan
-        )
-        effector_index = index.get(EFFECTOR_IDS[arm])
-        result[f"target_{arm}_contact"] = bool(
-            target_index is not None
-            and effector_index is not None
-            and raw_contact.ndim == 2
-            and raw_contact[target_index, effector_index]
-        )
-        is_held = bool(
-            target_index is not None
-            and held.ndim == 2
-            and target_index < held.shape[0]
-            and arm_index < held.shape[1]
-            and held[target_index, arm_index]
-            and (held_valid is None or held_valid[target_index, arm_index])
-        )
-        result[f"held_by_{arm}"] = is_held
-        if is_held and not result["held_arm"]:
-            result["held_arm"] = arm
-    return result
+    evidence = evidence or extract_simulator_evidence(context)
+    return evidence.diagnostic_dict()
 
 
 class ActionTraceRecorder:

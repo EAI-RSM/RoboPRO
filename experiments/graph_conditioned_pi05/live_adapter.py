@@ -28,9 +28,13 @@ from .contract import (
 )
 from .graph_serializer import PackedItem
 from .graph_replanning import ActionGraphState, Evidence, TaskGoal
+from .simulator_evidence import (
+    LiveTaskState,
+    SimulatorEvidence,
+    extract_simulator_evidence,
+)
 
 
-RELEASE_READY_VERTICAL_CLEARANCE_M = 0.10
 IMMINENT_GRIPPER_OBSTACLE_CLEARANCE_M = 0.20
 
 
@@ -60,14 +64,6 @@ class PreparedInstruction:
 
 
 @dataclass(frozen=True)
-class LiveTaskState:
-    target_held: bool
-    held_arm: str | None
-    target_inside_destination: bool
-    release_ready: bool
-
-
-@dataclass(frozen=True)
 class LiveGraphContext:
     """One parsed view of a single live observation, shared by its consumers."""
 
@@ -78,17 +74,6 @@ class LiveGraphContext:
     retriever: "LiveGraphRetriever"
     index_by_id: dict[int, int]
     contract: RetrievalContract
-
-
-def _aggregate_evidence(values: np.ndarray, valid: np.ndarray) -> Evidence:
-    """Reduce a relevant relation slice without converting unknown to false."""
-    values = np.asarray(values, dtype=np.bool_)
-    valid = np.asarray(valid, dtype=np.bool_)
-    if values.shape != valid.shape:
-        raise ValueError("relation values and validity mask are not aligned")
-    if not np.any(valid):
-        return Evidence.UNKNOWN
-    return Evidence.TRUE if np.any(values & valid) else Evidence.FALSE
 
 
 def task_goal_from_env(task_env: Any, catalog: Iterable[dict[str, Any]]) -> TaskGoal:
@@ -150,78 +135,12 @@ def action_graph_state(
     observation: dict[str, Any],
     contract: RetrievalContract,
     context: LiveGraphContext | None = None,
+    evidence: SimulatorEvidence | None = None,
 ) -> ActionGraphState:
     """Extract action-relevant graph predicates with three-valued validity."""
     context = context or build_live_graph_context(task_env, observation, contract)
-    relation_state = context.relation_state
-    retriever = context.retriever
-    goal = context.goal
-    index_by_id = context.index_by_id
-    target_indices = [index_by_id[value] for value in goal.target_ids if value in index_by_id]
-    destination_indices = [
-        index_by_id[value] for value in goal.destination_ids if value in index_by_id
-    ]
-    if not target_indices or not destination_indices:
-        raise ValueError("task goal IDs are absent from the live relation state")
-
-    held = np.asarray(relation_state.get("held_by", ()), dtype=np.bool_)
-    held_valid = retriever._valid("held_by", held) if held.ndim == 2 else np.zeros_like(held)
-    held_evidence = _aggregate_evidence(held[target_indices], held_valid[target_indices])
-    held_arm = None
-    if held_evidence is Evidence.TRUE:
-        for target_index in target_indices:
-            active = np.flatnonzero(held[target_index] & held_valid[target_index])
-            if len(active):
-                name = retriever.effector_names[int(active[0])].lower()
-                held_arm = "left" if "left" in name else "right" if "right" in name else None
-                break
-
-    goal_values = np.asarray(relation_state.get(goal.relation, ()), dtype=np.bool_)
-    if goal_values.ndim == 2:
-        goal_valid = retriever._valid(goal.relation, goal_values)
-        selection = np.ix_(target_indices, destination_indices)
-        goal_evidence = _aggregate_evidence(goal_values[selection], goal_valid[selection])
-    else:
-        goal_evidence = Evidence.UNKNOWN
-
-    reachable = np.asarray(relation_state.get("reachable_by", ()), dtype=np.bool_)
-    reachable_evidence = Evidence.UNKNOWN
-    if reachable.ndim == 2:
-        reachable_valid = retriever._valid("reachable_by", reachable)
-        reachable_evidence = _aggregate_evidence(
-            reachable[target_indices], reachable_valid[target_indices]
-        )
-
-    visible = np.asarray(relation_state.get("visible_to", ()), dtype=np.bool_)
-    visible_evidence = Evidence.UNKNOWN
-    if visible.ndim == 2 and context.contract.default_camera in retriever.camera_names:
-        camera_index = retriever.camera_names.index(context.contract.default_camera)
-        visible_valid = retriever._valid("visible_to", visible)
-        visible_evidence = _aggregate_evidence(
-            visible[target_indices, camera_index],
-            visible_valid[target_indices, camera_index],
-        )
-
-    blocks = np.asarray(relation_state.get("blocks", ()), dtype=np.bool_)
-    blocked_evidence = Evidence.UNKNOWN
-    if blocks.ndim == 2:
-        blocks_valid = retriever._valid("blocks", blocks)
-        blocked_evidence = _aggregate_evidence(
-            blocks[:, target_indices], blocks_valid[:, target_indices]
-        )
-
-    legacy = live_task_state(task_env, observation, contract, context=context)
-    return ActionGraphState(
-        held=held_evidence,
-        release_ready=(
-            Evidence.TRUE if legacy.release_ready else Evidence.FALSE
-        ),
-        goal_satisfied=goal_evidence,
-        path_blocked=blocked_evidence,
-        reachable=reachable_evidence,
-        visible=visible_evidence,
-        held_arm=held_arm,
-    )
+    evidence = evidence or extract_simulator_evidence(context)
+    return evidence.action_graph_state()
 
 
 def _round1(value: float) -> float:
@@ -327,115 +246,17 @@ def goal_geometry_pack_item(
     )
 
 
-def target_is_held(retriever: "LiveGraphRetriever") -> bool:
-    """Return whether any target has valid current-frame gripper evidence."""
-    held = np.asarray(retriever.state.get("held_by", ()), dtype=np.bool_)
-    if held.ndim != 2:
-        return False
-    valid = retriever._valid("held_by", held)
-    for index, is_target in enumerate(retriever.is_target):
-        if bool(is_target) and index < held.shape[0] and np.any(held[index] & valid[index]):
-            return True
-    return False
-
-
 def live_task_state(
     task_env: Any,
     observation: dict[str, Any],
     contract: RetrievalContract,
     context: LiveGraphContext | None = None,
+    evidence: SimulatorEvidence | None = None,
 ) -> LiveTaskState:
     """Read event predicates used to interrupt an open-loop action chunk."""
     context = context or build_live_graph_context(task_env, observation, contract)
-    relation_state = context.relation_state
-    object_state = context.object_state
-    goal = context.goal
-    destination_ids = goal.destination_ids
-    retriever = context.retriever
-
-    held = np.asarray(relation_state.get("held_by", ()), dtype=np.bool_)
-    held_valid = retriever._valid("held_by", held) if held.ndim == 2 else held
-    held_arm = None
-    if held.ndim == 2:
-        for target_index in np.flatnonzero(retriever.is_target):
-            active = np.flatnonzero(held[target_index] & held_valid[target_index])
-            if len(active):
-                name = retriever.effector_names[int(active[0])].lower()
-                held_arm = "left" if "left" in name else "right" if "right" in name else None
-                break
-
-    inside_destination = False
-    release_ready = False
-    inside = np.asarray(relation_state.get("in", ()), dtype=np.bool_)
-    valid = np.asarray(
-        relation_state.get("containment_valid", np.zeros_like(inside)), dtype=np.bool_
-    )
-    if inside.ndim == 2 and valid.shape == inside.shape:
-        for target_index in np.flatnonzero(retriever.is_target):
-            for destination_id in destination_ids:
-                destination_index = context.index_by_id.get(int(destination_id))
-                if (
-                    destination_index is not None
-                    and bool(valid[target_index, destination_index])
-                    and bool(inside[target_index, destination_index])
-                ):
-                    inside_destination = True
-                    break
-
-    # A held object may remain just above an open container because the policy
-    # expects gravity to finish insertion after release. Requiring full center
-    # containment before opening therefore deadlocks. Permit release when the
-    # target is horizontally over the destination and its bottom is close
-    # enough for gravity to finish insertion. Full `in` remains the success
-    # test; this threshold only decides when opening is safe.
-    object_ids = np.asarray(object_state["object_ids"], dtype=np.int64)
-    aabb_lower = np.asarray(object_state.get("aabb_lower", ()), dtype=np.float64)
-    aabb_upper = np.asarray(object_state.get("aabb_upper", ()), dtype=np.float64)
-    has_aabb = np.asarray(object_state.get("has_aabb", ()), dtype=np.bool_)
-    object_index = {int(object_id): index for index, object_id in enumerate(object_ids)}
-    target_ids = [
-        int(object_id)
-        for object_id, flag in zip(retriever.object_ids, retriever.is_target)
-        if bool(flag)
-    ]
-    if len(target_ids) == 1 and len(destination_ids) == 1:
-        target_index = object_index.get(target_ids[0])
-        destination_index = object_index.get(destination_ids[0])
-        if (
-            target_index is not None
-            and destination_index is not None
-            and aabb_lower.ndim == 2
-            and aabb_upper.shape == aabb_lower.shape
-            and len(has_aabb) == len(object_ids)
-            and bool(has_aabb[target_index])
-            and bool(has_aabb[destination_index])
-        ):
-            target_center = 0.5 * (
-                aabb_lower[target_index] + aabb_upper[target_index]
-            )
-            destination_min = aabb_lower[destination_index]
-            destination_max = aabb_upper[destination_index]
-            horizontally_ready = bool(
-                np.all(target_center[:2] >= destination_min[:2])
-                and np.all(target_center[:2] <= destination_max[:2])
-            )
-            vertical_ready = bool(
-                target_center[2] >= destination_min[2] - 0.02
-                and aabb_lower[target_index, 2]
-                <= destination_max[2] + RELEASE_READY_VERTICAL_CLEARANCE_M
-            )
-            release_ready = (
-                held_arm is not None
-                and horizontally_ready
-                and vertical_ready
-            )
-
-    return LiveTaskState(
-        held_arm is not None,
-        held_arm,
-        inside_destination,
-        release_ready,
-    )
+    evidence = evidence or extract_simulator_evidence(context)
+    return evidence.live_task_state()
 
 
 def keep_active_gripper_closed(action: np.ndarray, held_arm: str | None) -> np.ndarray:

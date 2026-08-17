@@ -24,6 +24,9 @@ from experiments.graph_conditioned_pi05.graph_replanning import (
     PromptPhase,
 )
 from experiments.graph_conditioned_pi05.action_diagnostics import graph_evidence
+from experiments.graph_conditioned_pi05.simulator_evidence import (
+    extract_simulator_evidence,
+)
 
 parent_directory = os.path.dirname(os.path.abspath(__file__))
 sys.path.append(parent_directory)
@@ -137,13 +140,16 @@ def _execute_action_chunk(task_env, model, observation, actions, controller):
         controller.actions_since_replan += 1
         observation = task_env.get_obs()
         context = build_live_graph_context(task_env, observation, _GRAPH_CONTRACT)
+        evidence = extract_simulator_evidence(context)
         _record_action_trace(
-            task_env, action, executed_action, observation, controller, context
+            task_env, action, executed_action, observation, controller,
+            context, evidence,
         )
         input_rgb_arr, input_state = encode_obs(observation)
         model.update_observation_window(input_rgb_arr, input_state)
         state = action_graph_state(
-            task_env, observation, _GRAPH_CONTRACT, context=context
+            task_env, observation, _GRAPH_CONTRACT,
+            context=context, evidence=evidence,
         )
         if _record_graph_observation(
             task_env, controller, state, len(actions) - index - 1
@@ -153,17 +159,20 @@ def _execute_action_chunk(task_env, model, observation, actions, controller):
 
 def _record_action_trace(
     task_env, raw_action, executed_action, observation, controller=None,
-    graph_context=None,
+    graph_context=None, simulator_evidence=None,
 ):
     recorder = getattr(task_env, "_action_trace_recorder", None)
     if recorder is None:
         return
     try:
-        evidence = graph_evidence(task_env, observation, context=graph_context)
+        trace_evidence = graph_evidence(
+            task_env, observation, context=graph_context,
+            evidence=simulator_evidence,
+        )
     except (AttributeError, KeyError, TypeError, ValueError):
         # Diagnostics must not make an otherwise valid rollout fail. Missing
         # graph support remains visible as absent/NaN fields in the trace.
-        evidence = {}
+        trace_evidence = {}
     recorder.record(
         frame=task_env.take_action_cnt,
         prompt=getattr(task_env, "_graph_active_prompt", None) or task_env.get_instruction(),
@@ -171,7 +180,7 @@ def _record_action_trace(
         raw_action=raw_action,
         executed_action=executed_action,
         observation=observation,
-        evidence=evidence,
+        evidence=trace_evidence,
         action_intent=getattr(task_env, "_graph_active_intent", None),
     )
 

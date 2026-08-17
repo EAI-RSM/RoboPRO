@@ -32,6 +32,9 @@ from experiments.graph_conditioned_pi05.live_adapter import (
     prepare_instruction,
     vla_label_from_catalog_entry,
 )
+from experiments.graph_conditioned_pi05.simulator_evidence import (
+    extract_simulator_evidence,
+)
 from experiments.graph_conditioned_pi05.validate_alignment import FRAME_ALIGNED_PATHS, validate_episode
 
 
@@ -330,10 +333,12 @@ def test_shared_live_context_has_value_parity_and_one_catalog_parse(tmp_path):
     with _graph_file(tmp_path / "graph.hdf5") as root:
         catalog, state, object_state = _live_inputs(root)
     state["held_by"] = np.zeros((5, 2), dtype=bool)
+    state["held_by"][0, 0] = True
     state["held_by_valid"] = np.ones((5, 2), dtype=bool)
     state["in"] = np.zeros((5, 5), dtype=bool)
     state["containment_valid"] = np.ones((5, 5), dtype=bool)
     state["raw_contact"] = np.zeros((5, 5), dtype=bool)
+    state["raw_contact"][0, 3] = state["raw_contact"][3, 0] = True
     observation = {
         "benchmark_support": {
             "relation_state": state,
@@ -350,15 +355,23 @@ def test_shared_live_context_has_value_parity_and_one_catalog_parse(tmp_path):
 
     task.catalog_reads = 0
     context = build_live_graph_context(task, observation, contract)
+    evidence = extract_simulator_evidence(context)
     shared_control = action_graph_state(
-        task, observation, contract, context=context
+        task, observation, contract, context=context, evidence=evidence
     )
-    shared_live = live_task_state(task, observation, contract, context=context)
-    shared_diagnostics = graph_evidence(task, observation, context=context)
+    shared_live = live_task_state(
+        task, observation, contract, context=context, evidence=evidence
+    )
+    shared_diagnostics = graph_evidence(
+        task, observation, context=context, evidence=evidence
+    )
     assert task.catalog_reads == 1
     assert shared_control == independent_control
     assert shared_live == independent_live
     assert shared_diagnostics == independent_diagnostics
+    assert evidence.held_arm == "left"
+    assert evidence.left.target_held and evidence.left.target_contact
+    assert not evidence.right.target_held and not evidence.right.target_contact
 
 
 def test_prepare_instruction_preserves_visual_only_and_fits_graph(tmp_path):
