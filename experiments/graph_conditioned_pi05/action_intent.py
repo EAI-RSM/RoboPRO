@@ -78,7 +78,10 @@ class ActionIntent:
             if self.grasp_substage is GraspSubstage.CLOSE:
                 instruction = f"Close the {arm} to grasp the {self.target_label}."
             elif self.grasp_substage is GraspSubstage.ALIGN:
-                instruction = f"Align the {arm} with the {self.target_label}."
+                instruction = (
+                    f"Align the {arm} with the {self.target_label}. "
+                    f"Move the {arm} closer to the {self.target_label} for grasping."
+                )
             elif self.preferred_arm:
                 instruction = (
                     f"Use the {self.preferred_arm} gripper to approach the "

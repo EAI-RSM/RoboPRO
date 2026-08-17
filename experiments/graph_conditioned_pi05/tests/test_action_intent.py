@@ -30,7 +30,10 @@ def test_grasp_substages_render_atomic_instructions():
     )
     assert replace(
         selected, grasp_substage=GraspSubstage.ALIGN
-    ).render_stage_instruction() == "Align the left gripper with the sauce can."
+    ).render_stage_instruction() == (
+        "Align the left gripper with the sauce can. "
+        "Move the left gripper closer to the sauce can for grasping."
+    )
     assert replace(
         selected, grasp_substage=GraspSubstage.CLOSE
     ).render_stage_instruction() == "Close the left gripper to grasp the sauce can."
