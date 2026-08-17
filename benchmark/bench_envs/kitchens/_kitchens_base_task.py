@@ -695,7 +695,7 @@ class KitchenS_base_task(Bench_base_task):
         # prohibit a strip spanning the microwave width and extending in front.
         if getattr(self, "microwave_front_keepout", False):
             self.prohibited_area["table"].append([
-                x - 0.25, y - 0.35,   # x0, y0  (-y = robot / door side)
+                x - 0.25, y - 0.22,   # x0, y0  (-y = robot / door side)
                 x + 0.25, y + 0.10,   # x1, y1
             ])
 

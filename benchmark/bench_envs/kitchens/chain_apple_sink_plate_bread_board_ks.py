@@ -42,9 +42,13 @@ class chain_apple_sink_plate_bread_board_ks(KitchenS_base_task):
         # so the right arm does the apple→plate leg.
         self.apple_arm = ArmTag("right")
 
-        # Plate on mid-right counter.
+        # Plate on mid-right counter. Scene 1 puts the sink there, so slide
+        # the plate to the far-right band in front of the rack.
+        plate_xlim = [0.10, 0.30]
+        if abs(float(self.sink.get_pose().p[0])) < 0.25:
+            plate_xlim = [0.36, 0.48]
         plate_pose = self.rand_pose_on_counter(
-            xlim=[0.10, 0.30], ylim=[-0.20, 0.00],
+            xlim=plate_xlim, ylim=[-0.20, 0.00],
             qpos=[0.5, 0.5, 0.5, 0.5], rotate_rand=False,
             obj_padding=0.08,
         )
@@ -55,23 +59,8 @@ class chain_apple_sink_plate_bread_board_ks(KitchenS_base_task):
         self.plate.set_mass(0.1)
         self.add_prohibit_area(self.plate, padding=0.02, area="table")
 
-        # Board on left / mid-left counter (static destination for bread).
-        self.board_id = int(np.random.choice([0, 1, 2, 3]))
-        board_pose = self.rand_pose_on_counter(
-            xlim=[-0.30, -0.10], ylim=[-0.23, 0.00],
-            qpos=[0.5, 0.5, 0.5, 0.5], rotate_rand=True, rotate_lim=[0, np.pi/4, 0],
-            obj_padding=0.10,
-        )
-        self.board = create_actor(
-            scene=self, pose=board_pose, modelname="104_board",
-            convex=True, model_id=self.board_id,
-            scale=[0.10, 0.10, 0.10], is_static=True,
-        )
-        self.board.set_name("board")
-        self.add_prohibit_area(self.board, padding=0.02, area="table")
-
-        # Bread on left counter. Mirror put_bread_on_board_ks's reachability
-        # filter (|x| >= 0.3) so the left-arm side grasp can reach it.
+        # Bread before the board: the board's 10 cm footprint used to fill this
+        # left-counter band so 80 attempts found nothing.
         bread_pose = self.rand_pose_on_counter(
             xlim=[-0.40, -0.25], ylim=[-0.15, 0.05],
             qpos=[0.5, 0.5, 0.5, 0.5], rotate_rand=True, rotate_lim=[0, np.pi/2, 0],
@@ -90,6 +79,27 @@ class chain_apple_sink_plate_bread_board_ks(KitchenS_base_task):
         )
         self.bread.set_mass(0.05)
         self.add_prohibit_area(self.bread, padding=0.02, area="table")
+
+        # Board on left / mid-left counter (static destination for bread).
+        self.board_id = int(np.random.choice([0, 1, 2, 3]))
+        # Stay right of the bread band [-0.40, -0.25]; in scene 1 also stay
+        # left of the center sink (pad 0.10 cannot fit that gap).
+        if abs(float(self.sink.get_pose().p[0])) < 0.25:
+            board_xlim, board_pad = [-0.20, -0.14], 0.06
+        else:
+            board_xlim, board_pad = [-0.18, 0.00], 0.08
+        board_pose = self.rand_pose_on_counter(
+            xlim=board_xlim, ylim=[-0.23, 0.00],
+            qpos=[0.5, 0.5, 0.5, 0.5], rotate_rand=True, rotate_lim=[0, np.pi/4, 0],
+            obj_padding=board_pad,
+        )
+        self.board = create_actor(
+            scene=self, pose=board_pose, modelname="104_board",
+            convex=True, model_id=self.board_id,
+            scale=[0.10, 0.10, 0.10], is_static=True,
+        )
+        self.board.set_name("board")
+        self.add_prohibit_area(self.board, padding=0.02, area="table")
 
     # -----------------------------------------------------------------
     # Step 1: apple from sink → plate (scripted top-down, mirrors

@@ -37,7 +37,7 @@ class place_bowl_in_dishrack_ks(KitchenS_base_task):
 
         rand_pos = self.rand_pose_on_counter(
             xlim=x_range,
-            ylim=[-0.20, -0.14],
+            ylim=[-0.24, -0.14],
             qpos=[0.5, 0.5, 0.5, 0.5],
             rotate_rand=False,
             obj_padding=0.06,

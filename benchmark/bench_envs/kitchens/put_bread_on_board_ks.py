@@ -50,8 +50,13 @@ class put_bread_on_board_ks(KitchenS_base_task):
         )
         self.target_obj.set_mass(0.05)
 
+        # Center board overlaps the scene-1 sink keepout (pad 0.10). Shift left
+        # of the basin only in that layout; scenes 0/2 keep the original band.
+        board_xlim = [-0.12, 0.12]
+        if abs(float(self.sink.get_pose().p[0])) < 0.25:
+            board_xlim = [-0.32, -0.18]
         target_rand_pose = self.rand_pose_on_counter(
-            xlim=[-0.12, 0.12],
+            xlim=board_xlim,
             ylim=[-0.23, 0.05],
             qpos=[0.5, 0.5, 0.5, 0.5],
             rotate_rand=True,

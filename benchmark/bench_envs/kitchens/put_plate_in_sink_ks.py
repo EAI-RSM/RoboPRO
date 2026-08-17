@@ -28,12 +28,13 @@ class put_plate_in_sink_ks(KitchenS_base_task):
         self.arm_tag = ArmTag("right" if sink_p[0] > 0 else "left")
         side_sign = 1 if self.arm_tag == "right" else -1
 
-        # Plate spawns on the same side as the sink/arm. Plate center offset
-        # at least 0.18 so the near-side rim (at plate.x - 0.085 * side_sign)
-        # sits comfortably inside the arm workspace. y narrowed to the
-        # empirically reachable top-down envelope (successful seeds had
-        # plate.y ∈ [-0.14, -0.09]).
-        x_range = [0.18, 0.28] if side_sign > 0 else [-0.28, -0.18]
+        # Plate spawns on the same side as the sink/arm. The old [0.18, 0.28]
+        # band sits inside the sink keepout in every scene (pad 0.10); slide
+        # left of a right-side sink, or right of the scene-1 center sink.
+        if side_sign > 0:
+            x_range = [0.38, 0.48] if abs(sink_p[0]) < 0.25 else [0.06, 0.15]
+        else:
+            x_range = [-0.15, -0.06]
 
         rand_pos = self.rand_pose_on_counter(
             xlim=x_range,
