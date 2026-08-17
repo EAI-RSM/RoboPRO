@@ -27,7 +27,18 @@ def state(**values):
 def test_detector_debounces_and_unknown_is_not_false():
     detector = GraphDeltaDetector()
     assert detector.observe(state()).events == ()
-    assert detector.observe(state(held=Evidence.TRUE)).events == (
+    validated = dict(held=Evidence.TRUE, held_contact=Evidence.TRUE)
+    # A transient held frame must not start placement.
+    assert detector.observe(state(**validated)).events == ()
+    assert detector.observe(state(held=Evidence.FALSE)).events == ()
+    # Held without simultaneous contact is not a validated acquisition.
+    assert detector.observe(
+        state(held=Evidence.TRUE, held_contact=Evidence.FALSE)
+    ).events == ()
+    # Acquisition requires three consecutive held-plus-contact frames.
+    assert detector.observe(state(**validated)).events == ()
+    assert detector.observe(state(**validated)).events == ()
+    assert detector.observe(state(**validated)).events == (
         GraphEvent.GRASP_ACQUIRED,
     )
     # Unknown frames neither emit loss nor count toward its two-frame threshold.
@@ -117,41 +128,97 @@ def test_controller_accepts_one_way_release_ready_event():
     controller = GraphControllerState(phase=PromptPhase.PLACEMENT)
     controller.observe(state(held=Evidence.TRUE), 0)
     controller.actions_since_replan = 20
-    controller.observe(
-        state(held=Evidence.TRUE, release_ready=Evidence.TRUE), 10
-    )
+    held = dict(held=Evidence.TRUE, held_contact=Evidence.TRUE)
+    controller.observe(state(**held, release_ready=Evidence.TRUE), 10)
     decision, record = controller.observe(
-        state(held=Evidence.TRUE, release_ready=Evidence.TRUE), 9
+        state(**held, release_ready=Evidence.TRUE), 9
     )
     assert decision.event is GraphEvent.RELEASE_READY
     assert controller.phase is PromptPhase.RELEASE
     assert record["trigger_event"] == "release_ready"
 
 
-def test_grasp_substages_advance_monotonically_and_interrupt_chunks():
+def test_grasp_substages_correct_alignment_and_recover_close():
     controller = GraphControllerState()
     initial, _ = controller.observe(
-        state(grasp_substage=GraspSubstage.APPROACH, grasp_arm="left"), 0
+        state(grasp_substage=GraspSubstage.ALIGN), 0
     )
     assert not initial.requires_replan
     pending, _ = controller.observe(
-        state(grasp_substage=GraspSubstage.ALIGN, grasp_arm="left"), 31
+        state(grasp_substage=GraspSubstage.MOVE_CLOSER, grasp_arm="left"), 31
     )
     assert not pending.requires_replan
-    align, record = controller.observe(
-        state(grasp_substage=GraspSubstage.ALIGN, grasp_arm="left"), 30
+    move_closer, record = controller.observe(
+        state(grasp_substage=GraspSubstage.MOVE_CLOSER, grasp_arm="left"), 30
     )
-    assert align.requires_replan and align.reason == "grasp_substage:align"
-    assert controller.grasp_substage is GraspSubstage.ALIGN
+    assert move_closer.requires_replan
+    assert move_closer.reason == "grasp_substage:move_closer"
+    assert controller.grasp_substage is GraspSubstage.MOVE_CLOSER
     assert record["discarded_actions"] == 30
-    # Noisy distance evidence cannot regress align back to approach.
-    regressed, _ = controller.observe(
-        state(grasp_substage=GraspSubstage.APPROACH, grasp_arm="left"), 30
+    # Losing height alignment returns to align after two-frame persistence.
+    pending_correction, _ = controller.observe(
+        state(grasp_substage=GraspSubstage.ALIGN), 30
     )
-    assert not regressed.requires_replan
+    assert not pending_correction.requires_replan
+    correction, _ = controller.observe(
+        state(grasp_substage=GraspSubstage.ALIGN), 29
+    )
+    assert correction.requires_replan
+    assert correction.reason == "grasp_substage:align"
     assert controller.grasp_substage is GraspSubstage.ALIGN
     close, _ = controller.observe(
-        state(grasp_substage=GraspSubstage.CLOSE, grasp_arm="left"), 29
+        state(
+            grasp_substage=GraspSubstage.CLOSE,
+            grasp_arm="left",
+            grasp_close_immediate=True,
+        ),
+        28,
     )
     assert close.requires_replan and close.reason == "grasp_substage:close"
     assert controller.grasp_substage is GraspSubstage.CLOSE
+    # A close attempt recovers after two frames outside its valid geometry.
+    pending_recovery, _ = controller.observe(
+        state(grasp_substage=GraspSubstage.MOVE_CLOSER, grasp_arm="left"), 27
+    )
+    assert not pending_recovery.requires_replan
+    recovery, _ = controller.observe(
+        state(grasp_substage=GraspSubstage.MOVE_CLOSER, grasp_arm="left"), 26
+    )
+    assert recovery.requires_replan
+    assert recovery.reason == "grasp_substage:move_closer"
+    assert controller.grasp_substage is GraspSubstage.MOVE_CLOSER
+    # A tolerated (8--10 cm) close entry is also debounced for two frames.
+    tolerated_pending, _ = controller.observe(
+        state(grasp_substage=GraspSubstage.CLOSE, grasp_arm="left"), 25
+    )
+    assert not tolerated_pending.requires_replan
+    tolerated_close, _ = controller.observe(
+        state(grasp_substage=GraspSubstage.CLOSE, grasp_arm="left"), 24
+    )
+    assert tolerated_close.requires_replan
+    assert controller.grasp_substage is GraspSubstage.CLOSE
+
+
+def test_directional_alignment_corrections_are_debounced():
+    controller = GraphControllerState()
+    controller.observe(state(grasp_substage=GraspSubstage.ALIGN), 0)
+    first_down, _ = controller.observe(
+        state(grasp_substage=GraspSubstage.MOVE_DOWN, grasp_arm="left"), 20
+    )
+    assert not first_down.requires_replan
+    down, _ = controller.observe(
+        state(grasp_substage=GraspSubstage.MOVE_DOWN, grasp_arm="left"), 19
+    )
+    assert down.requires_replan
+    assert down.reason == "grasp_substage:move_down"
+    assert controller.grasp_substage is GraspSubstage.MOVE_DOWN
+    first_up, _ = controller.observe(
+        state(grasp_substage=GraspSubstage.MOVE_UP, grasp_arm="left"), 18
+    )
+    assert not first_up.requires_replan
+    up, _ = controller.observe(
+        state(grasp_substage=GraspSubstage.MOVE_UP, grasp_arm="left"), 17
+    )
+    assert up.requires_replan
+    assert up.reason == "grasp_substage:move_up"
+    assert controller.grasp_substage is GraspSubstage.MOVE_UP

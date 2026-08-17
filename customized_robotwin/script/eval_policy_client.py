@@ -661,7 +661,11 @@ def eval_policy(task_name,
         TASK_ENV._graph_held_arm = None
         TASK_ENV._graph_held_loss_count = 0
         TASK_ENV._graph_chunk_interrupts = 0
-        while TASK_ENV.take_action_cnt < TASK_ENV.step_lim:
+        TASK_ENV._graph_termination_reason = None
+        while (
+            TASK_ENV.take_action_cnt < TASK_ENV.step_lim
+            and TASK_ENV._graph_termination_reason is None
+        ):
             observation = TASK_ENV.get_obs()
             eval_func(TASK_ENV, model, observation)
             if TASK_ENV.eval_success:
@@ -686,6 +690,9 @@ def eval_policy(task_name,
                 "graph_input_condition": args.get("graph_input_condition", "visual_only"),
                 "graph_treatment_version": getattr(
                     TASK_ENV, "_graph_treatment_version", None
+                ),
+                "termination_reason": getattr(
+                    TASK_ENV, "_graph_termination_reason", None
                 ),
             }
             trace_path = Path(episode_log_path).parent / (

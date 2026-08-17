@@ -12,11 +12,11 @@ from experiments.graph_conditioned_pi05.graph_replanning import GraspSubstage
 def test_grasp_substages_render_atomic_instructions():
     fallback = ActionIntent(IntentOperation.GRASP, "sauce can")
     assert fallback.render_stage_instruction() == (
-        "Move the gripper toward the sauce can."
+        "Align the gripper with the sauce can."
     )
     selected = replace(fallback, preferred_arm="left")
     assert selected.render_stage_instruction() == (
-        "Use the left gripper to approach the sauce can."
+        "Align the left gripper with the sauce can."
     )
     warning = replace(
         selected,
@@ -26,12 +26,21 @@ def test_grasp_substages_render_atomic_instructions():
     )
     assert warning.render_stage_instruction() == (
         "Collision risk: the kettle blocks the right gripper. "
-        "Use the left gripper to approach the sauce can."
+        "Align the left gripper with the sauce can."
     )
     assert replace(
-        selected, grasp_substage=GraspSubstage.ALIGN
+        selected, grasp_substage=GraspSubstage.MOVE_DOWN
     ).render_stage_instruction() == (
-        "Align the left gripper with the sauce can. "
+        "Move the left gripper down to align it with the sauce can."
+    )
+    assert replace(
+        selected, grasp_substage=GraspSubstage.MOVE_UP
+    ).render_stage_instruction() == (
+        "Move the left gripper up to align it with the sauce can."
+    )
+    assert replace(
+        selected, grasp_substage=GraspSubstage.MOVE_CLOSER
+    ).render_stage_instruction() == (
         "Move the left gripper closer to the sauce can for grasping."
     )
     assert replace(

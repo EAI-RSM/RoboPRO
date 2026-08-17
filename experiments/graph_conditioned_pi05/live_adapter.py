@@ -464,7 +464,7 @@ def action_intent_for_phase(
     target_id: int,
     destination_id: int,
     relation: str,
-    grasp_substage: GraspSubstage = GraspSubstage.APPROACH,
+    grasp_substage: GraspSubstage = GraspSubstage.ALIGN,
     grasp_arm: str | None = None,
 ) -> ActionIntent:
     """Create one validated atomic intent for the controller's current phase."""
@@ -905,7 +905,7 @@ def prepare_instruction(
     condition: InputCondition | str,
     contract: RetrievalContract,
     previous_phase: str = "grasp",
-    grasp_substage: GraspSubstage | str = GraspSubstage.APPROACH,
+    grasp_substage: GraspSubstage | str = GraspSubstage.ALIGN,
     grasp_arm: str | None = None,
 ) -> PreparedInstruction:
     base_instruction = str(task_env.get_instruction())

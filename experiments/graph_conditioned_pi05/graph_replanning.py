@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from collections import deque
 from enum import Enum
+import math
 from typing import Mapping
 
 
@@ -14,8 +16,10 @@ class PromptPhase(str, Enum):
 
 
 class GraspSubstage(str, Enum):
-    APPROACH = "approach"
     ALIGN = "align"
+    MOVE_DOWN = "move_down"
+    MOVE_UP = "move_up"
+    MOVE_CLOSER = "move_closer"
     CLOSE = "close"
 
 
@@ -55,18 +59,26 @@ class GraphEvent(str, Enum):
 @dataclass(frozen=True)
 class ActionGraphState:
     held: Evidence = Evidence.UNKNOWN
+    held_contact: Evidence = Evidence.UNKNOWN
     release_ready: Evidence = Evidence.UNKNOWN
     goal_satisfied: Evidence = Evidence.UNKNOWN
     path_blocked: Evidence = Evidence.UNKNOWN
     reachable: Evidence = Evidence.UNKNOWN
     visible: Evidence = Evidence.UNKNOWN
     held_arm: str | None = None
-    grasp_substage: GraspSubstage = GraspSubstage.APPROACH
+    grasp_substage: GraspSubstage = GraspSubstage.ALIGN
     grasp_arm: str | None = None
+    grasp_close_immediate: bool = False
 
     def predicates(self) -> Mapping[str, Evidence]:
+        # A momentary simulator ``held_by`` relation is not enough to begin
+        # transport. Acquisition is valid only while the held arm also has
+        # target contact; the delta detector then applies temporal persistence.
+        validated_hold = self.held
+        if self.held is Evidence.TRUE:
+            validated_hold = self.held_contact
         return {
-            "held_by": self.held,
+            "held_by": validated_hold,
             "release_ready": self.release_ready,
             "goal_relation": self.goal_satisfied,
             "blocks": self.path_blocked,
@@ -90,6 +102,46 @@ class ReplanDecision:
     reason: str = ""
 
 
+class MotionStallDetector:
+    """Detect a plan whose robot TCPs remain inside a small motion radius."""
+
+    def __init__(self, horizon: int = 50, min_displacement_m: float = 0.002):
+        if horizon < 1:
+            raise ValueError("motion-stall horizon must be positive")
+        if min_displacement_m <= 0 or not math.isfinite(min_displacement_m):
+            raise ValueError("minimum TCP displacement must be positive and finite")
+        self.horizon = int(horizon)
+        self.min_displacement_m = float(min_displacement_m)
+        self._positions = deque(maxlen=self.horizon + 1)
+
+    def reset(self) -> None:
+        self._positions.clear()
+
+    @property
+    def has_observation(self) -> bool:
+        return bool(self._positions)
+
+    def observe(self, positions: tuple[float, ...]) -> bool:
+        if len(positions) != 6 or not all(math.isfinite(value) for value in positions):
+            self.reset()
+            return False
+        self._positions.append(tuple(float(value) for value in positions))
+        if len(self._positions) < self.horizon + 1:
+            return False
+        origin = self._positions[0]
+        max_displacement = max(
+            math.sqrt(
+                sum(
+                    (point[index] - origin[index]) ** 2
+                    for index in range(offset, offset + 3)
+                )
+            )
+            for point in self._positions
+            for offset in (0, 3)
+        )
+        return max_displacement < self.min_displacement_m
+
+
 _TRANSITIONS = {
     ("held_by", Evidence.FALSE, Evidence.TRUE): GraphEvent.GRASP_ACQUIRED,
     ("held_by", Evidence.TRUE, Evidence.FALSE): GraphEvent.GRASP_LOST,
@@ -110,7 +162,7 @@ class GraphDeltaDetector:
 
     def __init__(self, thresholds: Mapping[GraphEvent, int] | None = None):
         defaults = {
-            GraphEvent.GRASP_ACQUIRED: 1,
+            GraphEvent.GRASP_ACQUIRED: 3,
             GraphEvent.GRASP_LOST: 2,
             GraphEvent.RELEASE_READY: 2,
             GraphEvent.GOAL_REACHED: 2,
@@ -252,35 +304,43 @@ class GraphControllerState:
     detector: GraphDeltaDetector = field(default_factory=GraphDeltaDetector)
     policy: ReplanPolicy = field(default_factory=ReplanPolicy)
     pending_events: set[GraphEvent] = field(default_factory=set)
-    grasp_substage: GraspSubstage = GraspSubstage.APPROACH
+    grasp_substage: GraspSubstage = GraspSubstage.ALIGN
     grasp_arm: str | None = None
     _grasp_candidate: GraspSubstage | None = None
     _grasp_candidate_count: int = 0
+    motion_detector: MotionStallDetector = field(default_factory=MotionStallDetector)
+
+    def _update_grasp_substage(self, state: ActionGraphState) -> bool:
+        """Debounce grasp substages, including recoverable close attempts."""
+        if self.phase is not PromptPhase.GRASP:
+            return False
+        desired = state.grasp_substage
+        if desired is self.grasp_substage:
+            self._grasp_candidate = None
+            self._grasp_candidate_count = 0
+            return False
+        if desired is self._grasp_candidate:
+            self._grasp_candidate_count += 1
+        else:
+            self._grasp_candidate = desired
+            self._grasp_candidate_count = 1
+        threshold = (
+            1
+            if desired is GraspSubstage.CLOSE and state.grasp_close_immediate
+            else 2
+        )
+        if self._grasp_candidate_count < threshold:
+            return False
+        self.grasp_substage = desired
+        self.grasp_arm = state.grasp_arm
+        self._grasp_candidate = None
+        self._grasp_candidate_count = 0
+        return True
 
     def observe(self, state: ActionGraphState, remaining_actions: int) -> tuple[ReplanDecision, dict]:
         self.frame += 1
         prior_substage = self.grasp_substage
-        if self.phase is PromptPhase.GRASP:
-            order = {
-                GraspSubstage.APPROACH: 0,
-                GraspSubstage.ALIGN: 1,
-                GraspSubstage.CLOSE: 2,
-            }
-            if order[state.grasp_substage] > order[self.grasp_substage]:
-                if state.grasp_substage is self._grasp_candidate:
-                    self._grasp_candidate_count += 1
-                else:
-                    self._grasp_candidate = state.grasp_substage
-                    self._grasp_candidate_count = 1
-                threshold = 1 if state.grasp_substage is GraspSubstage.CLOSE else 2
-                if self._grasp_candidate_count >= threshold:
-                    self.grasp_substage = state.grasp_substage
-                    self.grasp_arm = state.grasp_arm or self.grasp_arm
-                    self._grasp_candidate = None
-                    self._grasp_candidate_count = 0
-            else:
-                self._grasp_candidate = None
-                self._grasp_candidate_count = 0
+        substage_changed = self._update_grasp_substage(state)
         if state.held is Evidence.TRUE and state.held_arm is not None:
             self.held_arm = state.held_arm
         delta = self.detector.observe(state)
@@ -307,7 +367,6 @@ class GraphControllerState:
         decision = self.policy.evaluate(
             self.phase, effective_delta, self.actions_since_replan, state=state
         )
-        substage_changed = self.grasp_substage is not prior_substage
         if not decision.requires_replan and substage_changed and self.frame > 1:
             decision = ReplanDecision(
                 True,
@@ -336,7 +395,7 @@ class GraphControllerState:
             if self.phase is PromptPhase.GRASP:
                 self.held_arm = None
                 if decision.event is GraphEvent.GRASP_LOST:
-                    self.grasp_substage = GraspSubstage.APPROACH
+                    self.grasp_substage = GraspSubstage.ALIGN
                     self.grasp_arm = None
                     self._grasp_candidate = None
                     self._grasp_candidate_count = 0

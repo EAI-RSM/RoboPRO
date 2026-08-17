@@ -16,6 +16,9 @@ if TYPE_CHECKING:
 RELEASE_READY_VERTICAL_CLEARANCE_M = 0.10
 EFFECTOR_IDS = {"left": -2, "right": -3}
 GRASP_ALIGNMENT_DISTANCE_M = 0.12
+GRASP_CLOSE_PREFERRED_DISTANCE_M = 0.08
+GRASP_CLOSE_MAX_DISTANCE_M = 0.10
+GRASP_HEIGHT_BAND_HALF_WIDTH_M = 0.02
 
 
 def _aggregate(values: np.ndarray, valid: np.ndarray) -> Evidence:
@@ -30,7 +33,10 @@ def _aggregate(values: np.ndarray, valid: np.ndarray) -> Evidence:
 
 @dataclass(frozen=True)
 class EffectorEvidence:
+    tcp_position_world: tuple[float, float, float] | None = None
     target_distance_m: float = np.nan
+    target_vertical_offset_m: float = np.nan
+    grasp_height_aligned: bool = False
     target_contact: bool = False
     target_held: bool = False
 
@@ -62,10 +68,22 @@ class SimulatorEvidence:
     right: EffectorEvidence
     grasp_substage: GraspSubstage
     grasp_arm: str | None
+    grasp_close_immediate: bool
+    grasp_height_half_width_m: float
 
     def action_graph_state(self) -> ActionGraphState:
+        held_contact = Evidence.UNKNOWN
+        if self.held is Evidence.FALSE:
+            held_contact = Evidence.FALSE
+        elif self.held is Evidence.TRUE and self.held_arm is not None:
+            held_contact = (
+                Evidence.TRUE
+                if getattr(self, self.held_arm).target_contact
+                else Evidence.FALSE
+            )
         return ActionGraphState(
             held=self.held,
+            held_contact=held_contact,
             release_ready=Evidence.TRUE if self.release_ready else Evidence.FALSE,
             goal_satisfied=self.goal_satisfied,
             path_blocked=self.path_blocked,
@@ -74,6 +92,7 @@ class SimulatorEvidence:
             held_arm=self.held_arm,
             grasp_substage=self.grasp_substage,
             grasp_arm=self.grasp_arm,
+            grasp_close_immediate=self.grasp_close_immediate,
         )
 
     def live_task_state(self) -> LiveTaskState:
@@ -90,11 +109,16 @@ class SimulatorEvidence:
         result: dict[str, Any] = {
             "target_id": self.target_id,
             "held_arm": self.held_arm or "",
+            "grasp_close_immediate": self.grasp_close_immediate,
+            "grasp_height_half_width": self.grasp_height_half_width_m,
         }
         for arm in ("left", "right"):
             effector = getattr(self, arm)
             result.update({
+                f"{arm}_tcp_position_world": effector.tcp_position_world,
                 f"target_{arm}_distance": effector.target_distance_m,
+                f"target_{arm}_vertical_offset": effector.target_vertical_offset_m,
+                f"target_{arm}_grasp_height_aligned": effector.grasp_height_aligned,
                 f"target_{arm}_contact": effector.target_contact,
                 f"held_by_{arm}": effector.target_held,
             })
@@ -196,15 +220,36 @@ def extract_simulator_evidence(context: "LiveGraphContext") -> SimulatorEvidence
     target_id = goal.target_ids[0] if len(goal.target_ids) == 1 else None
     raw_contact = np.asarray(relations.get("raw_contact", ()), dtype=np.bool_)
     target_pose = retriever._poses_world.get(target_id) if target_id is not None else None
+    target_bounds = retriever._aabb_bounds.get(target_id)
+    target_height_center = (
+        float(target_bounds[1][2])
+        if target_bounds is not None else
+        float(target_pose[2]) if target_pose is not None else np.nan
+    )
+    target_height_half_width = GRASP_HEIGHT_BAND_HALF_WIDTH_M
     effectors = {}
     target_index = context.index_by_id.get(target_id) if target_id is not None else None
     for arm_index, arm in enumerate(("left", "right")):
         effector_index = context.index_by_id.get(EFFECTOR_IDS[arm])
         effector_pose = retriever._poses_world.get(EFFECTOR_IDS[arm])
+        vertical_offset = (
+            float(effector_pose[2] - target_height_center)
+            if effector_pose is not None and np.isfinite(target_height_center)
+            else np.nan
+        )
         effectors[arm] = EffectorEvidence(
+            tcp_position_world=(
+                tuple(float(value) for value in effector_pose[:3])
+                if effector_pose is not None else None
+            ),
             target_distance_m=(
                 float(np.linalg.norm(target_pose[:3] - effector_pose[:3]))
                 if target_pose is not None and effector_pose is not None else np.nan
+            ),
+            target_vertical_offset_m=vertical_offset,
+            grasp_height_aligned=bool(
+                np.isfinite(vertical_offset)
+                and abs(vertical_offset) <= target_height_half_width
             ),
             target_contact=bool(
                 target_index is not None
@@ -223,32 +268,57 @@ def extract_simulator_evidence(context: "LiveGraphContext") -> SimulatorEvidence
         )
 
     release_ready = _release_ready(context, target_id, held_arm)
-    contact_arms = [
-        arm for arm in ("left", "right") if effectors[arm].target_contact
-    ]
     finite_arms = [
         arm for arm in ("left", "right")
         if np.isfinite(effectors[arm].target_distance_m)
     ]
-    nearest_arm = (
-        min(contact_arms, key=lambda arm: effectors[arm].target_distance_m)
-        if contact_arms
-        else min(finite_arms, key=lambda arm: effectors[arm].target_distance_m)
-        if finite_arms else None
-    )
-    if contact_arms:
+    close_arms = [
+        arm for arm in finite_arms
+        if effectors[arm].grasp_height_aligned
+        and effectors[arm].target_distance_m <= GRASP_CLOSE_MAX_DISTANCE_M
+    ]
+    vicinity_arms = [
+        arm for arm in finite_arms
+        if effectors[arm].grasp_height_aligned
+        and effectors[arm].target_distance_m <= GRASP_ALIGNMENT_DISTANCE_M
+    ]
+    vertical_correction_arms = [
+        arm for arm in finite_arms
+        if not effectors[arm].grasp_height_aligned
+        and effectors[arm].target_distance_m <= GRASP_ALIGNMENT_DISTANCE_M
+    ]
+    if close_arms:
         grasp_substage = GraspSubstage.CLOSE
-        grasp_arm = nearest_arm
-    elif (
-        nearest_arm is not None
-        and effectors[nearest_arm].target_distance_m <= GRASP_ALIGNMENT_DISTANCE_M
-    ):
-        grasp_substage = GraspSubstage.ALIGN
-        grasp_arm = nearest_arm
+        grasp_arm = min(
+            close_arms, key=lambda arm: effectors[arm].target_distance_m
+        )
+        grasp_close_immediate = bool(
+            effectors[grasp_arm].target_contact
+            or effectors[grasp_arm].target_distance_m
+            <= GRASP_CLOSE_PREFERRED_DISTANCE_M
+        )
+    elif vertical_correction_arms:
+        grasp_arm = min(
+            vertical_correction_arms,
+            key=lambda arm: effectors[arm].target_distance_m,
+        )
+        grasp_substage = (
+            GraspSubstage.MOVE_DOWN
+            if effectors[grasp_arm].target_vertical_offset_m > 0
+            else GraspSubstage.MOVE_UP
+        )
+        grasp_close_immediate = False
+    elif vicinity_arms:
+        grasp_substage = GraspSubstage.MOVE_CLOSER
+        grasp_arm = min(
+            vicinity_arms, key=lambda arm: effectors[arm].target_distance_m
+        )
+        grasp_close_immediate = False
     else:
-        grasp_substage = GraspSubstage.APPROACH
-        # Far away, retain the collision-aware arm chosen by grasp_intent().
+        grasp_substage = GraspSubstage.ALIGN
+        # Before geometric alignment, use the collision-aware arm from grasp_intent().
         grasp_arm = None
+        grasp_close_immediate = False
     return SimulatorEvidence(
         target_id=target_id,
         held=held,
@@ -263,6 +333,8 @@ def extract_simulator_evidence(context: "LiveGraphContext") -> SimulatorEvidence
         right=effectors["right"],
         grasp_substage=grasp_substage,
         grasp_arm=grasp_arm,
+        grasp_close_immediate=grasp_close_immediate,
+        grasp_height_half_width_m=target_height_half_width,
     )
 
 

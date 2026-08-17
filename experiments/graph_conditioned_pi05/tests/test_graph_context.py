@@ -288,11 +288,11 @@ def _live_inputs(root):
         ),
         "is_present": np.array([True, True, True, True, True]),
         "aabb_lower": np.array(
-            [[0.0, 0.1, 0.2], [0.3, 0.4, 0.5], [0.0, 0.0, 0.0], [0.0, 0.0, 0.0], [0.0, 0.0, 0.0]],
+            [[0.0, 0.1, 0.26], [0.3, 0.4, 0.5], [0.0, 0.0, 0.0], [0.0, 0.0, 0.0], [0.0, 0.0, 0.0]],
             dtype=np.float32,
         ),
         "aabb_upper": np.array(
-            [[0.2, 0.3, 0.4], [0.5, 0.6, 0.7], [0.0, 0.0, 0.0], [0.0, 0.0, 0.0], [0.0, 0.0, 0.0]],
+            [[0.2, 0.3, 0.34], [0.5, 0.6, 0.7], [0.0, 0.0, 0.0], [0.0, 0.0, 0.0], [0.0, 0.0, 0.0]],
             dtype=np.float32,
         ),
         "has_aabb": np.array([True, True, False, False, False]),
@@ -310,7 +310,7 @@ def test_live_retrieval_matches_hdf5(tmp_path):
     assert {10, 20} <= node_ids  # target + box, both seeds referenced by facts
     target_node = next(node for node in actual_nodes if node.object_id == 10)
     assert target_node.position == (0.1, 0.2, 0.3)
-    assert target_node.bbox_size == (0.2, 0.2, 0.2)
+    assert target_node.bbox_size == (0.2, 0.2, 0.08)
     left_ee_node = next((node for node in actual_nodes if node.object_id == -2), None)
     assert left_ee_node is not None and left_ee_node.bbox_size is None
 
@@ -340,6 +340,7 @@ def test_shared_live_context_has_value_parity_and_one_catalog_parse(tmp_path):
     state["containment_valid"] = np.ones((5, 5), dtype=bool)
     state["raw_contact"] = np.zeros((5, 5), dtype=bool)
     state["raw_contact"][0, 3] = state["raw_contact"][3, 0] = True
+    object_state["pose_world"][3, :3] = [0.10, 0.20, 0.35]
     observation = {
         "benchmark_support": {
             "relation_state": state,
@@ -372,17 +373,67 @@ def test_shared_live_context_has_value_parity_and_one_catalog_parse(tmp_path):
     assert shared_diagnostics == independent_diagnostics
     assert evidence.held_arm == "left"
     assert evidence.left.target_held and evidence.left.target_contact
+    assert evidence.left.grasp_height_aligned
     assert not evidence.right.target_held and not evidence.right.target_contact
     assert evidence.grasp_substage is GraspSubstage.CLOSE
     assert evidence.grasp_arm == "left"
+    assert evidence.grasp_close_immediate
 
-    state["raw_contact"][:] = False
     state["held_by"][:] = False
-    object_state["pose_world"][3, :3] = [0.15, 0.20, 0.35]
+    object_state["pose_world"][3, :3] = [0.18, 0.20, 0.37]
     near_context = build_live_graph_context(task, observation, contract)
     near_evidence = extract_simulator_evidence(near_context)
-    assert near_evidence.grasp_substage is GraspSubstage.ALIGN
+    assert near_evidence.grasp_substage is GraspSubstage.MOVE_DOWN
     assert near_evidence.grasp_arm == "left"
+    assert near_evidence.left.target_contact
+    assert not near_evidence.left.grasp_height_aligned
+
+    # Invalid-height contact on one arm must not mask a ready other arm.
+    object_state["pose_world"][4, :3] = [0.15, 0.20, 0.34]
+    alternate_context = build_live_graph_context(task, observation, contract)
+    alternate_evidence = extract_simulator_evidence(alternate_context)
+    assert alternate_evidence.grasp_substage is GraspSubstage.CLOSE
+    assert alternate_evidence.grasp_arm == "right"
+    assert alternate_evidence.grasp_close_immediate
+
+    state["raw_contact"][:] = False
+    object_state["pose_world"][4, :3] = [0.90, 0.00, 0.50]
+    object_state["pose_world"][3, :3] = [0.18, 0.20, 0.31]
+    below_context = build_live_graph_context(task, observation, contract)
+    below_evidence = extract_simulator_evidence(below_context)
+    assert below_evidence.grasp_substage is GraspSubstage.MOVE_UP
+    assert below_evidence.grasp_arm == "left"
+
+    object_state["pose_world"][3, :3] = [0.20, 0.20, 0.34]
+    vicinity_context = build_live_graph_context(task, observation, contract)
+    vicinity_evidence = extract_simulator_evidence(vicinity_context)
+    assert vicinity_evidence.grasp_substage is GraspSubstage.MOVE_CLOSER
+    assert vicinity_evidence.grasp_arm == "left"
+    assert not vicinity_evidence.grasp_close_immediate
+
+    object_state["pose_world"][3, :3] = [0.17, 0.20, 0.34]
+    tolerated_context = build_live_graph_context(task, observation, contract)
+    tolerated_evidence = extract_simulator_evidence(tolerated_context)
+    assert tolerated_evidence.grasp_substage is GraspSubstage.CLOSE
+    assert tolerated_evidence.grasp_arm == "left"
+    assert not tolerated_evidence.grasp_close_immediate
+
+    state["raw_contact"][0, 3] = state["raw_contact"][3, 0] = True
+    contacted_context = build_live_graph_context(task, observation, contract)
+    contacted_evidence = extract_simulator_evidence(contacted_context)
+    assert contacted_evidence.grasp_substage is GraspSubstage.CLOSE
+    assert contacted_evidence.grasp_arm == "left"
+    assert contacted_evidence.grasp_close_immediate
+    state["raw_contact"][:] = False
+
+    object_state["pose_world"][3, :3] = [0.16, 0.20, 0.34]
+    close_context = build_live_graph_context(task, observation, contract)
+    close_evidence = extract_simulator_evidence(close_context)
+    assert close_evidence.grasp_substage is GraspSubstage.CLOSE
+    assert close_evidence.grasp_arm == "left"
+    assert not close_evidence.left.target_contact
+    assert close_evidence.left.grasp_height_aligned
+    assert close_evidence.grasp_close_immediate
 
 
 def test_prepare_instruction_preserves_visual_only_and_fits_graph(tmp_path):
@@ -440,7 +491,7 @@ def test_prepare_instruction_preserves_visual_only_and_fits_graph(tmp_path):
     )
     assert grasp.instruction == (
         "Task objective: put target in box\n"
-        "Current stage: Move the gripper toward the target."
+        "Current stage: Align the gripper with the target."
     )
     assert grasp.prompt_phase == "grasp"
     assert grasp.action_intent.operation is IntentOperation.GRASP
@@ -551,7 +602,7 @@ def test_grasp_hint_selects_only_a_valid_uniquely_clear_gripper(tmp_path):
     # The box blocks the left corridor but is not imminent to the left
     # gripper, so choose the clear right arm without a distracting warning.
     assert compact_grasp_hint(retriever, 10) == (
-        "Use the right gripper to approach the target."
+        "Align the right gripper with the target."
     )
 
     # Only an imminent blocker produces a warning, and it is attributed to
@@ -562,25 +613,25 @@ def test_grasp_hint_selects_only_a_valid_uniquely_clear_gripper(tmp_path):
     )
     assert compact_grasp_hint(retriever, 10) == (
         "Collision risk: the box blocks the left gripper. "
-        "Use the right gripper to approach the target."
+        "Align the right gripper with the target."
     )
 
     # Unknown opposite-side evidence must not be described as available.
     state["blocks_by_effector_valid"][:, 0, 1] = False
-    assert compact_grasp_hint(retriever, 10) == "Move the gripper toward the target."
+    assert compact_grasp_hint(retriever, 10) == "Align the gripper with the target."
 
     # Missing obstacle geometry preserves the approach-side instruction.
     state["blocks_by_effector"][1, 0] = [True, False]
     state["blocks_by_effector_valid"][:, 0, :] = True
     retriever._aabb_bounds.pop(20)
     assert compact_grasp_hint(retriever, 10) == (
-        "Use the right gripper to approach the target."
+        "Align the right gripper with the target."
     )
 
     # No preference when both paths are valid and clear.
     state["blocks_by_effector"][:, 0, :] = False
     state["blocks_by_effector_valid"][:, 0, :] = True
-    assert compact_grasp_hint(retriever, 10) == "Move the gripper toward the target."
+    assert compact_grasp_hint(retriever, 10) == "Align the gripper with the target."
 
 
 def test_transport_gripper_latch_changes_only_the_active_channel():

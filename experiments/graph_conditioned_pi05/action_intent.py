@@ -59,7 +59,7 @@ class ActionIntent:
         if self.collision_imminent and not (self.blocked_arm and self.obstacle_label):
             raise ValueError("collision warning requires blocked arm and obstacle")
         if self.operation is IntentOperation.GRASP and self.grasp_substage is None:
-            object.__setattr__(self, "grasp_substage", GraspSubstage.APPROACH)
+            object.__setattr__(self, "grasp_substage", GraspSubstage.ALIGN)
         if self.operation is not IntentOperation.GRASP and self.grasp_substage is not None:
             raise ValueError("only grasp intent can carry a grasp substage")
 
@@ -77,18 +77,20 @@ class ActionIntent:
             arm = f"{self.preferred_arm} gripper" if self.preferred_arm else "gripper"
             if self.grasp_substage is GraspSubstage.CLOSE:
                 instruction = f"Close the {arm} to grasp the {self.target_label}."
-            elif self.grasp_substage is GraspSubstage.ALIGN:
+            elif self.grasp_substage is GraspSubstage.MOVE_DOWN:
                 instruction = (
-                    f"Align the {arm} with the {self.target_label}. "
+                    f"Move the {arm} down to align it with the {self.target_label}."
+                )
+            elif self.grasp_substage is GraspSubstage.MOVE_UP:
+                instruction = (
+                    f"Move the {arm} up to align it with the {self.target_label}."
+                )
+            elif self.grasp_substage is GraspSubstage.MOVE_CLOSER:
+                instruction = (
                     f"Move the {arm} closer to the {self.target_label} for grasping."
                 )
-            elif self.preferred_arm:
-                instruction = (
-                    f"Use the {self.preferred_arm} gripper to approach the "
-                    f"{self.target_label}."
-                )
             else:
-                instruction = f"Move the gripper toward the {self.target_label}."
+                instruction = f"Align the {arm} with the {self.target_label}."
             if self.collision_imminent:
                 return (
                     f"Collision risk: the {self.obstacle_label} blocks the "

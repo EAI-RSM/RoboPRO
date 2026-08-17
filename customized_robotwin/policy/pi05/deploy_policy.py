@@ -21,6 +21,7 @@ from experiments.graph_conditioned_pi05.live_adapter import (
 )
 from experiments.graph_conditioned_pi05.graph_replanning import (
     GraphControllerState,
+    MotionStallDetector,
     PromptPhase,
 )
 from experiments.graph_conditioned_pi05.action_diagnostics import graph_evidence
@@ -67,10 +68,12 @@ def get_model(usr_args):
     )
 
 
-def _controller(task_env):
+def _controller(task_env, plan_horizon=50):
     controller = getattr(task_env, "_graph_controller", None)
     if controller is None:
-        controller = GraphControllerState()
+        controller = GraphControllerState(
+            motion_detector=MotionStallDetector(horizon=int(plan_horizon))
+        )
         task_env._graph_controller = controller
     return controller
 
@@ -132,7 +135,36 @@ def _record_graph_observation(task_env, controller, state, remaining_actions):
     return decision.requires_replan
 
 
+def _tcp_positions(evidence):
+    positions = (
+        evidence.left.tcp_position_world,
+        evidence.right.tcp_position_world,
+    )
+    if any(position is None for position in positions):
+        return None
+    return tuple(value for position in positions for value in position)
+
+
+def _record_motion_or_terminate(task_env, controller, evidence, *, reset=False):
+    if reset:
+        controller.motion_detector.reset()
+    positions = _tcp_positions(evidence)
+    stalled = positions is not None and controller.motion_detector.observe(positions)
+    if stalled:
+        task_env._graph_termination_reason = (
+            "graph_motion_stall:"
+            f"{controller.phase.value}:{controller.grasp_substage.value}"
+        )
+    return stalled
+
+
 def _execute_action_chunk(task_env, model, observation, actions, controller):
+    initial_context = build_live_graph_context(
+        task_env, observation, _GRAPH_CONTRACT
+    )
+    initial_evidence = extract_simulator_evidence(initial_context)
+    if not controller.motion_detector.has_observation:
+        _record_motion_or_terminate(task_env, controller, initial_evidence)
     for index, action in enumerate(actions):
         executed_action = (
             keep_active_gripper_closed(action, controller.held_arm)
@@ -154,9 +186,14 @@ def _execute_action_chunk(task_env, model, observation, actions, controller):
             task_env, observation, _GRAPH_CONTRACT,
             context=context, evidence=evidence,
         )
-        if _record_graph_observation(
+        interrupted = _record_graph_observation(
             task_env, controller, state, len(actions) - index - 1
+        )
+        if _record_motion_or_terminate(
+            task_env, controller, evidence, reset=interrupted
         ):
+            break
+        if interrupted:
             break
 
 
@@ -188,10 +225,20 @@ def _record_action_trace(
     )
 
 
+def _truncate_actions_to_step_limit(task_env, actions):
+    """Return only actions that fit in the current episode budget."""
+    step_limit = getattr(task_env, "step_lim", None)
+    action_count = getattr(task_env, "take_action_cnt", None)
+    if step_limit is None or action_count is None:
+        return actions
+    remaining = max(int(step_limit) - int(action_count), 0)
+    return actions[:remaining]
+
+
 def eval(TASK_ENV, model, observation):
     controller = None
     if _GRAPH_CONDITION is InputCondition.VISUAL_RETRIEVED_GRAPH:
-        controller = _controller(TASK_ENV)
+        controller = _controller(TASK_ENV, model.pi0_step)
         if controller.frame == 0:
             _record_graph_observation(
                 TASK_ENV,
@@ -205,6 +252,7 @@ def eval(TASK_ENV, model, observation):
     input_rgb_arr, input_state = encode_obs(observation)
     model.update_observation_window(input_rgb_arr, input_state)
     actions = model.get_action()[:model.pi0_step]
+    actions = _truncate_actions_to_step_limit(TASK_ENV, actions)
     if controller is not None:
         _execute_action_chunk(TASK_ENV, model, observation, actions, controller)
         return
