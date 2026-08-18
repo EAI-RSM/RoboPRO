@@ -91,9 +91,14 @@ def expand_grasp_orientation_family(
       each arm's own limit, since RoboTwin's is arm-specific) for a
       reachable grasp pose, so any orientation within it is just as valid
       an annotated grasp as the seed itself.
-    - A 180-degree flip about the seed's own local X (approach) axis. The
-      gripper's two fingers are geometrically symmetric, so swapping which
-      finger ends up on which side is mechanically the same grasp.
+    - A 180-degree flip about EACH resulting arc candidate's own local X
+      (approach) axis, not the unrotated seed's -- 3D rotations don't
+      commute, so flipping the seed and then rotating it is a different
+      orientation from rotating the seed and then flipping that specific
+      result (they only coincide at theta=0). The gripper's two fingers
+      are geometrically symmetric, so swapping which finger ends up on
+      which side is mechanically the same grasp for any point along the
+      arc, not just the unrotated seed.
 
     Public (not module-private) because callers need to build a separate
     expanded family per arm -- see ``LiveGraphContext.left_reference_orientations_wxyz``
@@ -132,15 +137,22 @@ def expand_grasp_orientation_family(
         thetas = lower + step * np.arange(GRASP_ORIENTATION_ARC_SAMPLES)
     else:
         thetas = np.array([lower])
-    seeds = (
-        seed_quat_wxyz,
-        _rotate_quat_about_own_local_axis(seed_quat_wxyz, (1.0, 0.0, 0.0), np.pi),
-    )
-    return tuple(
-        _rotate_quat_about_own_local_axis(seed, (0.0, 1.0, 0.0), float(theta))
-        for seed in seeds
-        for theta in thetas
-    )
+    # The flip must be applied to EACH rotated arc candidate, not to the
+    # unrotated seed before rotating -- 3D rotations don't commute, so
+    # rotate-then-flip and flip-then-rotate are different orientations in
+    # general (they only coincide at theta=0). The physically-intended
+    # symmetry is "this specific candidate's own finger-swapped variant",
+    # i.e. flip about THAT candidate's own local X, not the seed's.
+    family = []
+    for theta in thetas:
+        candidate = _rotate_quat_about_own_local_axis(
+            seed_quat_wxyz, (0.0, 1.0, 0.0), float(theta)
+        )
+        family.append(candidate)
+        family.append(
+            _rotate_quat_about_own_local_axis(candidate, (1.0, 0.0, 0.0), np.pi)
+        )
+    return tuple(family)
 
 
 def _min_orientation_error_deg(

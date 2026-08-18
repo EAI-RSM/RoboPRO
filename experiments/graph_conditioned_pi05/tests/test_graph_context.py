@@ -631,6 +631,41 @@ def test_grasp_orientation_arc_excludes_upper_endpoint_like_robotwin():
     assert _min_orientation_error_deg(np.array(last_real_sample), family) < 1e-6
 
 
+def test_grasp_orientation_finger_flip_applies_to_each_rotated_candidate():
+    """The 180-degree finger-swap flip must be composed AFTER each
+    rotate_lim arc candidate, not applied to the unrotated seed before
+    rotating -- 3D rotations don't commute, so rotate-then-flip and
+    flip-then-rotate are different orientations for any nonzero arc angle.
+    A finger-swapped version of the theta=0.6 rad candidate specifically
+    (not the flip of the seed itself, and not the rotation of the
+    already-flipped seed) must read as aligned, not just the flip at
+    theta=0 or a bare rotation with no flip -- the combination is exactly
+    what a same-order-only bug would miss."""
+    seed = (1.0, 0.0, 0.0, 0.0)
+    rotate_lim = (0.0, 1.0)
+    family = expand_grasp_orientation_family(seed, rotate_lim)
+
+    rotated = _rotate_quat_about_own_local_axis(seed, (0.0, 1.0, 0.0), 0.6)
+    correctly_flipped = _rotate_quat_about_own_local_axis(
+        rotated, (1.0, 0.0, 0.0), math.pi
+    )
+    assert _min_orientation_error_deg(np.array(correctly_flipped), family) < 1e-6
+
+    # The wrong composition order (flip the seed first, then rotate the
+    # flipped seed by the same theta) produces a materially different
+    # orientation -- confirming this test would have caught the bug, not
+    # just restated the fix.
+    flip_then_rotate = _rotate_quat_about_own_local_axis(
+        _rotate_quat_about_own_local_axis(seed, (1.0, 0.0, 0.0), math.pi),
+        (0.0, 1.0, 0.0),
+        0.6,
+    )
+    assert (
+        _min_orientation_error_deg(np.array(flip_then_rotate), (correctly_flipped,))
+        > 1.0
+    )
+
+
 def test_grasp_orientation_error_covers_rotate_lim_arc_and_finger_swap_symmetry(tmp_path):
     """A grasp orientation elsewhere in the embodiment's rotate_lim arc, or
     the 180-degree finger-swap flip, must not read as misaligned -- both
@@ -1203,6 +1238,7 @@ def main():
     with TemporaryDirectory() as directory:
         test_grasp_orientation_gate_uses_annotated_contact_pose(Path(directory))
     test_grasp_orientation_arc_excludes_upper_endpoint_like_robotwin()
+    test_grasp_orientation_finger_flip_applies_to_each_rotated_candidate()
     with TemporaryDirectory() as directory:
         test_grasp_orientation_error_covers_rotate_lim_arc_and_finger_swap_symmetry(Path(directory))
     with TemporaryDirectory() as directory:
@@ -1216,7 +1252,7 @@ def main():
     test_transport_gripper_latch_changes_only_the_active_channel()
     with TemporaryDirectory() as directory:
         test_alignment_mismatch_fails(Path(directory))
-    print("25 graph-context checks passed")
+    print("26 graph-context checks passed")
 
 
 if __name__ == "__main__":
