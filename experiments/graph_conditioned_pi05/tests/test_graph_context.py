@@ -40,9 +40,11 @@ from experiments.graph_conditioned_pi05.live_adapter import (
     vla_label_from_catalog_entry,
 )
 from experiments.graph_conditioned_pi05.simulator_evidence import (
+    GRASP_TOWARDS_AXIS,
     expand_grasp_pose_family,
     extract_simulator_evidence,
     _min_orientation_error_deg,
+    _rotate_pose_about_point,
     _rotate_quat_about_own_local_axis,
 )
 from experiments.graph_conditioned_pi05.validate_alignment import FRAME_ALIGNED_PATHS, validate_episode
@@ -864,6 +866,71 @@ def test_grasp_pose_family_rotates_position_not_just_orientation():
     assert max(heights) - min(heights) > 0.09
 
 
+def test_grasp_pose_family_applies_towards_sign_disambiguation():
+    """create_target_pose_list never just uses the configured +theta: it
+    computes that candidate first and, if it lands on the wrong side of the
+    contact center (a negative dot product against towards=[0,-1,0]),
+    discards it and recomputes the WHOLE candidate -- position and
+    orientation -- from -theta instead. Getting the sign wrong moves a
+    12cm-offset candidate's height by several cm, same order of magnitude
+    as the bug test_grasp_pose_family_rotates_position_not_just_orientation
+    regression-tests above, and unlike that fix this one flips which
+    physical candidate is even generated, not just its position along a
+    fixed direction.
+
+    Geometry here is a synthetic worst case (chosen so the +theta candidate
+    provably lands on the wrong side), not a claim about any real
+    RoboTwin object; the seed orientation maps local Y to world X so the
+    rotated offset's world-Y component (what towards actually measures)
+    varies with theta instead of staying pinned at its unrotated value.
+    """
+    # Local Y -> world X, so rotating about (this seed's) local Y sweeps the
+    # offset's Y/Z components -- unlike the identity-orientation test above,
+    # where local Y already equals the rotation axis and the offset's Y
+    # component is invariant under the rotation (so towards never fires).
+    seed_orientation = tuple(
+        float(v) for v in t3d.quaternions.axangle2quat((0.0, 0.0, 1.0), -math.pi / 2)
+    )
+    contact_center = (0.0, 0.0, 0.0)
+    seed_position = (0.0, -0.05, -0.12)
+    theta = 0.6
+
+    naive_position, naive_orientation = _rotate_pose_about_point(
+        seed_position, seed_orientation, contact_center, (0.0, 1.0, 0.0), theta
+    )
+    # Precondition: this synthetic geometry must actually trigger the rule
+    # (the naive +theta candidate must land on the wrong side of the
+    # contact center), or the rest of this test would trivially pass for
+    # the wrong reason.
+    assert np.dot(np.array(naive_position) - np.array(contact_center), GRASP_TOWARDS_AXIS) < 0
+
+    expected_position, expected_orientation = _rotate_pose_about_point(
+        seed_position, seed_orientation, contact_center, (0.0, 1.0, 0.0), -theta
+    )
+
+    family = expand_grasp_pose_family(
+        seed_position, seed_orientation, contact_center, (theta, theta)
+    )
+    arc_position, arc_orientation = family[0]
+
+    # The expanded family must contain the sign-corrected (-theta)
+    # candidate, matching RoboTwin's own resolution exactly...
+    assert all(
+        abs(a - b) < 1e-9 for a, b in zip(arc_position, expected_position)
+    )
+    assert all(
+        abs(a - b) < 1e-9 for a, b in zip(arc_orientation, expected_orientation)
+    )
+    # ...and must NOT contain the rejected +theta candidate RoboTwin itself
+    # never generates for this geometry.
+    assert any(abs(a - b) > 1e-6 for a, b in zip(arc_position, naive_position))
+    # The height difference between the accepted and rejected candidates is
+    # material -- several cm, not noise -- confirming a wrong sign choice
+    # here is exactly the kind of error the height-reference gate cares
+    # about, not a cosmetic discrepancy.
+    assert abs(arc_position[2] - naive_position[2]) > 0.02
+
+
 def test_grasp_orientation_error_covers_rotate_lim_arc_and_finger_swap_symmetry(tmp_path):
     """A grasp orientation elsewhere in the embodiment's rotate_lim arc, or
     the 180-degree finger-swap flip, must not read as misaligned -- both
@@ -1444,6 +1511,7 @@ def main():
     test_grasp_orientation_finger_flip_applies_to_each_rotated_candidate()
     test_grasp_orientation_arc_preserves_configured_rotate_lim_order()
     test_grasp_pose_family_rotates_position_not_just_orientation()
+    test_grasp_pose_family_applies_towards_sign_disambiguation()
     with TemporaryDirectory() as directory:
         test_grasp_orientation_error_covers_rotate_lim_arc_and_finger_swap_symmetry(Path(directory))
     with TemporaryDirectory() as directory:
@@ -1457,7 +1525,7 @@ def main():
     test_transport_gripper_latch_changes_only_the_active_channel()
     with TemporaryDirectory() as directory:
         test_alignment_mismatch_fails(Path(directory))
-    print("31 graph-context checks passed")
+    print("32 graph-context checks passed")
 
 
 if __name__ == "__main__":

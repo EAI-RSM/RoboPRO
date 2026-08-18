@@ -43,6 +43,12 @@ GRASP_ORIENTATION_MAX_ERROR_DEG = 20.0
 # experiment's lightweight test environment and would break every existing
 # test here. Keep this in sync with ROTATE_NUM if it ever changes.
 GRASP_ORIENTATION_ARC_SAMPLES = 10
+# create_target_pose_list (customized_robotwin/envs/robot/robot.py) always
+# calls rotate_along_axis(..., towards=[0, -1, 0]): whichever sign of theta
+# would place the candidate on the wrong side of the contact center (a
+# negative dot product against this vector) is rejected in favor of the
+# other sign. Not arm- or task-specific, so a single shared constant.
+GRASP_TOWARDS_AXIS = (0.0, -1.0, 0.0)
 
 
 def _aggregate(values: np.ndarray, valid: np.ndarray) -> Evidence:
@@ -91,6 +97,7 @@ def _rotate_pose_about_point(
     pivot_world,
     local_axis,
     angle_rad: float,
+    towards=None,
 ) -> tuple[tuple[float, float, float], tuple[float, float, float, float]]:
     """Rotate a world pose (position AND orientation) about ``pivot_world``
     -- which may be a different point than ``position_world`` itself --
@@ -103,14 +110,30 @@ def _rotate_pose_about_point(
     position_world`` this reduces to a pure self-rotation (position
     unchanged) -- the case ``_rotate_quat_about_own_local_axis`` already
     handles for the finger-swap flip.
+
+    ``towards``, when given, reproduces ``rotate_along_axis``'s sign
+    disambiguation exactly: compute the ``+angle_rad`` candidate first: if
+    its position, relative to the pivot, has a negative dot product with
+    ``towards``, recompute the WHOLE candidate (position and orientation)
+    using ``-angle_rad`` instead. ``create_target_pose_list`` always calls
+    this with ``towards=[0,-1,0]`` (see ``GRASP_TOWARDS_AXIS`` below) --
+    the configured ``rotate_lim`` angle is a magnitude, not a guaranteed
+    sign, so the direction actually walked can flip per contact
+    point/object-center geometry.
     """
     position_world = np.asarray(position_world, dtype=np.float64)
     pivot_world = np.asarray(pivot_world, dtype=np.float64)
     rotation = t3d.quaternions.quat2mat(np.asarray(orientation_wxyz, dtype=np.float64))
     world_axis = rotation @ np.asarray(local_axis, dtype=np.float64)
-    delta = t3d.axangles.axangle2mat(world_axis, float(angle_rad))
-    new_rotation = delta @ rotation
+    angle_rad = float(angle_rad)
+    delta = t3d.axangles.axangle2mat(world_axis, angle_rad)
     new_position = delta @ (position_world - pivot_world) + pivot_world
+    if towards is not None:
+        towards_dot = np.dot(new_position - pivot_world, np.asarray(towards, dtype=np.float64))
+        if towards_dot < 0:
+            delta = t3d.axangles.axangle2mat(world_axis, -angle_rad)
+            new_position = delta @ (position_world - pivot_world) + pivot_world
+    new_rotation = delta @ rotation
     return (
         tuple(float(value) for value in new_position),
         tuple(float(value) for value in t3d.quaternions.mat2quat(new_rotation)),
@@ -127,7 +150,7 @@ def expand_grasp_pose_family(
     valid candidate grasp pose for this seed -- not just its orientation,
     and not just the seed's own unrotated position.
 
-    Reproduces two symmetries of RoboTwin's own grasp-pose search
+    Reproduces three behaviors of RoboTwin's own grasp-pose search
     (customized_robotwin/envs/robot/robot.py: create_target_pose_list) and
     of the aloha-agilex parallel-jaw gripper's own geometry:
 
@@ -144,13 +167,27 @@ def expand_grasp_pose_family(
       it can move the candidate's height by up to ``STANDOFF * sin(theta)``
       -- several cm for even a ~1 radian arc, comfortably larger than a
       few-cm height tolerance.
+    - ``create_target_pose_list``'s ``towards=[0,-1,0]`` sign
+      disambiguation (``GRASP_TOWARDS_AXIS`` below): for each arc candidate,
+      RoboTwin computes the ``+theta`` position first and, only if it ends
+      up on the wrong side of the contact center (a negative dot product
+      with ``towards``), recomputes the WHOLE candidate -- position AND
+      orientation -- using ``-theta`` instead. An earlier version of this
+      code always used the configured ``+theta`` directly; since the
+      rotated offset has magnitude ``GRASP_APPROACH_STANDOFF_M`` (12cm),
+      picking the wrong sign can move a candidate's height by up to twice
+      its unrotated-seed-relative displacement -- several cm, again
+      comfortably larger than the height tolerance, and specifically what
+      controls whether a given arc sample is even a candidate RoboTwin
+      would generate at all.
     - A 180-degree flip about EACH resulting arc candidate's own local X
       (approach) axis, not the seed's -- 3D rotations don't commute, so
       flipping the seed and then rotating it is a different orientation
       from rotating the seed and then flipping that specific result (they
       only coincide at theta=0). Unlike the arc rotation, this genuinely IS
       a self-rotation (about the candidate's own position, not the contact
-      center), so it leaves position unchanged.
+      center), so it leaves position unchanged, and RoboTwin's own
+      ``towards`` sign selection has no bearing on it either.
 
     Public (not module-private) because callers need to build a separate
     expanded family per arm -- see
@@ -159,25 +196,17 @@ def expand_grasp_pose_family(
     tuples.
 
     Deliberately NOT reproduced:
-    - ``create_target_pose_list``'s position-dependent ``towards`` sign
-      disambiguation, which independently resolves each candidate's
-      rotation direction (``+theta`` vs. ``-theta``) based on which side of
-      the contact center it ends up on. This function always walks the
-      configured ``rotate_lim`` direction only (never the mirrored sign),
-      matching how the earlier, orientation-only version of this code
-      already treated this same gap -- an acknowledged limitation, not
-      newly introduced or silently widened here.
     - ``choose_grasp_pose``'s arm-mirrored preferred-direction scoring
       (``GRASP_DIRECTION_DIC["top_down_little_left"/"top_down_little_right"]``,
       blended with a task-specific side preference) used to RANK candidate
       contact points per arm before reachability filtering. That's a soft
       preference over which contact point RoboTwin would rather use, not a
-      hard validity boundary like the two symmetries above, and needs
+      hard validity boundary like the symmetries above, and needs
       per-task metadata this module doesn't currently extract.
 
-    Both are acknowledged gaps, not silent assumptions. If live smoke-test
-    data ever shows a known-good grasp reading a large error, these are the
-    first two places to look.
+    This is an acknowledged gap, not a silent assumption. If live
+    smoke-test data ever shows a known-good grasp reading a large error,
+    this is the first place to look.
     """
     # Deliberately NOT sorted into ascending order: create_target_pose_list
     # never reorders rotate_lim either, it uses the signed step directly
@@ -213,6 +242,7 @@ def expand_grasp_pose_family(
             contact_center_world,
             (0.0, 1.0, 0.0),
             float(theta),
+            towards=GRASP_TOWARDS_AXIS,
         )
         family.append((arc_position, arc_orientation))
         flipped_orientation = _rotate_quat_about_own_local_axis(
