@@ -91,29 +91,49 @@ CONTACT_MATRIX_ORTHONORMALITY_ATOL = 1e-3
 CONTACT_MATRIX_DETERMINANT_ATOL = 1e-3
 CONTACT_MATRIX_HOMOGENEOUS_ROW_ATOL = 1e-6
 
+# get_grasp_pose (customized_robotwin/envs/_base_task.py) always offsets its
+# returned position backward along the local approach axis (-X) from the raw
+# contact point by this much, even at its own pre_dis=0 default:
+#   global_grasp_pose_p = contact_pos + contact_rot @ [-0.12 - pre_dis, 0, 0]
+# Traced through choose_grasp_pose's two-stage pre_dis/target_dis math: with
+# grasp_actor's own default target_dis=0, this constant IS the TCP position
+# at the moment of closing (not a pre-grasp hover point) -- presumably the
+# fixed mechanical offset between the TCP reference frame poses are reported
+# in and where the fingertips actually are. Using the raw contact point
+# position directly, with no offset, would be wrong by this amount.
+# Assumes target_dis=0 (grasp_actor's own default); a task calling
+# grasp_actor with a nonzero grasp_dis would need a different offset here --
+# an acknowledged gap, not a silent assumption.
+GRASP_APPROACH_STANDOFF_M = 0.12
 
-def grasp_quat_wxyz_from_contact_matrix(
-    contact_matrix: Any,
-) -> tuple[float, float, float, float] | None:
-    """One annotated contact point's world-frame pose -> its grasp orientation.
+
+@dataclass(frozen=True)
+class GraspPose:
+    position_world: tuple[float, float, float]
+    orientation_wxyz: tuple[float, float, float, float]
+
+
+def grasp_pose_from_contact_matrix(contact_matrix: Any) -> GraspPose | None:
+    """One annotated contact point's world-frame pose -> its actual grasp
+    pose (position AND orientation), reproducing get_grasp_pose's full
+    formula -- not just the orientation remap.
 
     Shared by any caller (this task or another) that needs "the valid grasp
-    orientation for this object", not just the sauce-can gate -- callers
-    should reuse this rather than re-deriving the contact-to-grasp rotation
-    inline, so the transform can't silently drift out of sync in two places.
+    pose for this object", not just the sauce-can gate -- callers should
+    reuse this rather than re-deriving the contact-to-grasp transform
+    inline, so it can't silently drift out of sync in two places.
 
-    Never raises, and never returns a quaternion for input that isn't
-    actually a valid rigid transform: ``transforms3d.quaternions.mat2quat``
-    does not validate its input -- it raises ``LinAlgError`` for a
-    non-finite matrix (which would otherwise propagate out of
-    ``build_live_graph_context`` and halt live evaluation on a single bad
-    annotation), and silently returns a normalized-looking but physically
-    meaningless quaternion for a reflection, a degenerate matrix, or an
-    arbitrary non-rotation matrix alike (which would otherwise read as a
-    perfectly ordinary, seemingly valid ``AVAILABLE`` reference orientation).
-    A malformed matrix returns None instead, same as an absent one --
-    callers already treat an all-None contact-point set as
-    ``ANNOTATION_INVALID``.
+    Never raises, and never returns a pose for input that isn't actually a
+    valid rigid transform: ``transforms3d.quaternions.mat2quat`` does not
+    validate its input -- it raises ``LinAlgError`` for a non-finite matrix
+    (which would otherwise propagate out of ``build_live_graph_context`` and
+    halt live evaluation on a single bad annotation), and silently returns a
+    normalized-looking but physically meaningless quaternion for a
+    reflection, a degenerate matrix, or an arbitrary non-rotation matrix
+    alike (which would otherwise read as a perfectly ordinary, seemingly
+    valid ``AVAILABLE`` reference pose). A malformed matrix returns None
+    instead, same as an absent one -- callers already treat an all-None
+    contact-point set as ``ANNOTATION_INVALID``.
     """
     if contact_matrix is None:
         return None
@@ -134,11 +154,32 @@ def grasp_quat_wxyz_from_contact_matrix(
         if abs(np.linalg.det(rotation) - 1.0) > CONTACT_MATRIX_DETERMINANT_ATOL:
             return None
         grasp_matrix = matrix @ CONTACT_POINT_TO_GRASP_ROTATION
-        quat = t3d.quaternions.mat2quat(grasp_matrix[:3, :3])
+        grasp_rotation = grasp_matrix[:3, :3]
+        position = grasp_matrix[:3, 3] + grasp_rotation @ np.array(
+            [-GRASP_APPROACH_STANDOFF_M, 0.0, 0.0]
+        )
+        quat = t3d.quaternions.mat2quat(grasp_rotation)
         quat = tuple(float(value) for value in quat)
-        return quat if len(quat) == 4 and all(np.isfinite(quat)) else None
+        position = tuple(float(value) for value in position)
+        if len(quat) != 4 or not all(np.isfinite(quat)):
+            return None
+        if len(position) != 3 or not all(np.isfinite(position)):
+            return None
+        return GraspPose(position_world=position, orientation_wxyz=quat)
     except Exception:
         return None
+
+
+def grasp_quat_wxyz_from_contact_matrix(
+    contact_matrix: Any,
+) -> tuple[float, float, float, float] | None:
+    """Orientation-only view of ``grasp_pose_from_contact_matrix``, kept for
+    existing callers that only need orientation. Prefer
+    ``grasp_pose_from_contact_matrix`` directly for new code that needs the
+    position too, so validation only happens in one place.
+    """
+    pose = grasp_pose_from_contact_matrix(contact_matrix)
+    return pose.orientation_wxyz if pose is not None else None
 
 
 class OrientationReferenceStatus(str, Enum):
@@ -174,41 +215,62 @@ class OrientationReference:
     status: OrientationReferenceStatus = OrientationReferenceStatus.TARGET_UNRESOLVED
 
 
-def target_grasp_contact_orientations_wxyz(
+@dataclass(frozen=True)
+class GraspPoseReference:
+    poses: tuple[GraspPose, ...] = ()
+    status: OrientationReferenceStatus = OrientationReferenceStatus.TARGET_UNRESOLVED
+
+
+def target_grasp_poses(
     task_env: Any, target_name: str | None
-) -> OrientationReference:
-    """World-frame grasp orientation of every annotated contact point.
+) -> GraspPoseReference:
+    """Every annotated contact point's actual grasp pose (position AND
+    orientation) for the target -- the one canonical resolution both the
+    orientation check and the height reference draw from, so they can't
+    independently resolve the same actor two different ways and drift.
 
     Pure geometry read off the object's static ``contact_points_pose``
     annotation (``Actor.get_contact_point``) plus RoboTwin's own
-    contact-to-grasp rotation -- this does not call
+    contact-to-grasp transform -- this does not call
     ``get_grasp_pose``/``choose_grasp_pose`` and triggers no motion planning,
     so it is safe to call every observation frame. An empty result (status
     != AVAILABLE) means "no reference available" and callers must treat
-    that as such, not as "misaligned" -- but which status it is matters for
-    diagnosing whether that's expected (ANNOTATION_MISSING) or a bug
-    (ACTOR_UNRESOLVED/EXTRACTION_ERROR).
+    that as such -- but which status it is matters for diagnosing whether
+    that's expected (ANNOTATION_MISSING) or a bug (ACTOR_UNRESOLVED/
+    EXTRACTION_ERROR).
     """
     if not target_name:
-        return OrientationReference((), OrientationReferenceStatus.TARGET_UNRESOLVED)
+        return GraspPoseReference((), OrientationReferenceStatus.TARGET_UNRESOLVED)
     actor = _resolve_wrapped_actor(task_env, target_name)
     if actor is None:
-        return OrientationReference((), OrientationReferenceStatus.ACTOR_UNRESOLVED)
+        return GraspPoseReference((), OrientationReferenceStatus.ACTOR_UNRESOLVED)
     try:
         contact_points = list(actor.iter_contact_points("matrix"))
     except Exception:
-        return OrientationReference((), OrientationReferenceStatus.EXTRACTION_ERROR)
+        return GraspPoseReference((), OrientationReferenceStatus.EXTRACTION_ERROR)
     if not contact_points:
-        return OrientationReference((), OrientationReferenceStatus.ANNOTATION_MISSING)
-    orientations = []
+        return GraspPoseReference((), OrientationReferenceStatus.ANNOTATION_MISSING)
+    poses = []
     for _, matrix in contact_points:
-        quat = grasp_quat_wxyz_from_contact_matrix(matrix)
-        if quat is not None:
-            orientations.append(quat)
-    if not orientations:
-        return OrientationReference((), OrientationReferenceStatus.ANNOTATION_INVALID)
+        pose = grasp_pose_from_contact_matrix(matrix)
+        if pose is not None:
+            poses.append(pose)
+    if not poses:
+        return GraspPoseReference((), OrientationReferenceStatus.ANNOTATION_INVALID)
+    return GraspPoseReference(tuple(poses), OrientationReferenceStatus.AVAILABLE)
+
+
+def target_grasp_contact_orientations_wxyz(
+    task_env: Any, target_name: str | None
+) -> OrientationReference:
+    """Orientation-only view of ``target_grasp_poses``, kept for existing
+    callers/tests. Prefer ``target_grasp_poses`` directly for new code that
+    needs position too, so actor resolution only happens in one place.
+    """
+    reference = target_grasp_poses(task_env, target_name)
     return OrientationReference(
-        tuple(orientations), OrientationReferenceStatus.AVAILABLE
+        tuple(pose.orientation_wxyz for pose in reference.poses),
+        reference.status,
     )
 
 
@@ -264,6 +326,14 @@ class LiveGraphContext:
     # the whole time.
     orientation_reference_status: str = OrientationReferenceStatus.TARGET_UNRESOLVED.value
     orientation_reference_count: int = 0
+    # World-frame height (Z) of every annotated grasp pose for the target --
+    # arm-independent (unlike the orientation tuples above): the contact
+    # point / grasp-pose position math has no arm_tag dependence in
+    # RoboTwin, only reachability filtering (not reproduced here) does.
+    # Empty when orientation_reference_status != "available"; callers must
+    # fall back to their own prior height reference in that case, not treat
+    # an empty tuple as "aligned at any height."
+    target_grasp_heights_m: tuple[float, ...] = ()
 
 
 def task_goal_from_env(task_env: Any, catalog: Iterable[dict[str, Any]]) -> TaskGoal:
@@ -315,11 +385,13 @@ def build_live_graph_context(
             ),
             None,
         )
-    # Resolved once, not once per arm: this determines
-    # orientation_reference_status/_count, and both arms must report the
-    # same underlying resolution outcome even though their expanded
-    # candidate families (rotate_lim can differ per arm) do not.
-    reference = target_grasp_contact_orientations_wxyz(task_env, target_name)
+    # Resolved once, not once per arm and not separately for orientation vs.
+    # height: this determines orientation_reference_status/_count, and both
+    # arms must report the same underlying resolution outcome even though
+    # their expanded orientation families (rotate_lim can differ per arm) do
+    # not; the height reference is arm-independent so it needs no expansion.
+    reference = target_grasp_poses(task_env, target_name)
+    base_orientations = tuple(pose.orientation_wxyz for pose in reference.poses)
     return LiveGraphContext(
         catalog=catalog,
         relation_state=relation_state,
@@ -332,13 +404,16 @@ def build_live_graph_context(
         },
         contract=contract,
         left_reference_orientations_wxyz=_expand_arm_reference_orientations(
-            reference.orientations_wxyz, task_env, "left"
+            base_orientations, task_env, "left"
         ),
         right_reference_orientations_wxyz=_expand_arm_reference_orientations(
-            reference.orientations_wxyz, task_env, "right"
+            base_orientations, task_env, "right"
         ),
         orientation_reference_status=reference.status.value,
-        orientation_reference_count=len(reference.orientations_wxyz),
+        orientation_reference_count=len(reference.poses),
+        target_grasp_heights_m=tuple(
+            pose.position_world[2] for pose in reference.poses
+        ),
     )
 
 

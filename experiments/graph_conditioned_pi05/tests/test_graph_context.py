@@ -25,12 +25,14 @@ from experiments.graph_conditioned_pi05.graph_serializer import (
 from experiments.graph_conditioned_pi05.graph_replanning import GraspSubstage
 from experiments.graph_conditioned_pi05.live_adapter import (
     CONTACT_POINT_TO_GRASP_ROTATION,
+    GRASP_APPROACH_STANDOFF_M,
     LiveGraphRetriever,
     action_graph_state,
     build_live_graph_context,
     compact_grasp_hint,
     destination_ids_from_task,
     goal_geometry_pack_item,
+    grasp_pose_from_contact_matrix,
     grasp_quat_wxyz_from_contact_matrix,
     keep_active_gripper_closed,
     live_task_state,
@@ -459,29 +461,47 @@ def test_shared_live_context_has_value_parity_and_one_catalog_parse(tmp_path):
 class _FakeGraspActor:
     """Minimal stand-in for the sim's wrapped ``Actor`` grasp-geometry API.
 
-    Contact points are specified as the DESIRED post-transform grasp
-    orientation -- what a real annotation's ``get_grasp_pose`` would
-    resolve to -- and converted back through the inverse of
-    ``CONTACT_POINT_TO_GRASP_ROTATION`` into the raw pre-transform contact
-    matrix the real wrapped-Actor API returns. This exercises the same
-    contact-to-grasp transform production code applies, rather than
-    assuming it away by handing back an already-transformed quaternion.
+    Contact points are specified as the DESIRED post-transform grasp pose
+    (orientation, and optionally position) -- what a real annotation's
+    ``grasp_pose_from_contact_matrix`` would resolve to -- and converted
+    back through the inverse of ``CONTACT_POINT_TO_GRASP_ROTATION`` and the
+    approach standoff into the raw pre-transform contact matrix the real
+    wrapped-Actor API returns. This exercises the same transform production
+    code applies, rather than assuming it away by handing back an
+    already-transformed pose.
+
+    Position defaults to the target fixture's own AABB-top height (0.34, at
+    an arbitrary X/Y) so tests that only care about orientation get a grasp
+    height reference consistent with what the AABB-based fallback already
+    gave them, and don't fail a height check they were never exercising.
     """
 
-    def __init__(self, name: str, grasp_quats_wxyz):
+    _DEFAULT_POSITION_WORLD = (0.1, 0.2, 0.34)
+
+    def __init__(self, name: str, grasp_quats_wxyz, grasp_position_world=None):
         self._name = name
         self._grasp_quats = list(grasp_quats_wxyz)
+        self._grasp_position = (
+            tuple(grasp_position_world)
+            if grasp_position_world is not None
+            else self._DEFAULT_POSITION_WORLD
+        )
 
     def get_name(self):
         return self._name
 
     def iter_contact_points(self, ret="matrix"):
         assert ret == "matrix", "fake actor only supports the matrix format"
-        inverse_rotation = CONTACT_POINT_TO_GRASP_ROTATION.T
+        inverse_contact_rotation = CONTACT_POINT_TO_GRASP_ROTATION.T
+        standoff = np.array([-GRASP_APPROACH_STANDOFF_M, 0.0, 0.0])
         for index, quat in enumerate(self._grasp_quats):
+            grasp_rotation = t3d.quaternions.quat2mat(quat)
             grasp_matrix = np.eye(4)
-            grasp_matrix[:3, :3] = t3d.quaternions.quat2mat(quat)
-            yield index, grasp_matrix @ inverse_rotation
+            grasp_matrix[:3, :3] = grasp_rotation
+            # Invert grasp_pose_from_contact_matrix's standoff addition
+            # (position = grasp_matrix[:3,3] + grasp_rotation @ standoff).
+            grasp_matrix[:3, 3] = np.array(self._grasp_position) - grasp_rotation @ standoff
+            yield index, grasp_matrix @ inverse_contact_rotation
 
 
 def _homogeneous_matrix(rotation, bottom_row=(0.0, 0.0, 0.0, 1.0)):
@@ -536,6 +556,118 @@ def test_grasp_quat_from_contact_matrix_rejects_malformed_input():
     # 4x4s.
     assert grasp_quat_wxyz_from_contact_matrix(np.eye(3)) is None
     assert grasp_quat_wxyz_from_contact_matrix(None) is None
+
+
+def test_grasp_pose_position_applies_approach_standoff():
+    """grasp_pose_from_contact_matrix's position must match
+    get_grasp_pose's actual formula -- contact position offset by
+    GRASP_APPROACH_STANDOFF_M along the local approach axis (X) of the
+    POST-transform grasp orientation, not the raw contact orientation, and
+    not just the bare contact-point translation. Hand-derived expected
+    value for an identity contact matrix: the grasp rotation is exactly
+    CONTACT_POINT_TO_GRASP_ROTATION's own rotation block, so the offset is
+    that matrix's local -X column times the standoff distance."""
+    identity_contact_matrix = np.eye(4)
+    pose = grasp_pose_from_contact_matrix(identity_contact_matrix)
+    assert pose is not None
+
+    grasp_rotation = CONTACT_POINT_TO_GRASP_ROTATION[:3, :3]
+    expected_position = grasp_rotation @ np.array(
+        [-GRASP_APPROACH_STANDOFF_M, 0.0, 0.0]
+    )
+    assert np.allclose(pose.position_world, expected_position, atol=1e-9)
+
+
+def test_grasp_height_reference_prefers_annotation_over_aabb_top(tmp_path):
+    """When an annotated grasp pose is available, its actual height must be
+    the reference CLOSE is gated on -- not the object's AABB top surface --
+    and the two must be tested at heights far enough apart that the AABB-top
+    reference would give the opposite answer, so this test cannot pass by
+    accident if the annotation were silently ignored."""
+
+    class Task:
+        def __init__(self, catalog):
+            self.catalog = catalog
+            # Annotated grasp height 10cm below the AABB top (0.34): well
+            # outside the +/-3cm tolerance of either reference around the
+            # other, so aligning with one and not the other is unambiguous.
+            self.target = _FakeGraspActor(
+                "target",
+                [(1.0, 0.0, 0.0, 0.0)],
+                grasp_position_world=(0.16, 0.20, 0.24),
+            )
+
+        def get_instruction(self):
+            return "put target in box"
+
+        def get_role_names(self):
+            return {"target_id": 10, "destination_id": 20}
+
+        def _get_benchmark_object_catalog(self):
+            return self.catalog
+
+    with _graph_file(tmp_path / "graph.hdf5") as root:
+        catalog, state, object_state = _live_inputs(root)
+    state["held_by"] = np.zeros((5, 2), dtype=bool)
+    state["held_by_valid"] = np.ones((5, 2), dtype=bool)
+    state["in"] = np.zeros((5, 5), dtype=bool)
+    state["containment_valid"] = np.ones((5, 5), dtype=bool)
+    state["raw_contact"] = np.zeros((5, 5), dtype=bool)
+    # Left effector at the annotated grasp height (0.24), NOT the AABB top
+    # (0.34) -- the AABB-based reference alone would call this misaligned.
+    object_state["pose_world"][3, :3] = [0.16, 0.20, 0.24]
+    observation = {
+        "benchmark_support": {"relation_state": state, "object_state": object_state},
+    }
+    contract = RetrievalContract()
+    task = Task(catalog)
+
+    context = build_live_graph_context(task, observation, contract)
+    evidence = extract_simulator_evidence(context)
+    assert context.target_grasp_heights_m == (0.24,)
+    assert evidence.left.grasp_height_aligned
+    assert abs(evidence.left.target_vertical_offset_m) < 1e-6
+
+
+def test_grasp_height_reference_falls_back_to_aabb_top_without_annotation(tmp_path):
+    """Without a resolvable actor, height alignment must behave exactly as
+    it did before this feature existed -- the AABB-top reference, same
+    tolerance -- not silently disable the height check."""
+
+    class Task:
+        def __init__(self, catalog):
+            self.catalog = catalog
+
+        def get_instruction(self):
+            return "put target in box"
+
+        def get_role_names(self):
+            return {"target_id": 10, "destination_id": 20}
+
+        def _get_benchmark_object_catalog(self):
+            return self.catalog
+
+    with _graph_file(tmp_path / "graph.hdf5") as root:
+        catalog, state, object_state = _live_inputs(root)
+    state["held_by"] = np.zeros((5, 2), dtype=bool)
+    state["held_by_valid"] = np.ones((5, 2), dtype=bool)
+    state["in"] = np.zeros((5, 5), dtype=bool)
+    state["containment_valid"] = np.ones((5, 5), dtype=bool)
+    state["raw_contact"] = np.zeros((5, 5), dtype=bool)
+    # AABB top is 0.34 (see _live_inputs); effector right at it.
+    object_state["pose_world"][3, :3] = [0.16, 0.20, 0.34]
+    observation = {
+        "benchmark_support": {"relation_state": state, "object_state": object_state},
+    }
+    contract = RetrievalContract()
+    task = Task(catalog)
+
+    context = build_live_graph_context(task, observation, contract)
+    evidence = extract_simulator_evidence(context)
+    assert context.orientation_reference_status == "actor_unresolved"
+    assert context.target_grasp_heights_m == ()
+    assert evidence.left.grasp_height_aligned
+    assert abs(evidence.left.target_vertical_offset_m) < 1e-6
 
 
 def test_grasp_orientation_gate_uses_annotated_contact_pose(tmp_path):
@@ -1256,6 +1388,11 @@ def main():
     with TemporaryDirectory() as directory:
         test_shared_live_context_has_value_parity_and_one_catalog_parse(Path(directory))
     test_grasp_quat_from_contact_matrix_rejects_malformed_input()
+    test_grasp_pose_position_applies_approach_standoff()
+    with TemporaryDirectory() as directory:
+        test_grasp_height_reference_prefers_annotation_over_aabb_top(Path(directory))
+    with TemporaryDirectory() as directory:
+        test_grasp_height_reference_falls_back_to_aabb_top_without_annotation(Path(directory))
     with TemporaryDirectory() as directory:
         test_grasp_orientation_gate_uses_annotated_contact_pose(Path(directory))
     test_grasp_orientation_arc_excludes_upper_endpoint_like_robotwin()
@@ -1274,7 +1411,7 @@ def main():
     test_transport_gripper_latch_changes_only_the_active_channel()
     with TemporaryDirectory() as directory:
         test_alignment_mismatch_fails(Path(directory))
-    print("27 graph-context checks passed")
+    print("30 graph-context checks passed")
 
 
 if __name__ == "__main__":

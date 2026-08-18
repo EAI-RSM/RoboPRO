@@ -19,7 +19,18 @@ EFFECTOR_IDS = {"left": -2, "right": -3}
 GRASP_ALIGNMENT_DISTANCE_M = 0.12
 GRASP_CLOSE_PREFERRED_DISTANCE_M = 0.08
 GRASP_CLOSE_MAX_DISTANCE_M = 0.10
-GRASP_HEIGHT_BAND_HALF_WIDTH_M = 0.02
+# Symmetric tolerance around the grasp-height reference. When an annotated
+# grasp pose is available (context.target_grasp_heights_m), the reference
+# is that pose's actual world height -- not the object's AABB top surface,
+# which for a tall object can sit several cm from the real grasp point,
+# needing a large systematic margin just to compensate for that mismatch.
+# With the real reference, this tolerance mostly needs to absorb policy
+# jitter and geometric imprecision (observed on the order of 1-4mm), not a
+# structural offset -- 3cm is a reasonable starting point given that, not
+# an empirically tuned value; widen/narrow based on real-batch data once
+# available. Falls back to the old AABB-top-based reference (and this same
+# tolerance) when no annotation is available, unchanged from before.
+GRASP_HEIGHT_BAND_HALF_WIDTH_M = 0.03
 # Generic parallel-jaw tolerance, not fit to any single episode: this is a
 # starting point pending real-batch validation, not a calibrated value.
 GRASP_ORIENTATION_MAX_ERROR_DEG = 20.0
@@ -401,15 +412,31 @@ def extract_simulator_evidence(context: "LiveGraphContext") -> SimulatorEvidence
         float(target_pose[2]) if target_pose is not None else np.nan
     )
     target_height_half_width = GRASP_HEIGHT_BAND_HALF_WIDTH_M
+    # Prefer the annotated grasp pose's real height over the AABB-top proxy;
+    # fall back to the old reference (unchanged) when no annotation is
+    # available, rather than treating an empty tuple as "aligned anywhere."
+    height_candidates_m = context.target_grasp_heights_m or (
+        (target_height_center,) if np.isfinite(target_height_center) else ()
+    )
     effectors = {}
     target_index = context.index_by_id.get(target_id) if target_id is not None else None
     for arm_index, arm in enumerate(("left", "right")):
         effector_index = context.index_by_id.get(EFFECTOR_IDS[arm])
         effector_pose = retriever._poses_world.get(EFFECTOR_IDS[arm])
+        # Aligned if within tolerance of ANY candidate grasp height (multiple
+        # annotated contact points may sit at different heights); the
+        # correction direction (move up/down) follows whichever candidate is
+        # nearest when none are within tolerance.
+        height_offsets = (
+            [float(effector_pose[2] - height) for height in height_candidates_m]
+            if effector_pose is not None
+            else []
+        )
         vertical_offset = (
-            float(effector_pose[2] - target_height_center)
-            if effector_pose is not None and np.isfinite(target_height_center)
-            else np.nan
+            min(height_offsets, key=abs) if height_offsets else np.nan
+        )
+        height_aligned = any(
+            abs(offset) <= target_height_half_width for offset in height_offsets
         )
         effector_quat = (
             effector_pose[3:7]
@@ -432,10 +459,7 @@ def extract_simulator_evidence(context: "LiveGraphContext") -> SimulatorEvidence
                 if target_pose is not None and effector_pose is not None else np.nan
             ),
             target_vertical_offset_m=vertical_offset,
-            grasp_height_aligned=bool(
-                np.isfinite(vertical_offset)
-                and abs(vertical_offset) <= target_height_half_width
-            ),
+            grasp_height_aligned=bool(height_aligned),
             target_orientation_error_deg=orientation_error,
             grasp_orientation_aligned=bool(
                 not np.isfinite(orientation_error)
