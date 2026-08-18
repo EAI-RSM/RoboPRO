@@ -40,7 +40,7 @@ from experiments.graph_conditioned_pi05.live_adapter import (
     vla_label_from_catalog_entry,
 )
 from experiments.graph_conditioned_pi05.simulator_evidence import (
-    expand_grasp_orientation_family,
+    expand_grasp_pose_family,
     extract_simulator_evidence,
     _min_orientation_error_deg,
     _rotate_quat_about_own_local_axis,
@@ -511,6 +511,19 @@ def _homogeneous_matrix(rotation, bottom_row=(0.0, 0.0, 0.0, 1.0)):
     return matrix
 
 
+def _orientation_family(seed_quat_wxyz, rotate_lim_rad):
+    """Orientation-only view of expand_grasp_pose_family, for tests that
+    only care about orientation behavior. Passing the same point as both
+    the seed position and the contact center makes the rotate_lim arc's
+    position rotation a self-rotation (offset zero), so position stays at
+    the origin throughout and these tests exercise orientation exactly as
+    they did before position was added to the pose family."""
+    pose_family = expand_grasp_pose_family(
+        (0.0, 0.0, 0.0), seed_quat_wxyz, (0.0, 0.0, 0.0), rotate_lim_rad
+    )
+    return tuple(orientation for _, orientation in pose_family)
+
+
 def test_grasp_quat_from_contact_matrix_rejects_malformed_input():
     """transforms3d's mat2quat does not itself validate its input: it
     raises for a non-finite matrix (which would otherwise propagate out of
@@ -624,7 +637,10 @@ def test_grasp_height_reference_prefers_annotation_over_aabb_top(tmp_path):
 
     context = build_live_graph_context(task, observation, contract)
     evidence = extract_simulator_evidence(context)
-    assert context.target_grasp_heights_m == (0.24,)
+    # No rotate_lim configured (this fake Task has no .robot), so the arc
+    # is a single sample at the seed itself -- two entries (the sample and
+    # its position-neutral 180-degree flip), both at the annotated height.
+    assert context.left_reference_grasp_heights_m == (0.24, 0.24)
     assert evidence.left.grasp_height_aligned
     assert abs(evidence.left.target_vertical_offset_m) < 1e-6
 
@@ -665,7 +681,8 @@ def test_grasp_height_reference_falls_back_to_aabb_top_without_annotation(tmp_pa
     context = build_live_graph_context(task, observation, contract)
     evidence = extract_simulator_evidence(context)
     assert context.orientation_reference_status == "actor_unresolved"
-    assert context.target_grasp_heights_m == ()
+    assert context.left_reference_grasp_heights_m == ()
+    assert context.right_reference_grasp_heights_m == ()
     assert evidence.left.grasp_height_aligned
     assert abs(evidence.left.target_vertical_offset_m) < 1e-6
 
@@ -753,7 +770,7 @@ def test_grasp_orientation_arc_excludes_upper_endpoint_like_robotwin():
     endpoint) must."""
     seed = (1.0, 0.0, 0.0, 0.0)
     rotate_lim = (0.0, 1.0)
-    family = expand_grasp_orientation_family(seed, rotate_lim)
+    family = _orientation_family(seed, rotate_lim)
     assert len(family) == 20  # 10 arc samples x 2 (seed + 180-degree flip)
 
     exact_endpoint = _rotate_quat_about_own_local_axis(seed, (0.0, 1.0, 0.0), 1.0)
@@ -775,7 +792,7 @@ def test_grasp_orientation_finger_flip_applies_to_each_rotated_candidate():
     what a same-order-only bug would miss."""
     seed = (1.0, 0.0, 0.0, 0.0)
     rotate_lim = (0.0, 1.0)
-    family = expand_grasp_orientation_family(seed, rotate_lim)
+    family = _orientation_family(seed, rotate_lim)
 
     rotated = _rotate_quat_about_own_local_axis(seed, (0.0, 1.0, 0.0), 0.6)
     correctly_flipped = _rotate_quat_about_own_local_axis(
@@ -807,7 +824,7 @@ def test_grasp_orientation_arc_preserves_configured_rotate_lim_order():
     what was actually configured -- moot for every embodiment config in
     this repo today (all ascending), but not for a hypothetical one."""
     seed = (1.0, 0.0, 0.0, 0.0)
-    family = expand_grasp_orientation_family(seed, (1.0, 0.0))
+    family = _orientation_family(seed, (1.0, 0.0))
 
     # rotate_lim[0]=1.0 is the reversed arc's start point: included.
     start_point = _rotate_quat_about_own_local_axis(seed, (0.0, 1.0, 0.0), 1.0)
@@ -817,6 +834,34 @@ def test_grasp_orientation_arc_preserves_configured_rotate_lim_order():
     # excluded, the same way the ascending case excludes its own endpoint.
     excluded_endpoint = _rotate_quat_about_own_local_axis(seed, (0.0, 1.0, 0.0), 0.0)
     assert _min_orientation_error_deg(np.array(excluded_endpoint), family) > 1.0
+
+
+def test_grasp_pose_family_rotates_position_not_just_orientation():
+    """create_target_pose_list rotates the seed's POSITION as an offset
+    from the raw contact center, not just its orientation in place: the
+    offset from center to the seed has magnitude GRASP_APPROACH_STANDOFF_M
+    (12cm), so sweeping the rotate_lim arc moves the candidate's height by
+    up to ~STANDOFF*sin(rotate_lim range) -- close to 10cm for a ~1 radian
+    arc. An earlier version of this code treated every arc candidate's
+    height as identical to the unrotated seed's, which is wrong by exactly
+    this amount -- far larger than any reasonable height tolerance."""
+    standoff = GRASP_APPROACH_STANDOFF_M
+    seed_position = (-standoff, 0.0, 0.0)
+    seed_orientation = (1.0, 0.0, 0.0, 0.0)
+    contact_center = (0.0, 0.0, 0.0)
+
+    family = expand_grasp_pose_family(
+        seed_position, seed_orientation, contact_center, (0.0, 1.0)
+    )
+    heights = [position[2] for position, _ in family]
+
+    # The theta=0 candidate must still be exactly the unrotated seed height.
+    assert any(abs(h - seed_position[2]) < 1e-9 for h in heights)
+    # But the arc must ALSO produce heights far from the seed's -- close to
+    # the reviewer's ~10cm estimate for this standoff and range, not
+    # clustered near zero as they would be if position were frozen at the
+    # seed's own height across the whole arc.
+    assert max(heights) - min(heights) > 0.09
 
 
 def test_grasp_orientation_error_covers_rotate_lim_arc_and_finger_swap_symmetry(tmp_path):
@@ -1398,6 +1443,7 @@ def main():
     test_grasp_orientation_arc_excludes_upper_endpoint_like_robotwin()
     test_grasp_orientation_finger_flip_applies_to_each_rotated_candidate()
     test_grasp_orientation_arc_preserves_configured_rotate_lim_order()
+    test_grasp_pose_family_rotates_position_not_just_orientation()
     with TemporaryDirectory() as directory:
         test_grasp_orientation_error_covers_rotate_lim_arc_and_finger_swap_symmetry(Path(directory))
     with TemporaryDirectory() as directory:
@@ -1411,7 +1457,7 @@ def main():
     test_transport_gripper_latch_changes_only_the_active_channel()
     with TemporaryDirectory() as directory:
         test_alignment_mismatch_fails(Path(directory))
-    print("30 graph-context checks passed")
+    print("31 graph-context checks passed")
 
 
 if __name__ == "__main__":

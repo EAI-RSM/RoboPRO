@@ -33,7 +33,7 @@ from .graph_replanning import ActionGraphState, Evidence, GraspSubstage, TaskGoa
 from .simulator_evidence import (
     LiveTaskState,
     SimulatorEvidence,
-    expand_grasp_orientation_family,
+    expand_grasp_pose_family,
     extract_simulator_evidence,
 )
 
@@ -111,6 +111,14 @@ GRASP_APPROACH_STANDOFF_M = 0.12
 class GraspPose:
     position_world: tuple[float, float, float]
     orientation_wxyz: tuple[float, float, float, float]
+    # The raw annotated contact point's own position (before the approach
+    # standoff is added) -- the pivot create_target_pose_list rotates
+    # position_world around for each rotate_lim candidate. Needed because
+    # that rotation is NOT a self-rotation of position_world: the offset
+    # from this center to position_world has magnitude
+    # GRASP_APPROACH_STANDOFF_M, so rotating it moves position_world along
+    # an arc of that radius, not just changing its orientation in place.
+    contact_center_world: tuple[float, float, float]
 
 
 def grasp_pose_from_contact_matrix(contact_matrix: Any) -> GraspPose | None:
@@ -155,17 +163,25 @@ def grasp_pose_from_contact_matrix(contact_matrix: Any) -> GraspPose | None:
             return None
         grasp_matrix = matrix @ CONTACT_POINT_TO_GRASP_ROTATION
         grasp_rotation = grasp_matrix[:3, :3]
-        position = grasp_matrix[:3, 3] + grasp_rotation @ np.array(
+        contact_center = grasp_matrix[:3, 3]
+        position = contact_center + grasp_rotation @ np.array(
             [-GRASP_APPROACH_STANDOFF_M, 0.0, 0.0]
         )
         quat = t3d.quaternions.mat2quat(grasp_rotation)
         quat = tuple(float(value) for value in quat)
         position = tuple(float(value) for value in position)
+        contact_center = tuple(float(value) for value in contact_center)
         if len(quat) != 4 or not all(np.isfinite(quat)):
             return None
         if len(position) != 3 or not all(np.isfinite(position)):
             return None
-        return GraspPose(position_world=position, orientation_wxyz=quat)
+        if len(contact_center) != 3 or not all(np.isfinite(contact_center)):
+            return None
+        return GraspPose(
+            position_world=position,
+            orientation_wxyz=quat,
+            contact_center_world=contact_center,
+        )
     except Exception:
         return None
 
@@ -310,30 +326,28 @@ class LiveGraphContext:
     retriever: "LiveGraphRetriever"
     index_by_id: dict[int, int]
     contract: RetrievalContract
-    # Each arm's own fully symmetry-expanded set of valid grasp orientations
-    # for the target -- genuinely separate per arm, not a shared tuple.
+    # Each arm's own fully symmetry-expanded set of valid grasp poses for
+    # the target -- genuinely separate per arm, not a shared tuple.
     # RoboTwin's own candidate search is arm-specific (rotate_lim can differ
     # per arm, and its preferred-direction scoring is arm-mirrored -- see
-    # expand_grasp_orientation_family's docstring for what is and isn't
-    # reproduced here), so an orientation valid for one arm's search is not
-    # automatically valid for the other's.
+    # expand_grasp_pose_family's docstring for what is and isn't reproduced
+    # here), so a pose valid for one arm's search is not automatically
+    # valid for the other's. This applies to height too, not just
+    # orientation: rotate_lim rotates the seed's POSITION as an offset from
+    # the raw contact point, not just its orientation in place, so the set
+    # of reachable heights along the arc is exactly as arm-specific as the
+    # set of reachable orientations.
     left_reference_orientations_wxyz: tuple[tuple[float, float, float, float], ...] = ()
     right_reference_orientations_wxyz: tuple[tuple[float, float, float, float], ...] = ()
-    # Why the two tuples above are empty (or aren't) -- see
+    left_reference_grasp_heights_m: tuple[float, ...] = ()
+    right_reference_grasp_heights_m: tuple[float, ...] = ()
+    # Why the tuples above are empty (or aren't) -- see
     # OrientationReferenceStatus. Exported to the trace precisely so a
-    # smoke test can't silently look like it exercised orientation checking
-    # when actor resolution or annotation extraction was actually failing
-    # the whole time.
+    # smoke test can't silently look like it exercised orientation/height
+    # checking when actor resolution or annotation extraction was actually
+    # failing the whole time.
     orientation_reference_status: str = OrientationReferenceStatus.TARGET_UNRESOLVED.value
     orientation_reference_count: int = 0
-    # World-frame height (Z) of every annotated grasp pose for the target --
-    # arm-independent (unlike the orientation tuples above): the contact
-    # point / grasp-pose position math has no arm_tag dependence in
-    # RoboTwin, only reachability filtering (not reproduced here) does.
-    # Empty when orientation_reference_status != "available"; callers must
-    # fall back to their own prior height reference in that case, not treat
-    # an empty tuple as "aligned at any height."
-    target_grasp_heights_m: tuple[float, ...] = ()
 
 
 def task_goal_from_env(task_env: Any, catalog: Iterable[dict[str, Any]]) -> TaskGoal:
@@ -385,13 +399,18 @@ def build_live_graph_context(
             ),
             None,
         )
-    # Resolved once, not once per arm and not separately for orientation vs.
-    # height: this determines orientation_reference_status/_count, and both
-    # arms must report the same underlying resolution outcome even though
-    # their expanded orientation families (rotate_lim can differ per arm) do
-    # not; the height reference is arm-independent so it needs no expansion.
+    # Resolved once, not once per arm: this determines
+    # orientation_reference_status/_count, and both arms must report the
+    # same underlying resolution outcome even though their expanded pose
+    # families (rotate_lim can differ per arm, and affects both the
+    # orientation and the height reference) do not.
     reference = target_grasp_poses(task_env, target_name)
-    base_orientations = tuple(pose.orientation_wxyz for pose in reference.poses)
+    left_orientations, left_heights = _expand_arm_reference_poses(
+        reference.poses, task_env, "left"
+    )
+    right_orientations, right_heights = _expand_arm_reference_poses(
+        reference.poses, task_env, "right"
+    )
     return LiveGraphContext(
         catalog=catalog,
         relation_state=relation_state,
@@ -403,17 +422,12 @@ def build_live_graph_context(
             for index, object_id in enumerate(retriever.object_ids)
         },
         contract=contract,
-        left_reference_orientations_wxyz=_expand_arm_reference_orientations(
-            base_orientations, task_env, "left"
-        ),
-        right_reference_orientations_wxyz=_expand_arm_reference_orientations(
-            base_orientations, task_env, "right"
-        ),
+        left_reference_orientations_wxyz=left_orientations,
+        right_reference_orientations_wxyz=right_orientations,
+        left_reference_grasp_heights_m=left_heights,
+        right_reference_grasp_heights_m=right_heights,
         orientation_reference_status=reference.status.value,
         orientation_reference_count=len(reference.poses),
-        target_grasp_heights_m=tuple(
-            pose.position_world[2] for pose in reference.poses
-        ),
     )
 
 
@@ -435,25 +449,37 @@ def _effector_rotate_lim_rad(task_env: Any, arm: str) -> tuple[float, float]:
     return (0.0, 0.0)
 
 
-def _expand_arm_reference_orientations(
-    base_orientations: tuple[tuple[float, float, float, float], ...],
+def _expand_arm_reference_poses(
+    poses: tuple[GraspPose, ...],
     task_env: Any,
     arm: str,
-) -> tuple[tuple[float, float, float, float], ...]:
-    """One arm's full expanded family of valid grasp orientations.
+) -> tuple[
+    tuple[tuple[float, float, float, float], ...],
+    tuple[float, ...],
+]:
+    """One arm's full expanded family of valid grasp poses, split into the
+    orientation tuple and the height tuple callers actually consume.
 
-    Each annotated contact point's grasp orientation (already resolved once
-    by the caller, not re-derived per arm) is expanded through that arm's
-    own rotate_lim arc (genuinely arm-specific) and the approach-axis flip
-    (arm-independent, a property of the gripper) -- see
-    ``expand_grasp_orientation_family``.
+    Each annotated contact point's grasp pose (already resolved once by the
+    caller, not re-derived per arm) is expanded through that arm's own
+    rotate_lim arc (genuinely arm-specific, and -- see
+    ``expand_grasp_pose_family`` -- affecting both orientation and height,
+    since the arc rotates the seed's position as an offset from the raw
+    contact point, not just its orientation in place) and the
+    approach-axis flip (arm-independent, a property of the gripper, and
+    position-neutral since it's a true self-rotation).
     """
     rotate_lim = _effector_rotate_lim_rad(task_env, arm)
-    return tuple(
-        candidate
-        for seed in base_orientations
-        for candidate in expand_grasp_orientation_family(seed, rotate_lim)
-    )
+    orientations = []
+    heights = []
+    for pose in poses:
+        for position, orientation in expand_grasp_pose_family(
+            pose.position_world, pose.orientation_wxyz, pose.contact_center_world,
+            rotate_lim,
+        ):
+            orientations.append(orientation)
+            heights.append(position[2])
+    return tuple(orientations), tuple(heights)
 
 
 def action_graph_state(

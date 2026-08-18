@@ -20,8 +20,9 @@ GRASP_ALIGNMENT_DISTANCE_M = 0.12
 GRASP_CLOSE_PREFERRED_DISTANCE_M = 0.08
 GRASP_CLOSE_MAX_DISTANCE_M = 0.10
 # Symmetric tolerance around the grasp-height reference. When an annotated
-# grasp pose is available (context.target_grasp_heights_m), the reference
-# is that pose's actual world height -- not the object's AABB top surface,
+# grasp pose is available (context.left/right_reference_grasp_heights_m),
+# the reference is that pose's actual world height -- not the object's
+# AABB top surface,
 # which for a tall object can sit several cm from the real grasp point,
 # needing a large systematic margin just to compensate for that mismatch.
 # With the real reference, this tolerance mostly needs to absorb policy
@@ -84,44 +85,88 @@ def _rotate_quat_about_own_local_axis(
     return tuple(float(value) for value in t3d.quaternions.mat2quat(new_rotation))
 
 
-def expand_grasp_orientation_family(
-    seed_quat_wxyz: tuple[float, float, float, float],
+def _rotate_pose_about_point(
+    position_world,
+    orientation_wxyz: tuple[float, float, float, float],
+    pivot_world,
+    local_axis,
+    angle_rad: float,
+) -> tuple[tuple[float, float, float], tuple[float, float, float, float]]:
+    """Rotate a world pose (position AND orientation) about ``pivot_world``
+    -- which may be a different point than ``position_world`` itself --
+    using an axis expressed in the pose's own current frame.
+
+    Matches ``rotate_along_axis(..., axis_type="target")`` in
+    customized_robotwin/envs/utils/transforms.py exactly: BOTH the offset
+    from the pivot to the position, and the orientation, are transformed by
+    the identical world-frame delta rotation. When ``pivot_world ==
+    position_world`` this reduces to a pure self-rotation (position
+    unchanged) -- the case ``_rotate_quat_about_own_local_axis`` already
+    handles for the finger-swap flip.
+    """
+    position_world = np.asarray(position_world, dtype=np.float64)
+    pivot_world = np.asarray(pivot_world, dtype=np.float64)
+    rotation = t3d.quaternions.quat2mat(np.asarray(orientation_wxyz, dtype=np.float64))
+    world_axis = rotation @ np.asarray(local_axis, dtype=np.float64)
+    delta = t3d.axangles.axangle2mat(world_axis, float(angle_rad))
+    new_rotation = delta @ rotation
+    new_position = delta @ (position_world - pivot_world) + pivot_world
+    return (
+        tuple(float(value) for value in new_position),
+        tuple(float(value) for value in t3d.quaternions.mat2quat(new_rotation)),
+    )
+
+
+def expand_grasp_pose_family(
+    seed_position_world: tuple[float, float, float],
+    seed_orientation_wxyz: tuple[float, float, float, float],
+    contact_center_world: tuple[float, float, float],
     rotate_lim_rad: tuple[float, float],
-) -> tuple[tuple[float, float, float, float], ...]:
-    """Every orientation RoboTwin would treat as equally valid for this seed.
+) -> tuple[tuple[tuple[float, float, float], tuple[float, float, float, float]], ...]:
+    """Every (position, orientation) RoboTwin would treat as an equally
+    valid candidate grasp pose for this seed -- not just its orientation,
+    and not just the seed's own unrotated position.
 
     Reproduces two symmetries of RoboTwin's own grasp-pose search
     (customized_robotwin/envs/robot/robot.py: create_target_pose_list) and
-    of the aloha-agilex parallel-jaw gripper's own geometry -- NOT just the
-    one seed orientation this module derives from an annotated contact
-    point:
+    of the aloha-agilex parallel-jaw gripper's own geometry:
 
     - A ``rotate_lim``-radian arc about the seed's own local Y (jaw-closing)
       axis. ``create_target_pose_list`` searches exactly this per-arm arc
       (read live from the embodiment config, not hardcoded -- callers pass
       each arm's own limit, since RoboTwin's is arm-specific) for a
-      reachable grasp pose, so any orientation within it is just as valid
-      an annotated grasp as the seed itself.
+      reachable grasp pose. Critically, this rotates the seed's POSITION
+      too, as an offset from ``contact_center_world`` (the raw annotated
+      contact point, NOT the seed's own position) -- an earlier version of
+      this code rotated only the orientation and left the seed's position
+      fixed, which is wrong: the offset from the contact center to the
+      seed has magnitude ``GRASP_APPROACH_STANDOFF_M`` (12cm), so rotating
+      it can move the candidate's height by up to ``STANDOFF * sin(theta)``
+      -- several cm for even a ~1 radian arc, comfortably larger than a
+      few-cm height tolerance.
     - A 180-degree flip about EACH resulting arc candidate's own local X
-      (approach) axis, not the unrotated seed's -- 3D rotations don't
-      commute, so flipping the seed and then rotating it is a different
-      orientation from rotating the seed and then flipping that specific
-      result (they only coincide at theta=0). The gripper's two fingers
-      are geometrically symmetric, so swapping which finger ends up on
-      which side is mechanically the same grasp for any point along the
-      arc, not just the unrotated seed.
+      (approach) axis, not the seed's -- 3D rotations don't commute, so
+      flipping the seed and then rotating it is a different orientation
+      from rotating the seed and then flipping that specific result (they
+      only coincide at theta=0). Unlike the arc rotation, this genuinely IS
+      a self-rotation (about the candidate's own position, not the contact
+      center), so it leaves position unchanged.
 
     Public (not module-private) because callers need to build a separate
-    expanded family per arm -- see ``LiveGraphContext.left_reference_orientations_wxyz``
-    / ``right_reference_orientations_wxyz``.
+    expanded family per arm -- see
+    ``LiveGraphContext.left_reference_orientations_wxyz`` /
+    ``right_reference_orientations_wxyz`` and the analogous per-arm height
+    tuples.
 
     Deliberately NOT reproduced:
     - ``create_target_pose_list``'s position-dependent ``towards`` sign
-      disambiguation, which can flip which half of the raw ``rotate_lim``
-      interval is actually explored for a given contact point/object-center
-      geometry. That depends on per-candidate position data this module
-      doesn't have without re-deriving position-dependent logic that hasn't
-      been checked against a live run.
+      disambiguation, which independently resolves each candidate's
+      rotation direction (``+theta`` vs. ``-theta``) based on which side of
+      the contact center it ends up on. This function always walks the
+      configured ``rotate_lim`` direction only (never the mirrored sign),
+      matching how the earlier, orientation-only version of this code
+      already treated this same gap -- an acknowledged limitation, not
+      newly introduced or silently widened here.
     - ``choose_grasp_pose``'s arm-mirrored preferred-direction scoring
       (``GRASP_DIRECTION_DIC["top_down_little_left"/"top_down_little_right"]``,
       blended with a task-specific side preference) used to RANK candidate
@@ -147,9 +192,9 @@ def expand_grasp_orientation_family(
         # Matches create_target_pose_list exactly: step * i for i in
         # range(ROTATE_NUM), a half-open grid that never reaches the
         # configured endpoint (e.g. rotate_lim=(0,1) samples 0.0..0.9, never
-        # 1.0). Using np.linspace(..., inclusive) here would add an
-        # orientation RoboTwin never actually generates, artificially
-        # shrinking the reported error for anything near that boundary.
+        # 1.0). Using np.linspace(..., inclusive) here would add a pose
+        # RoboTwin never actually generates, artificially shrinking the
+        # reported error for anything near that boundary.
         step = (upper - lower) / GRASP_ORIENTATION_ARC_SAMPLES
         thetas = lower + step * np.arange(GRASP_ORIENTATION_ARC_SAMPLES)
     else:
@@ -162,13 +207,18 @@ def expand_grasp_orientation_family(
     # i.e. flip about THAT candidate's own local X, not the seed's.
     family = []
     for theta in thetas:
-        candidate = _rotate_quat_about_own_local_axis(
-            seed_quat_wxyz, (0.0, 1.0, 0.0), float(theta)
+        arc_position, arc_orientation = _rotate_pose_about_point(
+            seed_position_world,
+            seed_orientation_wxyz,
+            contact_center_world,
+            (0.0, 1.0, 0.0),
+            float(theta),
         )
-        family.append(candidate)
-        family.append(
-            _rotate_quat_about_own_local_axis(candidate, (1.0, 0.0, 0.0), np.pi)
+        family.append((arc_position, arc_orientation))
+        flipped_orientation = _rotate_quat_about_own_local_axis(
+            arc_orientation, (1.0, 0.0, 0.0), np.pi
         )
+        family.append((arc_position, flipped_orientation))
     return tuple(family)
 
 
@@ -179,9 +229,9 @@ def _min_orientation_error_deg(
     """Smallest angular error to any already-symmetry-expanded reference.
 
     ``reference_quats`` is expected to already be one arm's full expanded
-    family (``expand_grasp_orientation_family``, per-arm since RoboTwin's
-    own candidate search is arm-specific) -- this function itself does no
-    expansion, just the comparison.
+    orientation family (the orientations from ``expand_grasp_pose_family``,
+    per-arm since RoboTwin's own candidate search is arm-specific) -- this
+    function itself does no expansion, just the comparison.
 
     Returns NaN (not a large number) when no reference is available, so
     callers can distinguish "no annotation to check against" from "checked
@@ -412,10 +462,7 @@ def extract_simulator_evidence(context: "LiveGraphContext") -> SimulatorEvidence
         float(target_pose[2]) if target_pose is not None else np.nan
     )
     target_height_half_width = GRASP_HEIGHT_BAND_HALF_WIDTH_M
-    # Prefer the annotated grasp pose's real height over the AABB-top proxy;
-    # fall back to the old reference (unchanged) when no annotation is
-    # available, rather than treating an empty tuple as "aligned anywhere."
-    height_candidates_m = context.target_grasp_heights_m or (
+    aabb_fallback_heights_m = (
         (target_height_center,) if np.isfinite(target_height_center) else ()
     )
     effectors = {}
@@ -423,10 +470,21 @@ def extract_simulator_evidence(context: "LiveGraphContext") -> SimulatorEvidence
     for arm_index, arm in enumerate(("left", "right")):
         effector_index = context.index_by_id.get(EFFECTOR_IDS[arm])
         effector_pose = retriever._poses_world.get(EFFECTOR_IDS[arm])
+        # Prefer this arm's own annotated grasp-height family (rotate_lim,
+        # hence the reachable height range, is arm-specific -- see
+        # expand_grasp_pose_family) over the AABB-top proxy; fall back to
+        # the old reference (unchanged) when no annotation is available,
+        # rather than treating an empty tuple as "aligned anywhere."
+        height_candidates_m = (
+            context.left_reference_grasp_heights_m
+            if arm == "left"
+            else context.right_reference_grasp_heights_m
+        ) or aabb_fallback_heights_m
         # Aligned if within tolerance of ANY candidate grasp height (multiple
-        # annotated contact points may sit at different heights); the
-        # correction direction (move up/down) follows whichever candidate is
-        # nearest when none are within tolerance.
+        # annotated contact points, or points along the rotate_lim arc, may
+        # sit at different heights); the correction direction (move
+        # up/down) follows whichever candidate is nearest when none are
+        # within tolerance.
         height_offsets = (
             [float(effector_pose[2] - height) for height in height_candidates_m]
             if effector_pose is not None
