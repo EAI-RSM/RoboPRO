@@ -38,6 +38,55 @@ from .simulator_evidence import (
 IMMINENT_GRIPPER_OBSTACLE_CLEARANCE_M = 0.20
 
 
+def _resolve_wrapped_actor(task_env: Any, name: str) -> Any | None:
+    """Find the wrapped ``Actor`` (with annotated grasp geometry) for ``name``.
+
+    ``task_env.scene.get_all_actors()`` returns raw SAPIEN entities, which lack
+    ``iter_contact_points()``. The task-specific wrapped ``Actor`` objects (the
+    ones annotated with per-object contact-point poses) live as plain instance
+    attributes on the task (e.g. ``self.bottle``), so they have to be found by
+    scanning ``__dict__`` and matching on name -- there is no id-keyed lookup.
+    """
+    for value in vars(task_env).values():
+        if (
+            hasattr(value, "iter_contact_points")
+            and hasattr(value, "get_name")
+            and value.get_name() == name
+        ):
+            return value
+    return None
+
+
+def target_grasp_contact_orientations_wxyz(
+    task_env: Any, target_name: str | None
+) -> tuple[tuple[float, float, float, float], ...]:
+    """World-frame orientation of every annotated grasp contact point.
+
+    Pure geometry read off the object's static ``contact_points_pose``
+    annotation (``Actor.get_contact_point``) -- this does not call
+    ``get_grasp_pose``/``choose_grasp_pose`` and triggers no motion planning,
+    so it is safe to call every observation frame. Returns an empty tuple if
+    the target actor can't be resolved or has no annotated contact points;
+    callers must treat that as "no reference available", not "misaligned".
+    """
+    if not target_name:
+        return ()
+    actor = _resolve_wrapped_actor(task_env, target_name)
+    if actor is None:
+        return ()
+    orientations = []
+    try:
+        for _, pose in actor.iter_contact_points("list"):
+            if pose is None or len(pose) < 7:
+                continue
+            quat = tuple(float(value) for value in pose[3:7])
+            if len(quat) == 4 and all(np.isfinite(quat)):
+                orientations.append(quat)
+    except Exception:
+        return ()
+    return tuple(orientations)
+
+
 def _decode(values: Any) -> list[str]:
     return [
         value.decode("utf-8", errors="replace")
@@ -74,6 +123,7 @@ class LiveGraphContext:
     retriever: "LiveGraphRetriever"
     index_by_id: dict[int, int]
     contract: RetrievalContract
+    target_grasp_orientations_wxyz: tuple[tuple[float, float, float, float], ...] = ()
 
 
 def task_goal_from_env(task_env: Any, catalog: Iterable[dict[str, Any]]) -> TaskGoal:
@@ -116,6 +166,15 @@ def build_live_graph_context(
         catalog, relation_state, object_state, contract
     )
     retriever.is_target = np.isin(retriever.object_ids, goal.target_ids)
+    target_name = None
+    if len(goal.target_ids) == 1:
+        target_name = next(
+            (
+                entry.get("name") for entry in catalog
+                if int(entry.get("object_id", -(2**62))) == goal.target_ids[0]
+            ),
+            None,
+        )
     return LiveGraphContext(
         catalog=catalog,
         relation_state=relation_state,
@@ -127,6 +186,9 @@ def build_live_graph_context(
             for index, object_id in enumerate(retriever.object_ids)
         },
         contract=contract,
+        target_grasp_orientations_wxyz=target_grasp_contact_orientations_wxyz(
+            task_env, target_name
+        ),
     )
 
 

@@ -19,6 +19,9 @@ GRASP_ALIGNMENT_DISTANCE_M = 0.12
 GRASP_CLOSE_PREFERRED_DISTANCE_M = 0.08
 GRASP_CLOSE_MAX_DISTANCE_M = 0.10
 GRASP_HEIGHT_BAND_HALF_WIDTH_M = 0.02
+# Generic parallel-jaw tolerance, not fit to any single episode: this is a
+# starting point pending real-batch validation, not a calibrated value.
+GRASP_ORIENTATION_MAX_ERROR_DEG = 20.0
 
 
 def _aggregate(values: np.ndarray, valid: np.ndarray) -> Evidence:
@@ -31,12 +34,47 @@ def _aggregate(values: np.ndarray, valid: np.ndarray) -> Evidence:
     return Evidence.TRUE if np.any(values & valid) else Evidence.FALSE
 
 
+def _quaternion_angle_deg(a: np.ndarray, b: np.ndarray) -> float:
+    """Shortest rotation angle between two wxyz quaternions, in degrees."""
+    a = np.asarray(a, dtype=np.float64)
+    b = np.asarray(b, dtype=np.float64)
+    norm_a = np.linalg.norm(a)
+    norm_b = np.linalg.norm(b)
+    if norm_a < 1e-8 or norm_b < 1e-8:
+        return float("nan")
+    cos_half_angle = np.clip(abs(np.dot(a / norm_a, b / norm_b)), -1.0, 1.0)
+    return float(np.degrees(2.0 * np.arccos(cos_half_angle)))
+
+
+def _min_orientation_error_deg(
+    effector_quat: np.ndarray | None,
+    reference_quats: tuple[tuple[float, float, float, float], ...],
+) -> float:
+    """Smallest angular error to any annotated valid grasp orientation.
+
+    Returns NaN (not a large number) when no reference is available, so
+    callers can distinguish "no annotation to check against" from "checked
+    and misaligned" -- the former must not block a substage that worked
+    fine before this check existed.
+    """
+    if effector_quat is None or not reference_quats:
+        return float("nan")
+    errors = [_quaternion_angle_deg(effector_quat, ref) for ref in reference_quats]
+    errors = [error for error in errors if np.isfinite(error)]
+    return float(min(errors)) if errors else float("nan")
+
+
 @dataclass(frozen=True)
 class EffectorEvidence:
     tcp_position_world: tuple[float, float, float] | None = None
     target_distance_m: float = np.nan
     target_vertical_offset_m: float = np.nan
     grasp_height_aligned: bool = False
+    target_orientation_error_deg: float = np.nan
+    # Fails open (True) when no reference orientation is available, so
+    # objects without annotated grasp geometry behave exactly as before
+    # this check existed.
+    grasp_orientation_aligned: bool = True
     target_contact: bool = False
     target_held: bool = False
 
@@ -119,6 +157,8 @@ class SimulatorEvidence:
                 f"target_{arm}_distance": effector.target_distance_m,
                 f"target_{arm}_vertical_offset": effector.target_vertical_offset_m,
                 f"target_{arm}_grasp_height_aligned": effector.grasp_height_aligned,
+                f"target_{arm}_orientation_error_deg": effector.target_orientation_error_deg,
+                f"target_{arm}_grasp_orientation_aligned": effector.grasp_orientation_aligned,
                 f"target_{arm}_contact": effector.target_contact,
                 f"held_by_{arm}": effector.target_held,
             })
@@ -237,6 +277,14 @@ def extract_simulator_evidence(context: "LiveGraphContext") -> SimulatorEvidence
             if effector_pose is not None and np.isfinite(target_height_center)
             else np.nan
         )
+        effector_quat = (
+            effector_pose[3:7]
+            if effector_pose is not None and effector_pose.shape[0] >= 7
+            else None
+        )
+        orientation_error = _min_orientation_error_deg(
+            effector_quat, context.target_grasp_orientations_wxyz
+        )
         effectors[arm] = EffectorEvidence(
             tcp_position_world=(
                 tuple(float(value) for value in effector_pose[:3])
@@ -250,6 +298,11 @@ def extract_simulator_evidence(context: "LiveGraphContext") -> SimulatorEvidence
             grasp_height_aligned=bool(
                 np.isfinite(vertical_offset)
                 and abs(vertical_offset) <= target_height_half_width
+            ),
+            target_orientation_error_deg=orientation_error,
+            grasp_orientation_aligned=bool(
+                not np.isfinite(orientation_error)
+                or orientation_error <= GRASP_ORIENTATION_MAX_ERROR_DEG
             ),
             target_contact=bool(
                 target_index is not None
@@ -275,6 +328,7 @@ def extract_simulator_evidence(context: "LiveGraphContext") -> SimulatorEvidence
     close_arms = [
         arm for arm in finite_arms
         if effectors[arm].grasp_height_aligned
+        and effectors[arm].grasp_orientation_aligned
         and effectors[arm].target_distance_m <= GRASP_CLOSE_MAX_DISTANCE_M
     ]
     vicinity_arms = [

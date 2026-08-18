@@ -1,3 +1,4 @@
+import math
 from pathlib import Path
 
 import h5py
@@ -37,6 +38,19 @@ from experiments.graph_conditioned_pi05.simulator_evidence import (
     extract_simulator_evidence,
 )
 from experiments.graph_conditioned_pi05.validate_alignment import FRAME_ALIGNED_PATHS, validate_episode
+
+
+def _nan_safe_equal(a, b) -> bool:
+    """Dict equality that treats NaN == NaN as equal (unlike plain ``==``)."""
+    if a.keys() != b.keys():
+        return False
+    for key, value in a.items():
+        other = b[key]
+        if isinstance(value, float) and isinstance(other, float) and value != value and other != other:
+            continue
+        if value != other:
+            return False
+    return True
 
 
 def _dataset(root, path, value):
@@ -370,7 +384,7 @@ def test_shared_live_context_has_value_parity_and_one_catalog_parse(tmp_path):
     assert task.catalog_reads == 1
     assert shared_control == independent_control
     assert shared_live == independent_live
-    assert shared_diagnostics == independent_diagnostics
+    assert _nan_safe_equal(shared_diagnostics, independent_diagnostics)
     assert evidence.held_arm == "left"
     assert evidence.left.target_held and evidence.left.target_contact
     assert evidence.left.grasp_height_aligned
@@ -434,6 +448,83 @@ def test_shared_live_context_has_value_parity_and_one_catalog_parse(tmp_path):
     assert not close_evidence.left.target_contact
     assert close_evidence.left.grasp_height_aligned
     assert close_evidence.grasp_close_immediate
+
+
+class _FakeGraspActor:
+    """Minimal stand-in for the sim's wrapped ``Actor`` grasp-geometry API."""
+
+    def __init__(self, name: str, contact_quats_wxyz):
+        self._name = name
+        self._contact_quats = list(contact_quats_wxyz)
+
+    def get_name(self):
+        return self._name
+
+    def iter_contact_points(self, ret="list"):
+        for index, quat in enumerate(self._contact_quats):
+            yield index, [0.0, 0.0, 0.0, *quat]
+
+
+def test_grasp_orientation_gate_uses_annotated_contact_pose(tmp_path):
+    """CLOSE requires the effector's orientation to match an annotated grasp
+    contact point -- not a fixed world-frame assumption -- and must fail open
+    (never block CLOSE) when no such annotation can be resolved."""
+
+    class Task:
+        def __init__(self, catalog):
+            self.catalog = catalog
+            self.target = _FakeGraspActor("target", [(1.0, 0.0, 0.0, 0.0)])
+
+        def get_instruction(self):
+            return "put target in box"
+
+        def get_role_names(self):
+            return {"target_id": 10, "destination_id": 20}
+
+        def _get_benchmark_object_catalog(self):
+            return self.catalog
+
+    with _graph_file(tmp_path / "graph.hdf5") as root:
+        catalog, state, object_state = _live_inputs(root)
+    state["held_by"] = np.zeros((5, 2), dtype=bool)
+    state["held_by_valid"] = np.ones((5, 2), dtype=bool)
+    state["in"] = np.zeros((5, 5), dtype=bool)
+    state["containment_valid"] = np.ones((5, 5), dtype=bool)
+    state["raw_contact"] = np.zeros((5, 5), dtype=bool)
+    # Same close-ready position as the CLOSE case above: height-aligned,
+    # within the close distance, no contact yet.
+    object_state["pose_world"][3, :3] = [0.16, 0.20, 0.34]
+    observation = {
+        "benchmark_support": {"relation_state": state, "object_state": object_state},
+    }
+    contract = RetrievalContract()
+
+    task = Task(catalog)
+    aligned_context = build_live_graph_context(task, observation, contract)
+    aligned_evidence = extract_simulator_evidence(aligned_context)
+    assert aligned_evidence.grasp_substage is GraspSubstage.CLOSE
+    assert aligned_evidence.left.grasp_orientation_aligned
+    assert aligned_evidence.left.target_orientation_error_deg == 0.0
+
+    # A contact point annotated 90 degrees away from the effector's actual
+    # orientation must block CLOSE even though position/height still qualify.
+    task.target = _FakeGraspActor(
+        "target", [(0.70710678, 0.70710678, 0.0, 0.0)]
+    )
+    misaligned_context = build_live_graph_context(task, observation, contract)
+    misaligned_evidence = extract_simulator_evidence(misaligned_context)
+    assert not misaligned_evidence.left.grasp_orientation_aligned
+    assert misaligned_evidence.left.target_orientation_error_deg > 80.0
+    assert misaligned_evidence.grasp_substage is GraspSubstage.MOVE_CLOSER
+
+    # No resolvable actor/annotation: fails open, identical to pre-existing
+    # behavior for objects without annotated grasp geometry.
+    del task.target
+    unresolved_context = build_live_graph_context(task, observation, contract)
+    unresolved_evidence = extract_simulator_evidence(unresolved_context)
+    assert unresolved_evidence.left.grasp_orientation_aligned
+    assert math.isnan(unresolved_evidence.left.target_orientation_error_deg)
+    assert unresolved_evidence.grasp_substage is GraspSubstage.CLOSE
 
 
 def test_prepare_instruction_preserves_visual_only_and_fits_graph(tmp_path):
@@ -774,13 +865,15 @@ def main():
     with TemporaryDirectory() as directory:
         test_shared_live_context_has_value_parity_and_one_catalog_parse(Path(directory))
     with TemporaryDirectory() as directory:
+        test_grasp_orientation_gate_uses_annotated_contact_pose(Path(directory))
+    with TemporaryDirectory() as directory:
         test_prepare_instruction_preserves_visual_only_and_fits_graph(Path(directory))
     with TemporaryDirectory() as directory:
         test_grasp_hint_selects_only_a_valid_uniquely_clear_gripper(Path(directory))
     test_transport_gripper_latch_changes_only_the_active_channel()
     with TemporaryDirectory() as directory:
         test_alignment_mismatch_fails(Path(directory))
-    print("19 graph-context checks passed")
+    print("20 graph-context checks passed")
 
 
 if __name__ == "__main__":
