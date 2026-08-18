@@ -251,6 +251,18 @@ def _min_orientation_error_deg(
 @dataclass(frozen=True)
 class EffectorEvidence:
     tcp_position_world: tuple[float, float, float] | None = None
+    # Known reference mismatch, not yet corrected: this is
+    # norm(target_object_pose - TCP_pose) -- distance to the object's own
+    # pose/center -- while target_vertical_offset_m below is measured
+    # against the annotated grasp-pose candidates (contact point + 12cm
+    # standoff + rotate_lim arc, see expand_grasp_pose_family), not the
+    # object center. A grasp point can sit well off-center (e.g. a tall or
+    # asymmetric object), so "close by this distance" and "aligned by that
+    # height" are not guaranteed to describe the same physical point.
+    # Unifying both around one grasp-pose reference (3D vector to the
+    # nearest candidate, decomposed into vertical/horizontal/3D error)
+    # would be more coherent, but is deliberately deferred to a later
+    # treatment rather than folded into the height-reference fix above.
     target_distance_m: float = np.nan
     target_vertical_offset_m: float = np.nan
     grasp_height_aligned: bool = False
@@ -512,6 +524,9 @@ def extract_simulator_evidence(context: "LiveGraphContext") -> SimulatorEvidence
                 tuple(float(value) for value in effector_pose[:3])
                 if effector_pose is not None else None
             ),
+            # Object-center reference (see the EffectorEvidence.target_distance_m
+            # comment for why this is inconsistent with vertical_offset's
+            # grasp-pose reference below).
             target_distance_m=(
                 float(np.linalg.norm(target_pose[:3] - effector_pose[:3]))
                 if target_pose is not None and effector_pose is not None else np.nan
