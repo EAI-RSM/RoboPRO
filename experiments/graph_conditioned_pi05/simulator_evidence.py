@@ -328,7 +328,14 @@ def extract_simulator_evidence(context: "LiveGraphContext") -> SimulatorEvidence
     close_arms = [
         arm for arm in finite_arms
         if effectors[arm].grasp_height_aligned
-        and effectors[arm].grasp_orientation_aligned
+        # Orientation is diagnostics-only for now: recorded on every
+        # EffectorEvidence and exported to the trace, but deliberately not
+        # gating CLOSE yet. There is no corrective instruction for a
+        # misaligned orientation (no ROTATE_FOR_GRASP substage), and the
+        # existing fallback substages (move_closer/align) give actively
+        # wrong advice for an orientation-only defect -- gating on it before
+        # a real batch confirms it predicts outcomes risks trading a known
+        # failure mode for an unvalidated, possibly worse one.
         and effectors[arm].target_distance_m <= GRASP_CLOSE_MAX_DISTANCE_M
     ]
     vicinity_arms = [

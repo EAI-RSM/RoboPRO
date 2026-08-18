@@ -481,9 +481,11 @@ class _FakeGraspActor:
 
 
 def test_grasp_orientation_gate_uses_annotated_contact_pose(tmp_path):
-    """CLOSE requires the effector's orientation to match an annotated grasp
-    contact point -- not a fixed world-frame assumption -- and must fail open
-    (never block CLOSE) when no such annotation can be resolved."""
+    """Orientation error is measured against an annotated grasp contact
+    point -- not a fixed world-frame assumption -- but is diagnostics-only
+    for now: it must never block CLOSE, aligned or not, until a real batch
+    confirms it predicts outcomes and a corrective instruction exists for a
+    misaligned orientation."""
 
     class Task:
         def __init__(self, catalog):
@@ -522,7 +524,10 @@ def test_grasp_orientation_gate_uses_annotated_contact_pose(tmp_path):
     assert aligned_evidence.left.target_orientation_error_deg == 0.0
 
     # A contact point annotated 90 degrees away from the effector's actual
-    # orientation must block CLOSE even though position/height still qualify.
+    # orientation is recorded as misaligned, but must NOT block CLOSE --
+    # diagnostics-only, no gating -- since there is no corrective instruction
+    # for a misaligned orientation and the fallback substages (move_closer)
+    # give actively wrong advice for an orientation-only defect.
     task.target = _FakeGraspActor(
         "target", [(0.70710678, 0.70710678, 0.0, 0.0)]
     )
@@ -530,7 +535,7 @@ def test_grasp_orientation_gate_uses_annotated_contact_pose(tmp_path):
     misaligned_evidence = extract_simulator_evidence(misaligned_context)
     assert not misaligned_evidence.left.grasp_orientation_aligned
     assert misaligned_evidence.left.target_orientation_error_deg > 80.0
-    assert misaligned_evidence.grasp_substage is GraspSubstage.MOVE_CLOSER
+    assert misaligned_evidence.grasp_substage is GraspSubstage.CLOSE
 
     # No resolvable actor/annotation: fails open, identical to pre-existing
     # behavior for objects without annotated grasp geometry.
