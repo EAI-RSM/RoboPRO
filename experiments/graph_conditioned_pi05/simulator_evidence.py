@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
+import transforms3d as t3d
 
 from .graph_replanning import ActionGraphState, Evidence, GraspSubstage
 
@@ -22,6 +23,11 @@ GRASP_HEIGHT_BAND_HALF_WIDTH_M = 0.02
 # Generic parallel-jaw tolerance, not fit to any single episode: this is a
 # starting point pending real-batch validation, not a calibrated value.
 GRASP_ORIENTATION_MAX_ERROR_DEG = 20.0
+# How finely to sample each arm's rotate_lim arc (see
+# _expand_grasp_orientation_family). Cheap either way -- this and the x2 from
+# the 180-degree flip only multiply the (tiny) per-contact-point reference
+# count, not anything per-frame-expensive.
+GRASP_ORIENTATION_ARC_SAMPLES = 11
 
 
 def _aggregate(values: np.ndarray, valid: np.ndarray) -> Evidence:
@@ -46,11 +52,86 @@ def _quaternion_angle_deg(a: np.ndarray, b: np.ndarray) -> float:
     return float(np.degrees(2.0 * np.arccos(cos_half_angle)))
 
 
+def _rotate_quat_about_own_local_axis(
+    quat_wxyz: tuple[float, float, float, float], local_axis, angle_rad: float
+) -> tuple[float, float, float, float]:
+    """Rotate a wxyz quaternion by ``angle_rad`` about ITS OWN local axis.
+
+    Matches ``rotate_along_axis(..., axis_type="target")`` in
+    customized_robotwin/envs/utils/transforms.py: the axis is expressed in
+    the orientation's own frame, converted to world frame, and the rotation
+    is composed on the left (i.e. this is a world-frame rotation of the
+    orientation about an axis attached to that same orientation).
+    """
+    rotation = t3d.quaternions.quat2mat(np.asarray(quat_wxyz, dtype=np.float64))
+    world_axis = rotation @ np.asarray(local_axis, dtype=np.float64)
+    delta = t3d.axangles.axangle2mat(world_axis, float(angle_rad))
+    new_rotation = delta @ rotation
+    return tuple(float(value) for value in t3d.quaternions.mat2quat(new_rotation))
+
+
+def _expand_grasp_orientation_family(
+    seed_quat_wxyz: tuple[float, float, float, float],
+    rotate_lim_rad: tuple[float, float],
+) -> tuple[tuple[float, float, float, float], ...]:
+    """Every orientation RoboTwin would treat as equally valid for this seed.
+
+    Reproduces two symmetries of RoboTwin's own grasp-pose search
+    (customized_robotwin/envs/robot/robot.py: create_target_pose_list) and
+    of the aloha-agilex parallel-jaw gripper's own geometry -- NOT just the
+    one seed orientation this module derives from an annotated contact
+    point:
+
+    - A ``rotate_lim``-radian arc about the seed's own local Y (jaw-closing)
+      axis. ``create_target_pose_list`` searches exactly this per-arm arc
+      (read live from the embodiment config, not hardcoded) for a reachable
+      grasp pose, so any orientation within it is just as valid an
+      annotated grasp as the seed itself.
+    - A 180-degree flip about the seed's own local X (approach) axis. The
+      gripper's two fingers are geometrically symmetric, so swapping which
+      finger ends up on which side is mechanically the same grasp.
+
+    Deliberately NOT reproduced: create_target_pose_list's position-
+    dependent ``towards`` sign disambiguation, which can flip which half of
+    the raw ``rotate_lim`` interval is actually explored for a given
+    contact point/object-center geometry. That depends on per-candidate
+    position data this module doesn't have without re-deriving position-
+    dependent logic that hasn't been checked against a live run -- an
+    acknowledged gap, not a silent assumption. If live smoke-test data ever
+    shows a known-good grasp reading a large error, this is the first place
+    to look.
+    """
+    lower, upper = float(rotate_lim_rad[0]), float(rotate_lim_rad[1])
+    if lower > upper:
+        lower, upper = upper, lower
+    thetas = (
+        np.linspace(lower, upper, GRASP_ORIENTATION_ARC_SAMPLES)
+        if upper > lower
+        else np.array([lower])
+    )
+    seeds = (
+        seed_quat_wxyz,
+        _rotate_quat_about_own_local_axis(seed_quat_wxyz, (1.0, 0.0, 0.0), np.pi),
+    )
+    return tuple(
+        _rotate_quat_about_own_local_axis(seed, (0.0, 1.0, 0.0), float(theta))
+        for seed in seeds
+        for theta in thetas
+    )
+
+
 def _min_orientation_error_deg(
     effector_quat: np.ndarray | None,
     reference_quats: tuple[tuple[float, float, float, float], ...],
+    rotate_lim_rad: tuple[float, float] = (0.0, 0.0),
 ) -> float:
     """Smallest angular error to any annotated valid grasp orientation.
+
+    Each reference is expanded into its full symmetry family (see
+    ``_expand_grasp_orientation_family``) before comparison, so a mechanically
+    equivalent orientation -- elsewhere in the jaw-axis arc, or the
+    180-degree-flipped grip -- doesn't read as a large error just because it
+    isn't a bit-for-bit match of one arbitrary annotated point.
 
     Returns NaN (not a large number) when no reference is available, so
     callers can distinguish "no annotation to check against" from "checked
@@ -59,7 +140,11 @@ def _min_orientation_error_deg(
     """
     if effector_quat is None or not reference_quats:
         return float("nan")
-    errors = [_quaternion_angle_deg(effector_quat, ref) for ref in reference_quats]
+    errors = [
+        _quaternion_angle_deg(effector_quat, candidate)
+        for reference in reference_quats
+        for candidate in _expand_grasp_orientation_family(reference, rotate_lim_rad)
+    ]
     errors = [error for error in errors if np.isfinite(error)]
     return float(min(errors)) if errors else float("nan")
 
@@ -283,7 +368,9 @@ def extract_simulator_evidence(context: "LiveGraphContext") -> SimulatorEvidence
             else None
         )
         orientation_error = _min_orientation_error_deg(
-            effector_quat, context.target_grasp_orientations_wxyz
+            effector_quat,
+            context.target_grasp_orientations_wxyz,
+            context.effector_rotate_lim_rad.get(arm, (0.0, 0.0)),
         )
         effectors[arm] = EffectorEvidence(
             tcp_position_world=(

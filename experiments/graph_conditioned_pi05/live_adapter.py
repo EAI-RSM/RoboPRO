@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 import re
 from typing import Any, Iterable
 
@@ -166,6 +166,13 @@ class LiveGraphContext:
     index_by_id: dict[int, int]
     contract: RetrievalContract
     target_grasp_orientations_wxyz: tuple[tuple[float, float, float, float], ...] = ()
+    # RoboTwin's own per-arm jaw-axis rotation tolerance (radians), read live
+    # from the embodiment config via task_env.robot -- not hardcoded, so this
+    # stays correct for embodiments/tasks other than aloha-agilex. Defaults
+    # to no tolerance (a single point, not an arc) when unavailable.
+    effector_rotate_lim_rad: dict[str, tuple[float, float]] = field(
+        default_factory=lambda: {"left": (0.0, 0.0), "right": (0.0, 0.0)}
+    )
 
 
 def task_goal_from_env(task_env: Any, catalog: Iterable[dict[str, Any]]) -> TaskGoal:
@@ -231,7 +238,29 @@ def build_live_graph_context(
         target_grasp_orientations_wxyz=target_grasp_contact_orientations_wxyz(
             task_env, target_name
         ),
+        effector_rotate_lim_rad=_effector_rotate_lim_rad(task_env),
     )
+
+
+def _effector_rotate_lim_rad(task_env: Any) -> dict[str, tuple[float, float]]:
+    """Per-arm jaw-axis rotation tolerance, read live from the robot object.
+
+    ``Robot.__init__`` (customized_robotwin/envs/robot/robot.py) sets
+    ``left_rotate_lim``/``right_rotate_lim`` from the embodiment config
+    (``rotate_lim`` in e.g. benchmark/assets/embodiments/*/config.yml),
+    defaulting to ``[0, 0]`` -- no arc -- when unconfigured. Read live rather
+    than hardcoded so this stays correct for embodiments/tasks other than
+    the one this experiment happens to run.
+    """
+    robot = getattr(task_env, "robot", None)
+    result = {}
+    for arm in ("left", "right"):
+        limits = getattr(robot, f"{arm}_rotate_lim", None) if robot is not None else None
+        if limits is not None and len(limits) == 2 and all(np.isfinite(limits)):
+            result[arm] = (float(limits[0]), float(limits[1]))
+        else:
+            result[arm] = (0.0, 0.0)
+    return result
 
 
 def action_graph_state(

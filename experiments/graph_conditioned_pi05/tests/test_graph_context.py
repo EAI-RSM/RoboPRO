@@ -38,6 +38,7 @@ from experiments.graph_conditioned_pi05.live_adapter import (
 )
 from experiments.graph_conditioned_pi05.simulator_evidence import (
     extract_simulator_evidence,
+    _rotate_quat_about_own_local_axis,
 )
 from experiments.graph_conditioned_pi05.validate_alignment import FRAME_ALIGNED_PATHS, validate_episode
 
@@ -547,6 +548,80 @@ def test_grasp_orientation_gate_uses_annotated_contact_pose(tmp_path):
     assert unresolved_evidence.grasp_substage is GraspSubstage.CLOSE
 
 
+def test_grasp_orientation_error_covers_rotate_lim_arc_and_finger_swap_symmetry(tmp_path):
+    """A grasp orientation elsewhere in the embodiment's rotate_lim arc, or
+    the 180-degree finger-swap flip, must not read as misaligned -- both
+    are orientations RoboTwin's own grasp-pose search treats as equally
+    valid, not just the single annotated seed orientation."""
+
+    class Robot:
+        left_rotate_lim = [0.0, 1.0]
+        right_rotate_lim = [0.0, 1.0]
+
+    class Task:
+        def __init__(self, catalog):
+            self.catalog = catalog
+            self.target = _FakeGraspActor("target", [(1.0, 0.0, 0.0, 0.0)])
+            self.robot = Robot()
+
+        def get_instruction(self):
+            return "put target in box"
+
+        def get_role_names(self):
+            return {"target_id": 10, "destination_id": 20}
+
+        def _get_benchmark_object_catalog(self):
+            return self.catalog
+
+    with _graph_file(tmp_path / "graph.hdf5") as root:
+        catalog, state, object_state = _live_inputs(root)
+    state["held_by"] = np.zeros((5, 2), dtype=bool)
+    state["held_by_valid"] = np.ones((5, 2), dtype=bool)
+    state["in"] = np.zeros((5, 5), dtype=bool)
+    state["containment_valid"] = np.ones((5, 5), dtype=bool)
+    state["raw_contact"] = np.zeros((5, 5), dtype=bool)
+    object_state["pose_world"][3, :3] = [0.16, 0.20, 0.34]
+    # 0.6 rad about the effector's own local Y (jaw-closing) axis: inside
+    # the 0-1 rad rotate_lim arc, so a different-but-equally-valid grasp
+    # orientation, not a bit-for-bit match of the annotated seed.
+    within_arc_quat = _rotate_quat_about_own_local_axis(
+        (1.0, 0.0, 0.0, 0.0), (0.0, 1.0, 0.0), 0.6
+    )
+    object_state["pose_world"][3, 3:7] = within_arc_quat
+    observation = {
+        "benchmark_support": {"relation_state": state, "object_state": object_state},
+    }
+    contract = RetrievalContract()
+    task = Task(catalog)
+
+    within_arc_context = build_live_graph_context(task, observation, contract)
+    within_arc_evidence = extract_simulator_evidence(within_arc_context)
+    assert within_arc_evidence.left.grasp_orientation_aligned
+    assert within_arc_evidence.left.target_orientation_error_deg < 1.0
+
+    # 180 degrees about the local X (approach) axis: the finger-swap flip.
+    flipped_quat = _rotate_quat_about_own_local_axis(
+        (1.0, 0.0, 0.0, 0.0), (1.0, 0.0, 0.0), math.pi
+    )
+    object_state["pose_world"][3, 3:7] = flipped_quat
+    flipped_context = build_live_graph_context(task, observation, contract)
+    flipped_evidence = extract_simulator_evidence(flipped_context)
+    assert flipped_evidence.left.grasp_orientation_aligned
+    assert flipped_evidence.left.target_orientation_error_deg < 1.0
+
+    # A rotation about an unrelated axis (not the jaw axis, not the
+    # approach-axis flip) is still correctly read as misaligned -- the
+    # symmetry family is specific, not a free pass on any orientation.
+    unrelated_quat = _rotate_quat_about_own_local_axis(
+        (1.0, 0.0, 0.0, 0.0), (0.0, 0.0, 1.0), math.pi / 2
+    )
+    object_state["pose_world"][3, 3:7] = unrelated_quat
+    unrelated_context = build_live_graph_context(task, observation, contract)
+    unrelated_evidence = extract_simulator_evidence(unrelated_context)
+    assert not unrelated_evidence.left.grasp_orientation_aligned
+    assert unrelated_evidence.left.target_orientation_error_deg > 80.0
+
+
 def test_prepare_instruction_preserves_visual_only_and_fits_graph(tmp_path):
     class Task:
         def __init__(self, catalog):
@@ -887,13 +962,15 @@ def main():
     with TemporaryDirectory() as directory:
         test_grasp_orientation_gate_uses_annotated_contact_pose(Path(directory))
     with TemporaryDirectory() as directory:
+        test_grasp_orientation_error_covers_rotate_lim_arc_and_finger_swap_symmetry(Path(directory))
+    with TemporaryDirectory() as directory:
         test_prepare_instruction_preserves_visual_only_and_fits_graph(Path(directory))
     with TemporaryDirectory() as directory:
         test_grasp_hint_selects_only_a_valid_uniquely_clear_gripper(Path(directory))
     test_transport_gripper_latch_changes_only_the_active_channel()
     with TemporaryDirectory() as directory:
         test_alignment_mismatch_fails(Path(directory))
-    print("20 graph-context checks passed")
+    print("21 graph-context checks passed")
 
 
 if __name__ == "__main__":
