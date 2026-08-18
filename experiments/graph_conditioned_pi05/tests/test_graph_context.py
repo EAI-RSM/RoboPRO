@@ -540,16 +540,18 @@ def test_grasp_orientation_gate_uses_annotated_contact_pose(tmp_path):
     assert misaligned_evidence.left.target_orientation_error_deg > 80.0
     assert misaligned_evidence.grasp_substage is GraspSubstage.CLOSE
 
-    # No resolvable actor/annotation: fails open, identical to pre-existing
-    # behavior for objects without annotated grasp geometry -- but the
-    # status must say WHY, not just that the tuple came back empty.
+    # No resolvable actor: fails open, identical to pre-existing behavior
+    # for objects without annotated grasp geometry -- but the status must
+    # say it's an actor-resolution failure, not "no annotation," since we
+    # don't actually know the object lacks one, only that we couldn't find
+    # its wrapped Actor.
     del task.target
     unresolved_context = build_live_graph_context(task, observation, contract)
     unresolved_evidence = extract_simulator_evidence(unresolved_context)
     assert unresolved_evidence.left.grasp_orientation_aligned
     assert math.isnan(unresolved_evidence.left.target_orientation_error_deg)
     assert unresolved_evidence.grasp_substage is GraspSubstage.CLOSE
-    assert unresolved_evidence.orientation_reference_status == "annotation_missing"
+    assert unresolved_evidence.orientation_reference_status == "actor_unresolved"
     assert unresolved_evidence.orientation_reference_count == 0
 
 
@@ -688,11 +690,17 @@ def test_grasp_orientation_error_is_genuinely_arm_specific(tmp_path):
 
 def test_orientation_reference_status_distinguishes_failure_modes(tmp_path):
     """An empty reference tuple must not be the only signal available: a
-    genuinely un-annotated object, a target the goal couldn't resolve to a
-    single id, a bug raised while iterating contact points, and an actor
-    whose contact points are all malformed must all read as different
-    statuses -- otherwise a smoke test could silently collect nothing but
-    NaNs for an entire batch and look identical to "nothing to check"."""
+    goal that couldn't resolve to a single target id, a resolved target
+    whose wrapped Actor can't be found at all, a genuinely un-annotated
+    (but resolved) actor, a bug raised while iterating contact points, and
+    an actor whose contact points are all malformed must all read as
+    different statuses -- otherwise a smoke test could silently collect
+    nothing but NaNs for an entire batch and look identical to "nothing to
+    check." In particular, actor-resolution failure must NOT be mislabeled
+    as "no annotation": we don't know the object lacks one, only that we
+    couldn't find its wrapped Actor -- possibly because of a bug in the
+    lookup itself, which is exactly the class of failure this status field
+    exists to surface."""
 
     class ExtractionErrorActor:
         def get_name(self):
@@ -745,6 +753,15 @@ def test_orientation_reference_status_distinguishes_failure_modes(tmp_path):
     multi_target_context = build_live_graph_context(multi_target_task, observation, contract)
     assert multi_target_context.orientation_reference_status == "target_unresolved"
     assert multi_target_context.orientation_reference_count == 0
+
+    # actor_unresolved: the target name resolves fine, but no object in
+    # task_env matches it via _resolve_wrapped_actor -- distinct from
+    # "no annotation," since this could just as easily be a bug in the
+    # lookup itself as a genuine absence.
+    no_actor_task = Task(catalog, target=None, multi_target=False)
+    no_actor_context = build_live_graph_context(no_actor_task, observation, contract)
+    assert no_actor_context.orientation_reference_status == "actor_unresolved"
+    assert no_actor_context.orientation_reference_count == 0
 
     # extraction_error: the actor resolves, but iterating its contact points
     # raises -- a bug/incompatibility, not "no annotation."

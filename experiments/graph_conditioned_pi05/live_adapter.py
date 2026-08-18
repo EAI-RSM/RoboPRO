@@ -115,7 +115,15 @@ class OrientationReferenceStatus(str, Enum):
     """
 
     AVAILABLE = "available"
+    # The goal itself didn't resolve to exactly one target id (task_goal_from_env
+    # / get_role_names) -- a target name was never even looked up.
     TARGET_UNRESOLVED = "target_unresolved"
+    # The target's name resolved, but _resolve_wrapped_actor couldn't find its
+    # wrapped Actor object at all. Distinct from ANNOTATION_MISSING: this
+    # points at actor-lookup/resolution logic, not at the object's own
+    # (possibly genuinely absent) annotation.
+    ACTOR_UNRESOLVED = "actor_unresolved"
+    # The actor resolved, but has zero annotated contact points.
     ANNOTATION_MISSING = "annotation_missing"
     ANNOTATION_INVALID = "annotation_invalid"
     EXTRACTION_ERROR = "extraction_error"
@@ -140,13 +148,13 @@ def target_grasp_contact_orientations_wxyz(
     != AVAILABLE) means "no reference available" and callers must treat
     that as such, not as "misaligned" -- but which status it is matters for
     diagnosing whether that's expected (ANNOTATION_MISSING) or a bug
-    (EXTRACTION_ERROR).
+    (ACTOR_UNRESOLVED/EXTRACTION_ERROR).
     """
     if not target_name:
         return OrientationReference((), OrientationReferenceStatus.TARGET_UNRESOLVED)
     actor = _resolve_wrapped_actor(task_env, target_name)
     if actor is None:
-        return OrientationReference((), OrientationReferenceStatus.ANNOTATION_MISSING)
+        return OrientationReference((), OrientationReferenceStatus.ACTOR_UNRESOLVED)
     try:
         contact_points = list(actor.iter_contact_points("matrix"))
     except Exception:
