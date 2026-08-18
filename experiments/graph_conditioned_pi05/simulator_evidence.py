@@ -19,18 +19,22 @@ EFFECTOR_IDS = {"left": -2, "right": -3}
 GRASP_ALIGNMENT_DISTANCE_M = 0.12
 GRASP_CLOSE_PREFERRED_DISTANCE_M = 0.08
 GRASP_CLOSE_MAX_DISTANCE_M = 0.10
-# Symmetric tolerance around the grasp-height reference. When an annotated
-# grasp pose is available (context.left/right_reference_grasp_heights_m),
-# the reference is that pose's actual world height -- not the object's
-# AABB top surface,
-# which for a tall object can sit several cm from the real grasp point,
-# needing a large systematic margin just to compensate for that mismatch.
-# With the real reference, this tolerance mostly needs to absorb policy
-# jitter and geometric imprecision (observed on the order of 1-4mm), not a
-# structural offset -- 3cm is a reasonable starting point given that, not
-# an empirically tuned value; widen/narrow based on real-batch data once
-# available. Falls back to the old AABB-top-based reference (and this same
-# tolerance) when no annotation is available, unchanged from before.
+# Symmetric tolerance around the grasp-position reference. When an annotated
+# grasp pose is available (context.left/right_reference_grasp_positions_m),
+# the reference is that pose's actual world position -- not the object's
+# AABB top surface, which for a tall object can sit several cm from the
+# real grasp point, needing a large systematic margin just to compensate
+# for that mismatch. With the real reference, this tolerance mostly needs
+# to absorb policy jitter and geometric imprecision (observed on the order
+# of 1-4mm), not a structural offset -- 3cm is a reasonable starting point
+# given that, not an empirically tuned value; widen/narrow based on
+# real-batch data once available. Falls back to the object's own (x, y)
+# with the old AABB-top-preferring z (and this same tolerance) when no
+# annotation is available -- height's fallback is unchanged from before;
+# distance/horizontal-offset's fallback now shares that same point too
+# (previously distance fell back to the raw pose center even when height's
+# fallback preferred the AABB top, a second, narrower instance of the
+# reference-mismatch this file's distance/vertical-offset fix addresses).
 GRASP_HEIGHT_BAND_HALF_WIDTH_M = 0.03
 # Generic parallel-jaw tolerance, not fit to any single episode: this is a
 # starting point pending real-batch validation, not a calibrated value.
@@ -281,20 +285,22 @@ def _min_orientation_error_deg(
 @dataclass(frozen=True)
 class EffectorEvidence:
     tcp_position_world: tuple[float, float, float] | None = None
-    # Known reference mismatch, not yet corrected: this is
-    # norm(target_object_pose - TCP_pose) -- distance to the object's own
-    # pose/center -- while target_vertical_offset_m below is measured
-    # against the annotated grasp-pose candidates (contact point + 12cm
-    # standoff + rotate_lim arc, see expand_grasp_pose_family), not the
-    # object center. A grasp point can sit well off-center (e.g. a tall or
-    # asymmetric object), so "close by this distance" and "aligned by that
-    # height" are not guaranteed to describe the same physical point.
-    # Unifying both around one grasp-pose reference (3D vector to the
-    # nearest candidate, decomposed into vertical/horizontal/3D error)
-    # would be more coherent, but is deliberately deferred to a later
-    # treatment rather than folded into the height-reference fix above.
+    # target_distance_m and target_vertical_offset_m are now measured
+    # against the SAME reference point: whichever candidate in this arm's
+    # expanded grasp-pose family (or the AABB/pose fallback, if no
+    # annotation is available) is nearest to the TCP in full 3D. Before
+    # this fix, distance was measured to the object's own pose/center while
+    # vertical offset was measured to the annotated grasp-pose candidates
+    # independently -- for an object whose grasp point sits well off-center,
+    # that let a fully height- and orientation-aligned TCP still read as
+    # "not close enough" against an unrelated reference (confirmed in a
+    # live batch: seed 40002 stalled at 10.36cm object-center distance while
+    # height/orientation were aligned for 300+ frames). target_horizontal_offset_m
+    # is the same nearest candidate's horizontal (x/y) component, exported
+    # for diagnostics -- nothing currently gates on it.
     target_distance_m: float = np.nan
     target_vertical_offset_m: float = np.nan
+    target_horizontal_offset_m: float = np.nan
     grasp_height_aligned: bool = False
     target_orientation_error_deg: float = np.nan
     # Fails open (True) when no reference orientation is available, so
@@ -393,6 +399,7 @@ class SimulatorEvidence:
                 f"{arm}_tcp_position_world": effector.tcp_position_world,
                 f"target_{arm}_distance": effector.target_distance_m,
                 f"target_{arm}_vertical_offset": effector.target_vertical_offset_m,
+                f"target_{arm}_horizontal_offset": effector.target_horizontal_offset_m,
                 f"target_{arm}_grasp_height_aligned": effector.grasp_height_aligned,
                 f"target_{arm}_orientation_error_deg": effector.target_orientation_error_deg,
                 f"target_{arm}_grasp_orientation_aligned": effector.grasp_orientation_aligned,
@@ -504,39 +511,65 @@ def extract_simulator_evidence(context: "LiveGraphContext") -> SimulatorEvidence
         float(target_pose[2]) if target_pose is not None else np.nan
     )
     target_height_half_width = GRASP_HEIGHT_BAND_HALF_WIDTH_M
-    aabb_fallback_heights_m = (
-        (target_height_center,) if np.isfinite(target_height_center) else ()
+    # Fallback candidate when no annotated grasp-pose family is available:
+    # the object's own (x, y), with z preferring the AABB top over the pose
+    # center -- exactly the old height-only fallback's z, but now a full
+    # position so distance and vertical offset share this same one point
+    # too, instead of distance silently reverting to a different (pose-only)
+    # reference than height's own fallback.
+    fallback_position_m = (
+        (float(target_pose[0]), float(target_pose[1]), target_height_center)
+        if target_pose is not None and np.isfinite(target_height_center)
+        else None
+    )
+    aabb_fallback_positions_m = (
+        (fallback_position_m,) if fallback_position_m is not None else ()
     )
     effectors = {}
     target_index = context.index_by_id.get(target_id) if target_id is not None else None
     for arm_index, arm in enumerate(("left", "right")):
         effector_index = context.index_by_id.get(EFFECTOR_IDS[arm])
         effector_pose = retriever._poses_world.get(EFFECTOR_IDS[arm])
-        # Prefer this arm's own annotated grasp-height family (rotate_lim,
-        # hence the reachable height range, is arm-specific -- see
-        # expand_grasp_pose_family) over the AABB-top proxy; fall back to
-        # the old reference (unchanged) when no annotation is available,
-        # rather than treating an empty tuple as "aligned anywhere."
-        height_candidates_m = (
-            context.left_reference_grasp_heights_m
+        # Prefer this arm's own annotated grasp-pose family (rotate_lim,
+        # hence the reachable position range, is arm-specific -- see
+        # expand_grasp_pose_family) over the AABB/pose fallback.
+        position_candidates_m = (
+            context.left_reference_grasp_positions_m
             if arm == "left"
-            else context.right_reference_grasp_heights_m
-        ) or aabb_fallback_heights_m
-        # Aligned if within tolerance of ANY candidate grasp height (multiple
-        # annotated contact points, or points along the rotate_lim arc, may
-        # sit at different heights); the correction direction (move
-        # up/down) follows whichever candidate is nearest when none are
-        # within tolerance.
-        height_offsets = (
-            [float(effector_pose[2] - height) for height in height_candidates_m]
+            else context.right_reference_grasp_positions_m
+        ) or aabb_fallback_positions_m
+        # Pick ONE reference candidate -- whichever is nearest in full 3D --
+        # and derive distance, vertical offset, AND horizontal offset from
+        # THAT SAME candidate. Before this fix, distance picked the object's
+        # own pose/center while vertical offset independently picked
+        # whichever candidate's height matched best; for an object whose
+        # annotated grasp point sits well off-center, that let a TCP read as
+        # height- and orientation-aligned while distance (measured to an
+        # unrelated point) never converged -- confirmed in a live batch
+        # (seed 40002: 300+ frames of aligned height/orientation, stalled at
+        # 10.36cm object-center distance, 3.6mm over the close threshold).
+        deltas_m = (
+            [
+                np.asarray(effector_pose[:3], dtype=np.float64)
+                - np.asarray(candidate, dtype=np.float64)
+                for candidate in position_candidates_m
+            ]
             if effector_pose is not None
             else []
         )
+        distances_m = [float(np.linalg.norm(delta)) for delta in deltas_m]
+        nearest_index = int(np.argmin(distances_m)) if distances_m else None
+        target_distance = distances_m[nearest_index] if nearest_index is not None else np.nan
         vertical_offset = (
-            min(height_offsets, key=abs) if height_offsets else np.nan
+            float(deltas_m[nearest_index][2]) if nearest_index is not None else np.nan
         )
-        height_aligned = any(
-            abs(offset) <= target_height_half_width for offset in height_offsets
+        horizontal_offset = (
+            float(np.linalg.norm(deltas_m[nearest_index][:2]))
+            if nearest_index is not None else np.nan
+        )
+        height_aligned = (
+            nearest_index is not None
+            and abs(vertical_offset) <= target_height_half_width
         )
         effector_quat = (
             effector_pose[3:7]
@@ -554,14 +587,9 @@ def extract_simulator_evidence(context: "LiveGraphContext") -> SimulatorEvidence
                 tuple(float(value) for value in effector_pose[:3])
                 if effector_pose is not None else None
             ),
-            # Object-center reference (see the EffectorEvidence.target_distance_m
-            # comment for why this is inconsistent with vertical_offset's
-            # grasp-pose reference below).
-            target_distance_m=(
-                float(np.linalg.norm(target_pose[:3] - effector_pose[:3]))
-                if target_pose is not None and effector_pose is not None else np.nan
-            ),
+            target_distance_m=target_distance,
             target_vertical_offset_m=vertical_offset,
+            target_horizontal_offset_m=horizontal_offset,
             grasp_height_aligned=bool(height_aligned),
             target_orientation_error_deg=orientation_error,
             grasp_orientation_aligned=bool(

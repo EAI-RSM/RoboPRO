@@ -435,7 +435,10 @@ def test_shared_live_context_has_value_parity_and_one_catalog_parse(tmp_path):
     assert vicinity_evidence.grasp_arm == "left"
     assert not vicinity_evidence.grasp_close_immediate
 
-    object_state["pose_world"][3, :3] = [0.17, 0.20, 0.34]
+    # dist=9cm from the fallback candidate (0.1, 0.2, 0.34): inside the 10cm
+    # close ceiling but past the 8cm immediate-close radius, so this needs
+    # persistence rather than an immediate close.
+    object_state["pose_world"][3, :3] = [0.19, 0.20, 0.34]
     tolerated_context = build_live_graph_context(task, observation, contract)
     tolerated_evidence = extract_simulator_evidence(tolerated_context)
     assert tolerated_evidence.grasp_substage is GraspSubstage.CLOSE
@@ -594,11 +597,15 @@ def test_grasp_pose_position_applies_approach_standoff():
 
 
 def test_grasp_height_reference_prefers_annotation_over_aabb_top(tmp_path):
-    """When an annotated grasp pose is available, its actual height must be
+    """When an annotated grasp pose is available, its actual position must be
     the reference CLOSE is gated on -- not the object's AABB top surface --
     and the two must be tested at heights far enough apart that the AABB-top
     reference would give the opposite answer, so this test cannot pass by
-    accident if the annotation were silently ignored."""
+    accident if the annotation were silently ignored. Also confirms distance
+    is measured against this SAME candidate, not the object's own pose/center
+    -- an effector sitting exactly at the annotated grasp point must read as
+    both height-aligned AND at ~zero distance, not "aligned but still far."
+    """
 
     class Task:
         def __init__(self, catalog):
@@ -641,16 +648,99 @@ def test_grasp_height_reference_prefers_annotation_over_aabb_top(tmp_path):
     evidence = extract_simulator_evidence(context)
     # No rotate_lim configured (this fake Task has no .robot), so the arc
     # is a single sample at the seed itself -- two entries (the sample and
-    # its position-neutral 180-degree flip), both at the annotated height.
-    assert context.left_reference_grasp_heights_m == (0.24, 0.24)
+    # its position-neutral 180-degree flip), both at the annotated position.
+    assert len(context.left_reference_grasp_positions_m) == 2
+    assert all(
+        np.allclose(position, (0.16, 0.20, 0.24), atol=1e-6)
+        for position in context.left_reference_grasp_positions_m
+    )
     assert evidence.left.grasp_height_aligned
     assert abs(evidence.left.target_vertical_offset_m) < 1e-6
+    # The effector sits exactly at the annotated grasp point, so distance
+    # (now measured against that same point, not the object's own pose at
+    # (0.1, 0.2, 0.3)) must be ~0 -- not the ~10cm a stale object-center
+    # reference would report despite a perfect grasp-pose alignment.
+    assert evidence.left.target_distance_m < 1e-6
+    assert abs(evidence.left.target_horizontal_offset_m) < 1e-6
+
+
+def test_grasp_distance_uses_grasp_pose_reference_not_object_center(tmp_path):
+    """Regression test for a live-batch failure (seed 40002 in the
+    graph_delta_annotated_grasp_height_reference_v3 evaluation): the
+    annotated grasp point sat ~20cm horizontally from the object's own pose
+    center, so the TCP reached and held a fully height- and
+    orientation-aligned grasp pose for 300+ frames, but the OLD
+    object-center-based target_distance_m plateaued at ~0.20m -- comfortably
+    over GRASP_CLOSE_MAX_DISTANCE_M (0.10) -- so CLOSE never became
+    eligible and the episode stalled. This places the effector exactly at
+    an annotated grasp point 20cm from the object's own pose in x, and
+    checks that CLOSE is reached; a pre-fix implementation using
+    target_pose[:3] as the distance reference would compute ~0.20m here and
+    fail this."""
+
+    class Task:
+        def __init__(self, catalog):
+            self.catalog = catalog
+            # Object's own pose stays at the _live_inputs default (0.1, 0.2,
+            # 0.3); the annotated grasp point sits 20cm away in x -- e.g. a
+            # side contact point on a large or off-center object.
+            self.target = _FakeGraspActor(
+                "target",
+                [(1.0, 0.0, 0.0, 0.0)],
+                grasp_position_world=(0.30, 0.20, 0.30),
+            )
+
+        def get_instruction(self):
+            return "put target in box"
+
+        def get_role_names(self):
+            return {"target_id": 10, "destination_id": 20}
+
+        def _get_benchmark_object_catalog(self):
+            return self.catalog
+
+    with _graph_file(tmp_path / "graph.hdf5") as root:
+        catalog, state, object_state = _live_inputs(root)
+    state["held_by"] = np.zeros((5, 2), dtype=bool)
+    state["held_by_valid"] = np.ones((5, 2), dtype=bool)
+    state["in"] = np.zeros((5, 5), dtype=bool)
+    state["containment_valid"] = np.ones((5, 5), dtype=bool)
+    state["raw_contact"] = np.zeros((5, 5), dtype=bool)
+    state["raw_contact"][0, 3] = state["raw_contact"][3, 0] = True
+    # Left effector exactly at the annotated grasp point -- a physically
+    # ideal grasp -- NOT at the object's own pose (0.1, 0.2, 0.3).
+    object_state["pose_world"][3, :3] = [0.30, 0.20, 0.30]
+    observation = {
+        "benchmark_support": {"relation_state": state, "object_state": object_state},
+    }
+    contract = RetrievalContract()
+    task = Task(catalog)
+
+    context = build_live_graph_context(task, observation, contract)
+    evidence = extract_simulator_evidence(context)
+
+    # The bug this regresses against: an object-center reference would give
+    # norm((0.1, 0.2, 0.3) - (0.30, 0.20, 0.30)) = 0.20m here, well past the
+    # close ceiling, despite the effector already being at the ideal point.
+    stale_object_center_distance = float(
+        np.linalg.norm(np.array([0.1, 0.2, 0.3]) - np.array([0.30, 0.20, 0.30]))
+    )
+    assert stale_object_center_distance > 0.15
+
+    assert evidence.left.target_distance_m < 1e-6
+    assert evidence.left.grasp_height_aligned
+    assert evidence.grasp_substage is GraspSubstage.CLOSE
+    assert evidence.grasp_arm == "left"
 
 
 def test_grasp_height_reference_falls_back_to_aabb_top_without_annotation(tmp_path):
     """Without a resolvable actor, height alignment must behave exactly as
     it did before this feature existed -- the AABB-top reference, same
-    tolerance -- not silently disable the height check."""
+    tolerance -- not silently disable the height check. Distance now shares
+    that same fallback point too (object's own (x, y), AABB-top z), not the
+    raw object pose independently -- so a fully height-aligned effector
+    reports a small, coherent distance instead of one derived from a
+    different z than the height check just confirmed was aligned."""
 
     class Task:
         def __init__(self, catalog):
@@ -683,10 +773,15 @@ def test_grasp_height_reference_falls_back_to_aabb_top_without_annotation(tmp_pa
     context = build_live_graph_context(task, observation, contract)
     evidence = extract_simulator_evidence(context)
     assert context.orientation_reference_status == "actor_unresolved"
-    assert context.left_reference_grasp_heights_m == ()
-    assert context.right_reference_grasp_heights_m == ()
+    assert context.left_reference_grasp_positions_m == ()
+    assert context.right_reference_grasp_positions_m == ()
     assert evidence.left.grasp_height_aligned
     assert abs(evidence.left.target_vertical_offset_m) < 1e-6
+    # Fallback candidate is (target's x, y, AABB-top z) = (0.1, 0.2, 0.34);
+    # effector is (0.16, 0.2, 0.34) -- horizontal offset accounts for all of
+    # the resulting distance, vertical offset for none of it.
+    assert abs(evidence.left.target_distance_m - 0.06) < 1e-6
+    assert abs(evidence.left.target_horizontal_offset_m - 0.06) < 1e-6
 
 
 def test_grasp_orientation_gate_uses_annotated_contact_pose(tmp_path):
@@ -1504,6 +1599,8 @@ def main():
     with TemporaryDirectory() as directory:
         test_grasp_height_reference_prefers_annotation_over_aabb_top(Path(directory))
     with TemporaryDirectory() as directory:
+        test_grasp_distance_uses_grasp_pose_reference_not_object_center(Path(directory))
+    with TemporaryDirectory() as directory:
         test_grasp_height_reference_falls_back_to_aabb_top_without_annotation(Path(directory))
     with TemporaryDirectory() as directory:
         test_grasp_orientation_gate_uses_annotated_contact_pose(Path(directory))
@@ -1525,7 +1622,7 @@ def main():
     test_transport_gripper_latch_changes_only_the_active_channel()
     with TemporaryDirectory() as directory:
         test_alignment_mismatch_fails(Path(directory))
-    print("32 graph-context checks passed")
+    print("33 graph-context checks passed")
 
 
 if __name__ == "__main__":

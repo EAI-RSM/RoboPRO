@@ -332,15 +332,21 @@ class LiveGraphContext:
     # per arm, and its preferred-direction scoring is arm-mirrored -- see
     # expand_grasp_pose_family's docstring for what is and isn't reproduced
     # here), so a pose valid for one arm's search is not automatically
-    # valid for the other's. This applies to height too, not just
+    # valid for the other's. This applies to position too, not just
     # orientation: rotate_lim rotates the seed's POSITION as an offset from
     # the raw contact point, not just its orientation in place, so the set
-    # of reachable heights along the arc is exactly as arm-specific as the
+    # of reachable positions along the arc is exactly as arm-specific as the
     # set of reachable orientations.
     left_reference_orientations_wxyz: tuple[tuple[float, float, float, float], ...] = ()
     right_reference_orientations_wxyz: tuple[tuple[float, float, float, float], ...] = ()
-    left_reference_grasp_heights_m: tuple[float, ...] = ()
-    right_reference_grasp_heights_m: tuple[float, ...] = ()
+    # Full candidate positions, not just heights: simulator_evidence derives
+    # distance, vertical offset, AND horizontal offset from the SAME nearest
+    # candidate in this tuple, rather than each metric picking its own
+    # best-fit candidate independently (which is how a height-aligned,
+    # orientation-aligned TCP could still read as "not close enough" against
+    # an unrelated object-center distance -- see simulator_evidence.py).
+    left_reference_grasp_positions_m: tuple[tuple[float, float, float], ...] = ()
+    right_reference_grasp_positions_m: tuple[tuple[float, float, float], ...] = ()
     # Why the tuples above are empty (or aren't) -- see
     # OrientationReferenceStatus. Exported to the trace precisely so a
     # smoke test can't silently look like it exercised orientation/height
@@ -403,12 +409,12 @@ def build_live_graph_context(
     # orientation_reference_status/_count, and both arms must report the
     # same underlying resolution outcome even though their expanded pose
     # families (rotate_lim can differ per arm, and affects both the
-    # orientation and the height reference) do not.
+    # orientation and the position reference) do not.
     reference = target_grasp_poses(task_env, target_name)
-    left_orientations, left_heights = _expand_arm_reference_poses(
+    left_orientations, left_positions = _expand_arm_reference_poses(
         reference.poses, task_env, "left"
     )
-    right_orientations, right_heights = _expand_arm_reference_poses(
+    right_orientations, right_positions = _expand_arm_reference_poses(
         reference.poses, task_env, "right"
     )
     return LiveGraphContext(
@@ -424,8 +430,8 @@ def build_live_graph_context(
         contract=contract,
         left_reference_orientations_wxyz=left_orientations,
         right_reference_orientations_wxyz=right_orientations,
-        left_reference_grasp_heights_m=left_heights,
-        right_reference_grasp_heights_m=right_heights,
+        left_reference_grasp_positions_m=left_positions,
+        right_reference_grasp_positions_m=right_positions,
         orientation_reference_status=reference.status.value,
         orientation_reference_count=len(reference.poses),
     )
@@ -455,31 +461,37 @@ def _expand_arm_reference_poses(
     arm: str,
 ) -> tuple[
     tuple[tuple[float, float, float, float], ...],
-    tuple[float, ...],
+    tuple[tuple[float, float, float], ...],
 ]:
     """One arm's full expanded family of valid grasp poses, split into the
-    orientation tuple and the height tuple callers actually consume.
+    orientation tuple and the full position tuple callers actually consume.
 
     Each annotated contact point's grasp pose (already resolved once by the
     caller, not re-derived per arm) is expanded through that arm's own
     rotate_lim arc (genuinely arm-specific, and -- see
-    ``expand_grasp_pose_family`` -- affecting both orientation and height,
+    ``expand_grasp_pose_family`` -- affecting both orientation and position,
     since the arc rotates the seed's position as an offset from the raw
     contact point, not just its orientation in place) and the
     approach-axis flip (arm-independent, a property of the gripper, and
     position-neutral since it's a true self-rotation).
+
+    Returns full (x, y, z) positions, not just their z component: callers
+    that only care about height can still take ``position[2]``, but
+    simulator_evidence also needs the full position to measure distance
+    against the same candidate it measures height against, instead of an
+    unrelated object-center reference.
     """
     rotate_lim = _effector_rotate_lim_rad(task_env, arm)
     orientations = []
-    heights = []
+    positions = []
     for pose in poses:
         for position, orientation in expand_grasp_pose_family(
             pose.position_world, pose.orientation_wxyz, pose.contact_center_world,
             rotate_lim,
         ):
             orientations.append(orientation)
-            heights.append(position[2])
-    return tuple(orientations), tuple(heights)
+            positions.append(position)
+    return tuple(orientations), tuple(positions)
 
 
 def action_graph_state(
