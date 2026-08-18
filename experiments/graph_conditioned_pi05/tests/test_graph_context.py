@@ -666,6 +666,27 @@ def test_grasp_orientation_finger_flip_applies_to_each_rotated_candidate():
     )
 
 
+def test_grasp_orientation_arc_preserves_configured_rotate_lim_order():
+    """create_target_pose_list never reorders rotate_lim -- it uses the
+    signed step (rotate_lim[1] - rotate_lim[0]) / ROTATE_NUM directly, so a
+    reversed config like (1.0, 0.0) walks 1.0, 0.9, ..., 0.1 and excludes
+    0.0, not 1.0. Sorting the limits first (as if only the numeric range
+    mattered) would silently swap which endpoint is excluded relative to
+    what was actually configured -- moot for every embodiment config in
+    this repo today (all ascending), but not for a hypothetical one."""
+    seed = (1.0, 0.0, 0.0, 0.0)
+    family = expand_grasp_orientation_family(seed, (1.0, 0.0))
+
+    # rotate_lim[0]=1.0 is the reversed arc's start point: included.
+    start_point = _rotate_quat_about_own_local_axis(seed, (0.0, 1.0, 0.0), 1.0)
+    assert _min_orientation_error_deg(np.array(start_point), family) < 1e-6
+
+    # rotate_lim[1]=0.0 is the reversed arc's (never-reached) endpoint:
+    # excluded, the same way the ascending case excludes its own endpoint.
+    excluded_endpoint = _rotate_quat_about_own_local_axis(seed, (0.0, 1.0, 0.0), 0.0)
+    assert _min_orientation_error_deg(np.array(excluded_endpoint), family) > 1.0
+
+
 def test_grasp_orientation_error_covers_rotate_lim_arc_and_finger_swap_symmetry(tmp_path):
     """A grasp orientation elsewhere in the embodiment's rotate_lim arc, or
     the 180-degree finger-swap flip, must not read as misaligned -- both
@@ -1239,6 +1260,7 @@ def main():
         test_grasp_orientation_gate_uses_annotated_contact_pose(Path(directory))
     test_grasp_orientation_arc_excludes_upper_endpoint_like_robotwin()
     test_grasp_orientation_finger_flip_applies_to_each_rotated_candidate()
+    test_grasp_orientation_arc_preserves_configured_rotate_lim_order()
     with TemporaryDirectory() as directory:
         test_grasp_orientation_error_covers_rotate_lim_arc_and_finger_swap_symmetry(Path(directory))
     with TemporaryDirectory() as directory:
@@ -1252,7 +1274,7 @@ def main():
     test_transport_gripper_latch_changes_only_the_active_channel()
     with TemporaryDirectory() as directory:
         test_alignment_mismatch_fails(Path(directory))
-    print("26 graph-context checks passed")
+    print("27 graph-context checks passed")
 
 
 if __name__ == "__main__":

@@ -123,16 +123,22 @@ def expand_grasp_orientation_family(
     data ever shows a known-good grasp reading a large error, these are the
     first two places to look.
     """
+    # Deliberately NOT sorted into ascending order: create_target_pose_list
+    # never reorders rotate_lim either, it uses the signed step directly
+    # (rotate_step = (rotate_lim[1] - rotate_lim[0]) / ROTATE_NUM), so a
+    # hypothetical reversed config (e.g. (1.0, 0.0)) walks 1.0, 0.9, ..., 0.1
+    # -- excluding 0.0, not 1.0. Sorting first would silently swap which
+    # endpoint is excluded relative to what RoboTwin actually configured.
+    # Every embodiment config in this repo happens to be ascending already,
+    # so this has no effect today, but preserves parity if that ever changes.
     lower, upper = float(rotate_lim_rad[0]), float(rotate_lim_rad[1])
-    if lower > upper:
-        lower, upper = upper, lower
-    if upper > lower:
+    if upper != lower:
         # Matches create_target_pose_list exactly: step * i for i in
-        # range(ROTATE_NUM), a half-open grid that never reaches the upper
-        # endpoint (e.g. rotate_lim=(0,1) samples 0.0..0.9, never 1.0). Using
-        # np.linspace(..., inclusive) here would add an orientation RoboTwin
-        # never actually generates, artificially shrinking the reported
-        # error for anything near the upper boundary.
+        # range(ROTATE_NUM), a half-open grid that never reaches the
+        # configured endpoint (e.g. rotate_lim=(0,1) samples 0.0..0.9, never
+        # 1.0). Using np.linspace(..., inclusive) here would add an
+        # orientation RoboTwin never actually generates, artificially
+        # shrinking the reported error for anything near that boundary.
         step = (upper - lower) / GRASP_ORIENTATION_ARC_SAMPLES
         thetas = lower + step * np.arange(GRASP_ORIENTATION_ARC_SAMPLES)
     else:
