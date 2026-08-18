@@ -70,7 +70,7 @@ def _rotate_quat_about_own_local_axis(
     return tuple(float(value) for value in t3d.quaternions.mat2quat(new_rotation))
 
 
-def _expand_grasp_orientation_family(
+def expand_grasp_orientation_family(
     seed_quat_wxyz: tuple[float, float, float, float],
     rotate_lim_rad: tuple[float, float],
 ) -> tuple[tuple[float, float, float, float], ...]:
@@ -84,22 +84,36 @@ def _expand_grasp_orientation_family(
 
     - A ``rotate_lim``-radian arc about the seed's own local Y (jaw-closing)
       axis. ``create_target_pose_list`` searches exactly this per-arm arc
-      (read live from the embodiment config, not hardcoded) for a reachable
-      grasp pose, so any orientation within it is just as valid an
-      annotated grasp as the seed itself.
+      (read live from the embodiment config, not hardcoded -- callers pass
+      each arm's own limit, since RoboTwin's is arm-specific) for a
+      reachable grasp pose, so any orientation within it is just as valid
+      an annotated grasp as the seed itself.
     - A 180-degree flip about the seed's own local X (approach) axis. The
       gripper's two fingers are geometrically symmetric, so swapping which
       finger ends up on which side is mechanically the same grasp.
 
-    Deliberately NOT reproduced: create_target_pose_list's position-
-    dependent ``towards`` sign disambiguation, which can flip which half of
-    the raw ``rotate_lim`` interval is actually explored for a given
-    contact point/object-center geometry. That depends on per-candidate
-    position data this module doesn't have without re-deriving position-
-    dependent logic that hasn't been checked against a live run -- an
-    acknowledged gap, not a silent assumption. If live smoke-test data ever
-    shows a known-good grasp reading a large error, this is the first place
-    to look.
+    Public (not module-private) because callers need to build a separate
+    expanded family per arm -- see ``LiveGraphContext.left_reference_orientations_wxyz``
+    / ``right_reference_orientations_wxyz``.
+
+    Deliberately NOT reproduced:
+    - ``create_target_pose_list``'s position-dependent ``towards`` sign
+      disambiguation, which can flip which half of the raw ``rotate_lim``
+      interval is actually explored for a given contact point/object-center
+      geometry. That depends on per-candidate position data this module
+      doesn't have without re-deriving position-dependent logic that hasn't
+      been checked against a live run.
+    - ``choose_grasp_pose``'s arm-mirrored preferred-direction scoring
+      (``GRASP_DIRECTION_DIC["top_down_little_left"/"top_down_little_right"]``,
+      blended with a task-specific side preference) used to RANK candidate
+      contact points per arm before reachability filtering. That's a soft
+      preference over which contact point RoboTwin would rather use, not a
+      hard validity boundary like the two symmetries above, and needs
+      per-task metadata this module doesn't currently extract.
+
+    Both are acknowledged gaps, not silent assumptions. If live smoke-test
+    data ever shows a known-good grasp reading a large error, these are the
+    first two places to look.
     """
     lower, upper = float(rotate_lim_rad[0]), float(rotate_lim_rad[1])
     if lower > upper:
@@ -123,15 +137,13 @@ def _expand_grasp_orientation_family(
 def _min_orientation_error_deg(
     effector_quat: np.ndarray | None,
     reference_quats: tuple[tuple[float, float, float, float], ...],
-    rotate_lim_rad: tuple[float, float] = (0.0, 0.0),
 ) -> float:
-    """Smallest angular error to any annotated valid grasp orientation.
+    """Smallest angular error to any already-symmetry-expanded reference.
 
-    Each reference is expanded into its full symmetry family (see
-    ``_expand_grasp_orientation_family``) before comparison, so a mechanically
-    equivalent orientation -- elsewhere in the jaw-axis arc, or the
-    180-degree-flipped grip -- doesn't read as a large error just because it
-    isn't a bit-for-bit match of one arbitrary annotated point.
+    ``reference_quats`` is expected to already be one arm's full expanded
+    family (``expand_grasp_orientation_family``, per-arm since RoboTwin's
+    own candidate search is arm-specific) -- this function itself does no
+    expansion, just the comparison.
 
     Returns NaN (not a large number) when no reference is available, so
     callers can distinguish "no annotation to check against" from "checked
@@ -142,8 +154,7 @@ def _min_orientation_error_deg(
         return float("nan")
     errors = [
         _quaternion_angle_deg(effector_quat, candidate)
-        for reference in reference_quats
-        for candidate in _expand_grasp_orientation_family(reference, rotate_lim_rad)
+        for candidate in reference_quats
     ]
     errors = [error for error in errors if np.isfinite(error)]
     return float(min(errors)) if errors else float("nan")
@@ -369,8 +380,9 @@ def extract_simulator_evidence(context: "LiveGraphContext") -> SimulatorEvidence
         )
         orientation_error = _min_orientation_error_deg(
             effector_quat,
-            context.target_grasp_orientations_wxyz,
-            context.effector_rotate_lim_rad.get(arm, (0.0, 0.0)),
+            context.left_reference_orientations_wxyz
+            if arm == "left"
+            else context.right_reference_orientations_wxyz,
         )
         effectors[arm] = EffectorEvidence(
             tcp_position_world=(

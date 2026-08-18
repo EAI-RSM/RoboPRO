@@ -622,6 +622,65 @@ def test_grasp_orientation_error_covers_rotate_lim_arc_and_finger_swap_symmetry(
     assert unrelated_evidence.left.target_orientation_error_deg > 80.0
 
 
+def test_grasp_orientation_error_is_genuinely_arm_specific(tmp_path):
+    """Different rotate_lim per arm must produce different orientation
+    errors for the SAME object and the SAME effector rotation -- proving
+    left_reference_orientations_wxyz and right_reference_orientations_wxyz
+    are genuinely separate tuples, not just structurally split but
+    numerically identical (as they'd be if both arms shared one rotate_lim,
+    as aloha-agilex happens to)."""
+
+    class Robot:
+        left_rotate_lim = [0.0, 1.0]
+        right_rotate_lim = [0.0, 0.0]
+
+    class Task:
+        def __init__(self, catalog):
+            self.catalog = catalog
+            self.target = _FakeGraspActor("target", [(1.0, 0.0, 0.0, 0.0)])
+            self.robot = Robot()
+
+        def get_instruction(self):
+            return "put target in box"
+
+        def get_role_names(self):
+            return {"target_id": 10, "destination_id": 20}
+
+        def _get_benchmark_object_catalog(self):
+            return self.catalog
+
+    with _graph_file(tmp_path / "graph.hdf5") as root:
+        catalog, state, object_state = _live_inputs(root)
+    state["held_by"] = np.zeros((5, 2), dtype=bool)
+    state["held_by_valid"] = np.ones((5, 2), dtype=bool)
+    state["in"] = np.zeros((5, 5), dtype=bool)
+    state["containment_valid"] = np.ones((5, 5), dtype=bool)
+    state["raw_contact"] = np.zeros((5, 5), dtype=bool)
+    # The SAME 0.6-rad rotation applied to both effectors -- only the
+    # arm-specific rotate_lim should determine whether it reads as aligned.
+    same_quat = _rotate_quat_about_own_local_axis(
+        (1.0, 0.0, 0.0, 0.0), (0.0, 1.0, 0.0), 0.6
+    )
+    object_state["pose_world"][3, 3:7] = same_quat  # left effector
+    object_state["pose_world"][4, 3:7] = same_quat  # right effector
+    observation = {
+        "benchmark_support": {"relation_state": state, "object_state": object_state},
+    }
+    contract = RetrievalContract()
+    task = Task(catalog)
+
+    context = build_live_graph_context(task, observation, contract)
+    evidence = extract_simulator_evidence(context)
+    assert evidence.left.grasp_orientation_aligned
+    assert evidence.left.target_orientation_error_deg < 1.0
+    assert not evidence.right.grasp_orientation_aligned
+    assert evidence.right.target_orientation_error_deg > 20.0
+    assert (
+        context.left_reference_orientations_wxyz
+        != context.right_reference_orientations_wxyz
+    )
+
+
 def test_prepare_instruction_preserves_visual_only_and_fits_graph(tmp_path):
     class Task:
         def __init__(self, catalog):
@@ -964,13 +1023,15 @@ def main():
     with TemporaryDirectory() as directory:
         test_grasp_orientation_error_covers_rotate_lim_arc_and_finger_swap_symmetry(Path(directory))
     with TemporaryDirectory() as directory:
+        test_grasp_orientation_error_is_genuinely_arm_specific(Path(directory))
+    with TemporaryDirectory() as directory:
         test_prepare_instruction_preserves_visual_only_and_fits_graph(Path(directory))
     with TemporaryDirectory() as directory:
         test_grasp_hint_selects_only_a_valid_uniquely_clear_gripper(Path(directory))
     test_transport_gripper_latch_changes_only_the_active_channel()
     with TemporaryDirectory() as directory:
         test_alignment_mismatch_fails(Path(directory))
-    print("21 graph-context checks passed")
+    print("22 graph-context checks passed")
 
 
 if __name__ == "__main__":

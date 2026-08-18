@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, replace
 import re
 from typing import Any, Iterable
 
@@ -32,6 +32,7 @@ from .graph_replanning import ActionGraphState, Evidence, GraspSubstage, TaskGoa
 from .simulator_evidence import (
     LiveTaskState,
     SimulatorEvidence,
+    expand_grasp_orientation_family,
     extract_simulator_evidence,
 )
 
@@ -165,14 +166,15 @@ class LiveGraphContext:
     retriever: "LiveGraphRetriever"
     index_by_id: dict[int, int]
     contract: RetrievalContract
-    target_grasp_orientations_wxyz: tuple[tuple[float, float, float, float], ...] = ()
-    # RoboTwin's own per-arm jaw-axis rotation tolerance (radians), read live
-    # from the embodiment config via task_env.robot -- not hardcoded, so this
-    # stays correct for embodiments/tasks other than aloha-agilex. Defaults
-    # to no tolerance (a single point, not an arc) when unavailable.
-    effector_rotate_lim_rad: dict[str, tuple[float, float]] = field(
-        default_factory=lambda: {"left": (0.0, 0.0), "right": (0.0, 0.0)}
-    )
+    # Each arm's own fully symmetry-expanded set of valid grasp orientations
+    # for the target -- genuinely separate per arm, not a shared tuple.
+    # RoboTwin's own candidate search is arm-specific (rotate_lim can differ
+    # per arm, and its preferred-direction scoring is arm-mirrored -- see
+    # expand_grasp_orientation_family's docstring for what is and isn't
+    # reproduced here), so an orientation valid for one arm's search is not
+    # automatically valid for the other's.
+    left_reference_orientations_wxyz: tuple[tuple[float, float, float, float], ...] = ()
+    right_reference_orientations_wxyz: tuple[tuple[float, float, float, float], ...] = ()
 
 
 def task_goal_from_env(task_env: Any, catalog: Iterable[dict[str, Any]]) -> TaskGoal:
@@ -235,32 +237,50 @@ def build_live_graph_context(
             for index, object_id in enumerate(retriever.object_ids)
         },
         contract=contract,
-        target_grasp_orientations_wxyz=target_grasp_contact_orientations_wxyz(
-            task_env, target_name
+        left_reference_orientations_wxyz=_arm_reference_orientations(
+            task_env, target_name, "left"
         ),
-        effector_rotate_lim_rad=_effector_rotate_lim_rad(task_env),
+        right_reference_orientations_wxyz=_arm_reference_orientations(
+            task_env, target_name, "right"
+        ),
     )
 
 
-def _effector_rotate_lim_rad(task_env: Any) -> dict[str, tuple[float, float]]:
-    """Per-arm jaw-axis rotation tolerance, read live from the robot object.
+def _effector_rotate_lim_rad(task_env: Any, arm: str) -> tuple[float, float]:
+    """One arm's jaw-axis rotation tolerance, read live from the robot object.
 
     ``Robot.__init__`` (customized_robotwin/envs/robot/robot.py) sets
     ``left_rotate_lim``/``right_rotate_lim`` from the embodiment config
     (``rotate_lim`` in e.g. benchmark/assets/embodiments/*/config.yml),
-    defaulting to ``[0, 0]`` -- no arc -- when unconfigured. Read live rather
-    than hardcoded so this stays correct for embodiments/tasks other than
-    the one this experiment happens to run.
+    defaulting to ``[0, 0]`` -- no arc -- when unconfigured. Read live and
+    per-arm rather than hardcoded/shared, since RoboTwin's own is arm-
+    specific (it can genuinely differ between arms for other embodiments,
+    even though it happens to be equal for both arms of aloha-agilex).
     """
     robot = getattr(task_env, "robot", None)
-    result = {}
-    for arm in ("left", "right"):
-        limits = getattr(robot, f"{arm}_rotate_lim", None) if robot is not None else None
-        if limits is not None and len(limits) == 2 and all(np.isfinite(limits)):
-            result[arm] = (float(limits[0]), float(limits[1]))
-        else:
-            result[arm] = (0.0, 0.0)
-    return result
+    limits = getattr(robot, f"{arm}_rotate_lim", None) if robot is not None else None
+    if limits is not None and len(limits) == 2 and all(np.isfinite(limits)):
+        return (float(limits[0]), float(limits[1]))
+    return (0.0, 0.0)
+
+
+def _arm_reference_orientations(
+    task_env: Any, target_name: str | None, arm: str
+) -> tuple[tuple[float, float, float, float], ...]:
+    """One arm's full expanded family of valid grasp orientations.
+
+    Each annotated contact point's grasp orientation is expanded through
+    that arm's own rotate_lim arc (genuinely arm-specific) and the
+    approach-axis flip (arm-independent, a property of the gripper) --
+    see ``expand_grasp_orientation_family``.
+    """
+    base_orientations = target_grasp_contact_orientations_wxyz(task_env, target_name)
+    rotate_lim = _effector_rotate_lim_rad(task_env, arm)
+    return tuple(
+        candidate
+        for seed in base_orientations
+        for candidate in expand_grasp_orientation_family(seed, rotate_lim)
+    )
 
 
 def action_graph_state(
