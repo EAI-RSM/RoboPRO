@@ -37,7 +37,9 @@ from experiments.graph_conditioned_pi05.live_adapter import (
     vla_label_from_catalog_entry,
 )
 from experiments.graph_conditioned_pi05.simulator_evidence import (
+    expand_grasp_orientation_family,
     extract_simulator_evidence,
+    _min_orientation_error_deg,
     _rotate_quat_about_own_local_axis,
 )
 from experiments.graph_conditioned_pi05.validate_alignment import FRAME_ALIGNED_PATHS, validate_episode
@@ -553,6 +555,25 @@ def test_grasp_orientation_gate_uses_annotated_contact_pose(tmp_path):
     assert unresolved_evidence.grasp_substage is GraspSubstage.CLOSE
     assert unresolved_evidence.orientation_reference_status == "actor_unresolved"
     assert unresolved_evidence.orientation_reference_count == 0
+
+
+def test_grasp_orientation_arc_excludes_upper_endpoint_like_robotwin():
+    """create_target_pose_list (customized_robotwin/envs/robot/robot.py)
+    samples step * i for i in range(ROTATE_NUM) -- a half-open grid that
+    never reaches the arc's upper endpoint. A candidate exactly at that
+    endpoint is an orientation RoboTwin's own search never generates, so it
+    must not read as aligned; the last real sample (one step short of the
+    endpoint) must."""
+    seed = (1.0, 0.0, 0.0, 0.0)
+    rotate_lim = (0.0, 1.0)
+    family = expand_grasp_orientation_family(seed, rotate_lim)
+    assert len(family) == 20  # 10 arc samples x 2 (seed + 180-degree flip)
+
+    exact_endpoint = _rotate_quat_about_own_local_axis(seed, (0.0, 1.0, 0.0), 1.0)
+    assert _min_orientation_error_deg(np.array(exact_endpoint), family) > 1.0
+
+    last_real_sample = _rotate_quat_about_own_local_axis(seed, (0.0, 1.0, 0.0), 0.9)
+    assert _min_orientation_error_deg(np.array(last_real_sample), family) < 1e-6
 
 
 def test_grasp_orientation_error_covers_rotate_lim_arc_and_finger_swap_symmetry(tmp_path):
@@ -1125,6 +1146,7 @@ def main():
         test_shared_live_context_has_value_parity_and_one_catalog_parse(Path(directory))
     with TemporaryDirectory() as directory:
         test_grasp_orientation_gate_uses_annotated_contact_pose(Path(directory))
+    test_grasp_orientation_arc_excludes_upper_endpoint_like_robotwin()
     with TemporaryDirectory() as directory:
         test_grasp_orientation_error_covers_rotate_lim_arc_and_finger_swap_symmetry(Path(directory))
     with TemporaryDirectory() as directory:
@@ -1138,7 +1160,7 @@ def main():
     test_transport_gripper_latch_changes_only_the_active_channel()
     with TemporaryDirectory() as directory:
         test_alignment_mismatch_fails(Path(directory))
-    print("23 graph-context checks passed")
+    print("24 graph-context checks passed")
 
 
 if __name__ == "__main__":

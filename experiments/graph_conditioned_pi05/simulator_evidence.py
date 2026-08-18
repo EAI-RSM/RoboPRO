@@ -23,11 +23,14 @@ GRASP_HEIGHT_BAND_HALF_WIDTH_M = 0.02
 # Generic parallel-jaw tolerance, not fit to any single episode: this is a
 # starting point pending real-batch validation, not a calibrated value.
 GRASP_ORIENTATION_MAX_ERROR_DEG = 20.0
-# How finely to sample each arm's rotate_lim arc (see
-# _expand_grasp_orientation_family). Cheap either way -- this and the x2 from
-# the 180-degree flip only multiply the (tiny) per-contact-point reference
-# count, not anything per-frame-expensive.
-GRASP_ORIENTATION_ARC_SAMPLES = 11
+# RoboTwin's own candidate count for the rotate_lim arc
+# (customized_robotwin/envs/robot/robot.py: create_target_pose_list uses
+# CONFIGS.ROTATE_NUM, defined as 10 in customized_robotwin/envs/_GLOBAL_CONFIGS.py).
+# Duplicated rather than imported: importing that module pulls in
+# customized_robotwin.envs.utils (sapien), which isn't installed in this
+# experiment's lightweight test environment and would break every existing
+# test here. Keep this in sync with ROTATE_NUM if it ever changes.
+GRASP_ORIENTATION_ARC_SAMPLES = 10
 
 
 def _aggregate(values: np.ndarray, valid: np.ndarray) -> Evidence:
@@ -118,11 +121,17 @@ def expand_grasp_orientation_family(
     lower, upper = float(rotate_lim_rad[0]), float(rotate_lim_rad[1])
     if lower > upper:
         lower, upper = upper, lower
-    thetas = (
-        np.linspace(lower, upper, GRASP_ORIENTATION_ARC_SAMPLES)
-        if upper > lower
-        else np.array([lower])
-    )
+    if upper > lower:
+        # Matches create_target_pose_list exactly: step * i for i in
+        # range(ROTATE_NUM), a half-open grid that never reaches the upper
+        # endpoint (e.g. rotate_lim=(0,1) samples 0.0..0.9, never 1.0). Using
+        # np.linspace(..., inclusive) here would add an orientation RoboTwin
+        # never actually generates, artificially shrinking the reported
+        # error for anything near the upper boundary.
+        step = (upper - lower) / GRASP_ORIENTATION_ARC_SAMPLES
+        thetas = lower + step * np.arange(GRASP_ORIENTATION_ARC_SAMPLES)
+    else:
+        thetas = np.array([lower])
     seeds = (
         seed_quat_wxyz,
         _rotate_quat_about_own_local_axis(seed_quat_wxyz, (1.0, 0.0, 0.0), np.pi),
