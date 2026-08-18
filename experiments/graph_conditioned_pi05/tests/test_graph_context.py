@@ -3,6 +3,7 @@ from pathlib import Path
 
 import h5py
 import numpy as np
+import transforms3d as t3d
 from contextlib import contextmanager
 from tempfile import TemporaryDirectory
 
@@ -23,6 +24,7 @@ from experiments.graph_conditioned_pi05.graph_serializer import (
 )
 from experiments.graph_conditioned_pi05.graph_replanning import GraspSubstage
 from experiments.graph_conditioned_pi05.live_adapter import (
+    CONTACT_POINT_TO_GRASP_ROTATION,
     LiveGraphRetriever,
     action_graph_state,
     build_live_graph_context,
@@ -451,18 +453,31 @@ def test_shared_live_context_has_value_parity_and_one_catalog_parse(tmp_path):
 
 
 class _FakeGraspActor:
-    """Minimal stand-in for the sim's wrapped ``Actor`` grasp-geometry API."""
+    """Minimal stand-in for the sim's wrapped ``Actor`` grasp-geometry API.
 
-    def __init__(self, name: str, contact_quats_wxyz):
+    Contact points are specified as the DESIRED post-transform grasp
+    orientation -- what a real annotation's ``get_grasp_pose`` would
+    resolve to -- and converted back through the inverse of
+    ``CONTACT_POINT_TO_GRASP_ROTATION`` into the raw pre-transform contact
+    matrix the real wrapped-Actor API returns. This exercises the same
+    contact-to-grasp transform production code applies, rather than
+    assuming it away by handing back an already-transformed quaternion.
+    """
+
+    def __init__(self, name: str, grasp_quats_wxyz):
         self._name = name
-        self._contact_quats = list(contact_quats_wxyz)
+        self._grasp_quats = list(grasp_quats_wxyz)
 
     def get_name(self):
         return self._name
 
-    def iter_contact_points(self, ret="list"):
-        for index, quat in enumerate(self._contact_quats):
-            yield index, [0.0, 0.0, 0.0, *quat]
+    def iter_contact_points(self, ret="matrix"):
+        assert ret == "matrix", "fake actor only supports the matrix format"
+        inverse_rotation = CONTACT_POINT_TO_GRASP_ROTATION.T
+        for index, quat in enumerate(self._grasp_quats):
+            grasp_matrix = np.eye(4)
+            grasp_matrix[:3, :3] = t3d.quaternions.quat2mat(quat)
+            yield index, grasp_matrix @ inverse_rotation
 
 
 def test_grasp_orientation_gate_uses_annotated_contact_pose(tmp_path):

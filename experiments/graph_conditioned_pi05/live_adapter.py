@@ -7,6 +7,7 @@ import re
 from typing import Any, Iterable
 
 import numpy as np
+import transforms3d as t3d
 
 from .action_intent import (
     ActionIntent,
@@ -57,13 +58,56 @@ def _resolve_wrapped_actor(task_env: Any, name: str) -> Any | None:
     return None
 
 
+# RoboTwin's own ``get_grasp_pose`` (customized_robotwin/envs/_base_task.py)
+# does not use an object's raw annotated contact-point orientation as the
+# grasp orientation directly -- it right-multiplies the contact point's
+# world transform by this fixed matrix (a valid rotation, exactly 120
+# degrees) before reading off the quaternion that actually gets used as an
+# IK/grasp target. Any code that wants "the object's valid grasp
+# orientation" must apply the same transform, not the raw contact-point
+# pose, or it silently compares against a reference ~120 degrees away from
+# the real one. Duplicated here rather than imported from _base_task.py to
+# keep this experiment decoupled from core simulator harness internals --
+# if RoboTwin's own transform ever changes, this constant must follow it.
+CONTACT_POINT_TO_GRASP_ROTATION = np.array(
+    [
+        [0.0, 0.0, 1.0, 0.0],
+        [-1.0, 0.0, 0.0, 0.0],
+        [0.0, -1.0, 0.0, 0.0],
+        [0.0, 0.0, 0.0, 1.0],
+    ]
+)
+
+
+def grasp_quat_wxyz_from_contact_matrix(
+    contact_matrix: Any,
+) -> tuple[float, float, float, float] | None:
+    """One annotated contact point's world-frame pose -> its grasp orientation.
+
+    Shared by any caller (this task or another) that needs "the valid grasp
+    orientation for this object", not just the sauce-can gate -- callers
+    should reuse this rather than re-deriving the contact-to-grasp rotation
+    inline, so the transform can't silently drift out of sync in two places.
+    """
+    if contact_matrix is None:
+        return None
+    matrix = np.asarray(contact_matrix, dtype=np.float64)
+    if matrix.shape != (4, 4):
+        return None
+    grasp_matrix = matrix @ CONTACT_POINT_TO_GRASP_ROTATION
+    quat = t3d.quaternions.mat2quat(grasp_matrix[:3, :3])
+    quat = tuple(float(value) for value in quat)
+    return quat if len(quat) == 4 and all(np.isfinite(quat)) else None
+
+
 def target_grasp_contact_orientations_wxyz(
     task_env: Any, target_name: str | None
 ) -> tuple[tuple[float, float, float, float], ...]:
-    """World-frame orientation of every annotated grasp contact point.
+    """World-frame grasp orientation of every annotated contact point.
 
     Pure geometry read off the object's static ``contact_points_pose``
-    annotation (``Actor.get_contact_point``) -- this does not call
+    annotation (``Actor.get_contact_point``) plus RoboTwin's own
+    contact-to-grasp rotation -- this does not call
     ``get_grasp_pose``/``choose_grasp_pose`` and triggers no motion planning,
     so it is safe to call every observation frame. Returns an empty tuple if
     the target actor can't be resolved or has no annotated contact points;
@@ -76,11 +120,9 @@ def target_grasp_contact_orientations_wxyz(
         return ()
     orientations = []
     try:
-        for _, pose in actor.iter_contact_points("list"):
-            if pose is None or len(pose) < 7:
-                continue
-            quat = tuple(float(value) for value in pose[3:7])
-            if len(quat) == 4 and all(np.isfinite(quat)):
+        for _, matrix in actor.iter_contact_points("matrix"):
+            quat = grasp_quat_wxyz_from_contact_matrix(matrix)
+            if quat is not None:
                 orientations.append(quat)
     except Exception:
         return ()
