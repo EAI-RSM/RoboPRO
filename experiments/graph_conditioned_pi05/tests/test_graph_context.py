@@ -31,6 +31,7 @@ from experiments.graph_conditioned_pi05.live_adapter import (
     compact_grasp_hint,
     destination_ids_from_task,
     goal_geometry_pack_item,
+    grasp_quat_wxyz_from_contact_matrix,
     keep_active_gripper_closed,
     live_task_state,
     prepare_instruction,
@@ -481,6 +482,60 @@ class _FakeGraspActor:
             grasp_matrix = np.eye(4)
             grasp_matrix[:3, :3] = t3d.quaternions.quat2mat(quat)
             yield index, grasp_matrix @ inverse_rotation
+
+
+def _homogeneous_matrix(rotation, bottom_row=(0.0, 0.0, 0.0, 1.0)):
+    matrix = np.eye(4)
+    matrix[:3, :3] = rotation
+    matrix[3, :] = bottom_row
+    return matrix
+
+
+def test_grasp_quat_from_contact_matrix_rejects_malformed_input():
+    """transforms3d's mat2quat does not itself validate its input: it
+    raises for a non-finite matrix (which would otherwise propagate out of
+    build_live_graph_context and halt live evaluation on one bad
+    annotation) and silently returns a normalized-looking but physically
+    meaningless quaternion for a reflection, a degenerate matrix, or an
+    arbitrary non-rotation matrix (which would otherwise read as an
+    ordinary, seemingly-valid AVAILABLE reference orientation). Every one
+    of these must come back as None instead, and a genuinely valid matrix
+    must still work."""
+    assert grasp_quat_wxyz_from_contact_matrix(
+        _homogeneous_matrix(np.eye(3))
+    ) is not None
+
+    # Non-finite: must not raise (mat2quat itself raises LinAlgError on this).
+    assert grasp_quat_wxyz_from_contact_matrix(
+        _homogeneous_matrix(np.full((3, 3), np.nan))
+    ) is None
+
+    # A reflection (det=-1): a valid orthonormal matrix, but not a proper
+    # rotation -- mat2quat returns a plausible unit quaternion for it with
+    # no error at all, which is exactly the silent-corruption case.
+    assert grasp_quat_wxyz_from_contact_matrix(
+        _homogeneous_matrix(np.diag([-1.0, 1.0, 1.0]))
+    ) is None
+
+    # Degenerate (all-zero rotation block).
+    assert grasp_quat_wxyz_from_contact_matrix(
+        _homogeneous_matrix(np.zeros((3, 3)))
+    ) is None
+
+    # Arbitrary non-orthonormal matrix (not a rotation at all).
+    assert grasp_quat_wxyz_from_contact_matrix(
+        _homogeneous_matrix(np.array([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0], [7.0, 8.0, 10.0]]))
+    ) is None
+
+    # Invalid homogeneous bottom row.
+    assert grasp_quat_wxyz_from_contact_matrix(
+        _homogeneous_matrix(np.eye(3), bottom_row=(1.0, 2.0, 3.0, 4.0))
+    ) is None
+
+    # Wrong shape and None must both still be handled, not just malformed
+    # 4x4s.
+    assert grasp_quat_wxyz_from_contact_matrix(np.eye(3)) is None
+    assert grasp_quat_wxyz_from_contact_matrix(None) is None
 
 
 def test_grasp_orientation_gate_uses_annotated_contact_pose(tmp_path):
@@ -1144,6 +1199,7 @@ def main():
         test_live_retrieval_matches_hdf5(Path(directory))
     with TemporaryDirectory() as directory:
         test_shared_live_context_has_value_parity_and_one_catalog_parse(Path(directory))
+    test_grasp_quat_from_contact_matrix_rejects_malformed_input()
     with TemporaryDirectory() as directory:
         test_grasp_orientation_gate_uses_annotated_contact_pose(Path(directory))
     test_grasp_orientation_arc_excludes_upper_endpoint_like_robotwin()
@@ -1160,7 +1216,7 @@ def main():
     test_transport_gripper_latch_changes_only_the_active_channel()
     with TemporaryDirectory() as directory:
         test_alignment_mismatch_fails(Path(directory))
-    print("24 graph-context checks passed")
+    print("25 graph-context checks passed")
 
 
 if __name__ == "__main__":

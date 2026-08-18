@@ -81,6 +81,17 @@ CONTACT_POINT_TO_GRASP_ROTATION = np.array(
 )
 
 
+# Sanity-check tolerances for a contact-point pose matrix -- generous
+# margin for typical float32 mesh/annotation precision (~1e-6), not a
+# physically calibrated bound. A matrix failing these isn't a valid rigid
+# transform at all (degenerate, a reflection, or outright garbage), so no
+# quaternion derived from it can mean anything, regardless of what
+# mat2quat happens to return for it.
+CONTACT_MATRIX_ORTHONORMALITY_ATOL = 1e-3
+CONTACT_MATRIX_DETERMINANT_ATOL = 1e-3
+CONTACT_MATRIX_HOMOGENEOUS_ROW_ATOL = 1e-6
+
+
 def grasp_quat_wxyz_from_contact_matrix(
     contact_matrix: Any,
 ) -> tuple[float, float, float, float] | None:
@@ -90,16 +101,44 @@ def grasp_quat_wxyz_from_contact_matrix(
     orientation for this object", not just the sauce-can gate -- callers
     should reuse this rather than re-deriving the contact-to-grasp rotation
     inline, so the transform can't silently drift out of sync in two places.
+
+    Never raises, and never returns a quaternion for input that isn't
+    actually a valid rigid transform: ``transforms3d.quaternions.mat2quat``
+    does not validate its input -- it raises ``LinAlgError`` for a
+    non-finite matrix (which would otherwise propagate out of
+    ``build_live_graph_context`` and halt live evaluation on a single bad
+    annotation), and silently returns a normalized-looking but physically
+    meaningless quaternion for a reflection, a degenerate matrix, or an
+    arbitrary non-rotation matrix alike (which would otherwise read as a
+    perfectly ordinary, seemingly valid ``AVAILABLE`` reference orientation).
+    A malformed matrix returns None instead, same as an absent one --
+    callers already treat an all-None contact-point set as
+    ``ANNOTATION_INVALID``.
     """
     if contact_matrix is None:
         return None
-    matrix = np.asarray(contact_matrix, dtype=np.float64)
-    if matrix.shape != (4, 4):
+    try:
+        matrix = np.asarray(contact_matrix, dtype=np.float64)
+        if matrix.shape != (4, 4) or not np.all(np.isfinite(matrix)):
+            return None
+        if not np.allclose(
+            matrix[3, :], (0.0, 0.0, 0.0, 1.0),
+            atol=CONTACT_MATRIX_HOMOGENEOUS_ROW_ATOL,
+        ):
+            return None
+        rotation = matrix[:3, :3]
+        if not np.allclose(
+            rotation @ rotation.T, np.eye(3), atol=CONTACT_MATRIX_ORTHONORMALITY_ATOL
+        ):
+            return None
+        if abs(np.linalg.det(rotation) - 1.0) > CONTACT_MATRIX_DETERMINANT_ATOL:
+            return None
+        grasp_matrix = matrix @ CONTACT_POINT_TO_GRASP_ROTATION
+        quat = t3d.quaternions.mat2quat(grasp_matrix[:3, :3])
+        quat = tuple(float(value) for value in quat)
+        return quat if len(quat) == 4 and all(np.isfinite(quat)) else None
+    except Exception:
         return None
-    grasp_matrix = matrix @ CONTACT_POINT_TO_GRASP_ROTATION
-    quat = t3d.quaternions.mat2quat(grasp_matrix[:3, :3])
-    quat = tuple(float(value) for value in quat)
-    return quat if len(quat) == 4 and all(np.isfinite(quat)) else None
 
 
 class OrientationReferenceStatus(str, Enum):
