@@ -523,6 +523,8 @@ def test_grasp_orientation_gate_uses_annotated_contact_pose(tmp_path):
     assert aligned_evidence.grasp_substage is GraspSubstage.CLOSE
     assert aligned_evidence.left.grasp_orientation_aligned
     assert aligned_evidence.left.target_orientation_error_deg == 0.0
+    assert aligned_evidence.orientation_reference_status == "available"
+    assert aligned_evidence.orientation_reference_count == 1
 
     # A contact point annotated 90 degrees away from the effector's actual
     # orientation is recorded as misaligned, but must NOT block CLOSE --
@@ -539,13 +541,16 @@ def test_grasp_orientation_gate_uses_annotated_contact_pose(tmp_path):
     assert misaligned_evidence.grasp_substage is GraspSubstage.CLOSE
 
     # No resolvable actor/annotation: fails open, identical to pre-existing
-    # behavior for objects without annotated grasp geometry.
+    # behavior for objects without annotated grasp geometry -- but the
+    # status must say WHY, not just that the tuple came back empty.
     del task.target
     unresolved_context = build_live_graph_context(task, observation, contract)
     unresolved_evidence = extract_simulator_evidence(unresolved_context)
     assert unresolved_evidence.left.grasp_orientation_aligned
     assert math.isnan(unresolved_evidence.left.target_orientation_error_deg)
     assert unresolved_evidence.grasp_substage is GraspSubstage.CLOSE
+    assert unresolved_evidence.orientation_reference_status == "annotation_missing"
+    assert unresolved_evidence.orientation_reference_count == 0
 
 
 def test_grasp_orientation_error_covers_rotate_lim_arc_and_finger_swap_symmetry(tmp_path):
@@ -679,6 +684,89 @@ def test_grasp_orientation_error_is_genuinely_arm_specific(tmp_path):
         context.left_reference_orientations_wxyz
         != context.right_reference_orientations_wxyz
     )
+
+
+def test_orientation_reference_status_distinguishes_failure_modes(tmp_path):
+    """An empty reference tuple must not be the only signal available: a
+    genuinely un-annotated object, a target the goal couldn't resolve to a
+    single id, a bug raised while iterating contact points, and an actor
+    whose contact points are all malformed must all read as different
+    statuses -- otherwise a smoke test could silently collect nothing but
+    NaNs for an entire batch and look identical to "nothing to check"."""
+
+    class ExtractionErrorActor:
+        def get_name(self):
+            return "target"
+
+        def iter_contact_points(self, ret="matrix"):
+            raise RuntimeError("boom")
+
+    class EmptyAnnotationActor:
+        def get_name(self):
+            return "target"
+
+        def iter_contact_points(self, ret="matrix"):
+            return iter(())
+
+    class InvalidAnnotationActor:
+        def get_name(self):
+            return "target"
+
+        def iter_contact_points(self, ret="matrix"):
+            yield 0, np.zeros((3, 3))  # malformed: not a 4x4 pose matrix
+
+    class Task:
+        def __init__(self, catalog, target=None, multi_target=False):
+            self.catalog = catalog
+            self.target = target
+            self._multi_target = multi_target
+
+        def get_instruction(self):
+            return "put target in box"
+
+        def get_role_names(self):
+            if self._multi_target:
+                return {"target_ids": [10, 20], "destination_id": 20}
+            return {"target_id": 10, "destination_id": 20}
+
+        def _get_benchmark_object_catalog(self):
+            return self.catalog
+
+    with _graph_file(tmp_path / "graph.hdf5") as root:
+        catalog, state, object_state = _live_inputs(root)
+    observation = {
+        "benchmark_support": {"relation_state": state, "object_state": object_state},
+    }
+    contract = RetrievalContract()
+
+    # target_unresolved: the goal doesn't resolve to exactly one target id,
+    # so a target name is never even looked up.
+    multi_target_task = Task(catalog, multi_target=True)
+    multi_target_context = build_live_graph_context(multi_target_task, observation, contract)
+    assert multi_target_context.orientation_reference_status == "target_unresolved"
+    assert multi_target_context.orientation_reference_count == 0
+
+    # extraction_error: the actor resolves, but iterating its contact points
+    # raises -- a bug/incompatibility, not "no annotation."
+    error_task = Task(catalog, target=ExtractionErrorActor())
+    error_context = build_live_graph_context(error_task, observation, contract)
+    assert error_context.orientation_reference_status == "extraction_error"
+    assert error_context.orientation_reference_count == 0
+
+    # annotation_missing: the actor resolves but has zero annotated contact
+    # points.
+    empty_task = Task(catalog, target=EmptyAnnotationActor())
+    empty_context = build_live_graph_context(empty_task, observation, contract)
+    assert empty_context.orientation_reference_status == "annotation_missing"
+    assert empty_context.orientation_reference_count == 0
+
+    # annotation_invalid: the actor resolves and has contact points, but
+    # every one is malformed, so no usable orientation exists despite the
+    # annotation technically being present.
+    invalid_task = Task(catalog, target=InvalidAnnotationActor())
+    invalid_context = build_live_graph_context(invalid_task, observation, contract)
+    assert invalid_context.orientation_reference_status == "annotation_invalid"
+    assert invalid_context.orientation_reference_count == 0
 
 
 def test_prepare_instruction_preserves_visual_only_and_fits_graph(tmp_path):
@@ -1025,13 +1113,15 @@ def main():
     with TemporaryDirectory() as directory:
         test_grasp_orientation_error_is_genuinely_arm_specific(Path(directory))
     with TemporaryDirectory() as directory:
+        test_orientation_reference_status_distinguishes_failure_modes(Path(directory))
+    with TemporaryDirectory() as directory:
         test_prepare_instruction_preserves_visual_only_and_fits_graph(Path(directory))
     with TemporaryDirectory() as directory:
         test_grasp_hint_selects_only_a_valid_uniquely_clear_gripper(Path(directory))
     test_transport_gripper_latch_changes_only_the_active_channel()
     with TemporaryDirectory() as directory:
         test_alignment_mismatch_fails(Path(directory))
-    print("22 graph-context checks passed")
+    print("23 graph-context checks passed")
 
 
 if __name__ == "__main__":

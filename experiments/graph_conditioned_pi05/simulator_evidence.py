@@ -204,6 +204,12 @@ class SimulatorEvidence:
     grasp_arm: str | None
     grasp_close_immediate: bool
     grasp_height_half_width_m: float
+    # Why left/right's orientation reference tuples are what they are --
+    # see live_adapter.OrientationReferenceStatus. Exported so a batch that
+    # silently never resolved the target actor is visible in the trace
+    # rather than looking identical to "no annotation, as expected."
+    orientation_reference_status: str = "target_unresolved"
+    orientation_reference_count: int = 0
 
     def action_graph_state(self) -> ActionGraphState:
         held_contact = Evidence.UNKNOWN
@@ -245,6 +251,11 @@ class SimulatorEvidence:
             "held_arm": self.held_arm or "",
             "grasp_close_immediate": self.grasp_close_immediate,
             "grasp_height_half_width": self.grasp_height_half_width_m,
+            "orientation_reference_available": (
+                self.orientation_reference_status == "available"
+            ),
+            "orientation_reference_count": self.orientation_reference_count,
+            "orientation_reference_status": self.orientation_reference_status,
         }
         for arm in ("left", "right"):
             effector = getattr(self, arm)
@@ -495,6 +506,8 @@ def extract_simulator_evidence(context: "LiveGraphContext") -> SimulatorEvidence
         grasp_arm=grasp_arm,
         grasp_close_immediate=grasp_close_immediate,
         grasp_height_half_width_m=target_height_half_width,
+        orientation_reference_status=context.orientation_reference_status,
+        orientation_reference_count=context.orientation_reference_count,
     )
 
 

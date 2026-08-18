@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
+from enum import Enum
 import re
 from typing import Any, Iterable
 
@@ -101,33 +102,67 @@ def grasp_quat_wxyz_from_contact_matrix(
     return quat if len(quat) == 4 and all(np.isfinite(quat)) else None
 
 
+class OrientationReferenceStatus(str, Enum):
+    """Why ``target_grasp_contact_orientations_wxyz`` returned what it did.
+
+    A bare empty tuple collapses several very different situations into one
+    indistinguishable "no reference" result -- a genuinely un-annotated
+    object looks identical to a bug in actor resolution or a malformed
+    annotation. That's fine for control (fail-open either way), but fatal
+    for trusting the diagnostic data this treatment exists to collect: a
+    silent 100%-``target_unresolved`` batch would look, from the trace
+    alone, exactly like a real "this task has no annotated objects" result.
+    """
+
+    AVAILABLE = "available"
+    TARGET_UNRESOLVED = "target_unresolved"
+    ANNOTATION_MISSING = "annotation_missing"
+    ANNOTATION_INVALID = "annotation_invalid"
+    EXTRACTION_ERROR = "extraction_error"
+
+
+@dataclass(frozen=True)
+class OrientationReference:
+    orientations_wxyz: tuple[tuple[float, float, float, float], ...] = ()
+    status: OrientationReferenceStatus = OrientationReferenceStatus.TARGET_UNRESOLVED
+
+
 def target_grasp_contact_orientations_wxyz(
     task_env: Any, target_name: str | None
-) -> tuple[tuple[float, float, float, float], ...]:
+) -> OrientationReference:
     """World-frame grasp orientation of every annotated contact point.
 
     Pure geometry read off the object's static ``contact_points_pose``
     annotation (``Actor.get_contact_point``) plus RoboTwin's own
     contact-to-grasp rotation -- this does not call
     ``get_grasp_pose``/``choose_grasp_pose`` and triggers no motion planning,
-    so it is safe to call every observation frame. Returns an empty tuple if
-    the target actor can't be resolved or has no annotated contact points;
-    callers must treat that as "no reference available", not "misaligned".
+    so it is safe to call every observation frame. An empty result (status
+    != AVAILABLE) means "no reference available" and callers must treat
+    that as such, not as "misaligned" -- but which status it is matters for
+    diagnosing whether that's expected (ANNOTATION_MISSING) or a bug
+    (EXTRACTION_ERROR).
     """
     if not target_name:
-        return ()
+        return OrientationReference((), OrientationReferenceStatus.TARGET_UNRESOLVED)
     actor = _resolve_wrapped_actor(task_env, target_name)
     if actor is None:
-        return ()
-    orientations = []
+        return OrientationReference((), OrientationReferenceStatus.ANNOTATION_MISSING)
     try:
-        for _, matrix in actor.iter_contact_points("matrix"):
-            quat = grasp_quat_wxyz_from_contact_matrix(matrix)
-            if quat is not None:
-                orientations.append(quat)
+        contact_points = list(actor.iter_contact_points("matrix"))
     except Exception:
-        return ()
-    return tuple(orientations)
+        return OrientationReference((), OrientationReferenceStatus.EXTRACTION_ERROR)
+    if not contact_points:
+        return OrientationReference((), OrientationReferenceStatus.ANNOTATION_MISSING)
+    orientations = []
+    for _, matrix in contact_points:
+        quat = grasp_quat_wxyz_from_contact_matrix(matrix)
+        if quat is not None:
+            orientations.append(quat)
+    if not orientations:
+        return OrientationReference((), OrientationReferenceStatus.ANNOTATION_INVALID)
+    return OrientationReference(
+        tuple(orientations), OrientationReferenceStatus.AVAILABLE
+    )
 
 
 def _decode(values: Any) -> list[str]:
@@ -175,6 +210,13 @@ class LiveGraphContext:
     # automatically valid for the other's.
     left_reference_orientations_wxyz: tuple[tuple[float, float, float, float], ...] = ()
     right_reference_orientations_wxyz: tuple[tuple[float, float, float, float], ...] = ()
+    # Why the two tuples above are empty (or aren't) -- see
+    # OrientationReferenceStatus. Exported to the trace precisely so a
+    # smoke test can't silently look like it exercised orientation checking
+    # when actor resolution or annotation extraction was actually failing
+    # the whole time.
+    orientation_reference_status: str = OrientationReferenceStatus.TARGET_UNRESOLVED.value
+    orientation_reference_count: int = 0
 
 
 def task_goal_from_env(task_env: Any, catalog: Iterable[dict[str, Any]]) -> TaskGoal:
@@ -226,6 +268,11 @@ def build_live_graph_context(
             ),
             None,
         )
+    # Resolved once, not once per arm: this determines
+    # orientation_reference_status/_count, and both arms must report the
+    # same underlying resolution outcome even though their expanded
+    # candidate families (rotate_lim can differ per arm) do not.
+    reference = target_grasp_contact_orientations_wxyz(task_env, target_name)
     return LiveGraphContext(
         catalog=catalog,
         relation_state=relation_state,
@@ -237,12 +284,14 @@ def build_live_graph_context(
             for index, object_id in enumerate(retriever.object_ids)
         },
         contract=contract,
-        left_reference_orientations_wxyz=_arm_reference_orientations(
-            task_env, target_name, "left"
+        left_reference_orientations_wxyz=_expand_arm_reference_orientations(
+            reference.orientations_wxyz, task_env, "left"
         ),
-        right_reference_orientations_wxyz=_arm_reference_orientations(
-            task_env, target_name, "right"
+        right_reference_orientations_wxyz=_expand_arm_reference_orientations(
+            reference.orientations_wxyz, task_env, "right"
         ),
+        orientation_reference_status=reference.status.value,
+        orientation_reference_count=len(reference.orientations_wxyz),
     )
 
 
@@ -264,17 +313,19 @@ def _effector_rotate_lim_rad(task_env: Any, arm: str) -> tuple[float, float]:
     return (0.0, 0.0)
 
 
-def _arm_reference_orientations(
-    task_env: Any, target_name: str | None, arm: str
+def _expand_arm_reference_orientations(
+    base_orientations: tuple[tuple[float, float, float, float], ...],
+    task_env: Any,
+    arm: str,
 ) -> tuple[tuple[float, float, float, float], ...]:
     """One arm's full expanded family of valid grasp orientations.
 
-    Each annotated contact point's grasp orientation is expanded through
-    that arm's own rotate_lim arc (genuinely arm-specific) and the
-    approach-axis flip (arm-independent, a property of the gripper) --
-    see ``expand_grasp_orientation_family``.
+    Each annotated contact point's grasp orientation (already resolved once
+    by the caller, not re-derived per arm) is expanded through that arm's
+    own rotate_lim arc (genuinely arm-specific) and the approach-axis flip
+    (arm-independent, a property of the gripper) -- see
+    ``expand_grasp_orientation_family``.
     """
-    base_orientations = target_grasp_contact_orientations_wxyz(task_env, target_name)
     rotate_lim = _effector_rotate_lim_rad(task_env, arm)
     return tuple(
         candidate
