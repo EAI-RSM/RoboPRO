@@ -103,6 +103,7 @@ customized_robotwin/**/data/relation_validation*/
 scripts/validation/results/
 docs/objaverse_preview/
 docs/references/
+docs/paper_plan/
 
 # Reference materials (paper LaTeX + external links, not tracked)
 references/
