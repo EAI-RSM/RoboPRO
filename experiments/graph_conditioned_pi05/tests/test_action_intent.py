@@ -32,7 +32,11 @@ def test_grasp_substages_render_atomic_instructions():
         collision_imminent=True,
     )
     assert warning.render_stage_instruction() == (
-        "Collision risk: the kettle blocks the right gripper. "
+        "Align the left gripper with the sauce can."
+    )
+    active_warning = replace(warning, blocked_arm="left")
+    assert active_warning.render_stage_instruction() == (
+        "Collision risk: the kettle blocks the left gripper. "
         "Align the left gripper with the sauce can."
     )
     assert replace(
@@ -88,7 +92,19 @@ def test_place_and_release_rendering_uses_destination_substages():
         placement, placement_substage=PlacementSubstage.FINAL_DESCENT
     )
     assert descent.render_stage_instruction() == (
-        "Keep holding the sauce can. Lower it into the basket."
+        "Keep holding the sauce can. Move it straight down into the basket. "
+        "Do not move sideways. Keep lowering it until it reaches the rim."
+    )
+    on_descent = ActionIntent(
+        IntentOperation.PLACE,
+        "mouse",
+        destination_label="pad",
+        placement_relation=PlacementRelation.ON,
+        placement_substage=PlacementSubstage.FINAL_DESCENT,
+    )
+    assert on_descent.render_stage_instruction() == (
+        "Keep holding the mouse. Move it straight down onto the pad. "
+        "Do not move sideways. Keep lowering it until it touches the surface."
     )
     release = ActionIntent(
         IntentOperation.RELEASE,

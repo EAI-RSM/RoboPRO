@@ -74,6 +74,10 @@ class ActionGraphState:
     grasp_substage: GraspSubstage = GraspSubstage.ALIGN
     grasp_arm: str | None = None
     grasp_close_immediate: bool = False
+    grasp_target_contact: bool = False
+    grasp_height_aligned: bool = False
+    grasp_orientation_aligned: bool = False
+    grasp_lateral_error_m: float = float("nan")
 
     def predicates(self) -> Mapping[str, Evidence]:
         # A momentary simulator ``held_by`` relation is not enough to begin
@@ -297,6 +301,32 @@ class GraphControllerState:
     close_max_attempts: int = 2
     close_latch_remaining: int = 0
     close_attempt_count: int = 0
+    validated_contact_steps: int = 2
+    contact_close_lateral_error_max_m: float = 0.018
+    _contact_candidate_arm: str | None = None
+    _contact_candidate_count: int = 0
+
+    def _validated_contact_close(self, state: ActionGraphState) -> bool:
+        """Validate stable, aligned target contact before relaxing centering."""
+        qualified = (
+            self.phase is PromptPhase.GRASP
+            and state.grasp_arm is not None
+            and state.grasp_target_contact
+            and state.grasp_height_aligned
+            and state.grasp_orientation_aligned
+            and state.grasp_lateral_error_m
+            <= self.contact_close_lateral_error_max_m
+        )
+        if not qualified:
+            self._contact_candidate_arm = None
+            self._contact_candidate_count = 0
+            return False
+        if state.grasp_arm == self._contact_candidate_arm:
+            self._contact_candidate_count += 1
+        else:
+            self._contact_candidate_arm = state.grasp_arm
+            self._contact_candidate_count = 1
+        return self._contact_candidate_count >= self.validated_contact_steps
 
     @property
     def enforced_close_arm(self) -> str | None:
@@ -318,7 +348,8 @@ class GraphControllerState:
         """Debounce grasp substages, including recoverable close attempts."""
         if self.phase is not PromptPhase.GRASP:
             return False
-        desired = state.grasp_substage
+        contact_close = self._validated_contact_close(state)
+        desired = GraspSubstage.CLOSE if contact_close else state.grasp_substage
         # Once a geometrically authorized close begins, transient pose changes
         # must not cancel it before the gripper has had time to respond.
         if (
@@ -351,7 +382,8 @@ class GraphControllerState:
             self._grasp_candidate_count = 1
         threshold = (
             1
-            if desired is GraspSubstage.CLOSE and state.grasp_close_immediate
+            if desired is GraspSubstage.CLOSE
+            and (state.grasp_close_immediate or contact_close)
             else 2
         )
         if self._grasp_candidate_count < threshold:
@@ -433,6 +465,11 @@ class GraphControllerState:
             "grasp_arm": self.grasp_arm,
             "close_latch_remaining": self.close_latch_remaining,
             "close_attempt_count": self.close_attempt_count,
+            "validated_contact_arm": self._contact_candidate_arm,
+            "validated_contact_count": self._contact_candidate_count,
+            "validated_contact_close": (
+                self._contact_candidate_count >= self.validated_contact_steps
+            ),
         }
         if decision.requires_replan:
             self.phase = decision.next_phase
@@ -447,11 +484,15 @@ class GraphControllerState:
                     self._grasp_candidate_count = 0
                     self.close_latch_remaining = 0
                     self.close_attempt_count = 0
+                    self._contact_candidate_arm = None
+                    self._contact_candidate_count = 0
             else:
                 # Placement immediately takes over with its existing held-arm
                 # latch, so the close-attempt bookkeeping can be retired.
                 self.close_latch_remaining = 0
                 self.close_attempt_count = 0
+                self._contact_candidate_arm = None
+                self._contact_candidate_count = 0
             record["next_grasp_substage"] = self.grasp_substage.value
             record["grasp_arm"] = self.grasp_arm
         return decision, record

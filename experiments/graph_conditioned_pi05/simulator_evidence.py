@@ -15,7 +15,7 @@ if TYPE_CHECKING:
 
 
 PLACEMENT_HORIZONTAL_MARGIN_M = 0.01
-PLACEMENT_DESCENT_DEPTH_M = 0.02
+PLACEMENT_RELEASE_ABOVE_RIM_CLEARANCE_M = 0.05
 PLACEMENT_ON_VERTICAL_TOLERANCE_M = 0.02
 EFFECTOR_IDS = {"left": -2, "right": -3}
 GRASP_ALIGNMENT_DISTANCE_M = 0.12
@@ -497,7 +497,10 @@ def placement_geometry_from_bounds(
     aligned = bool(np.all(safe_lower <= safe_upper) and safe_margin >= 0.0)
     bottom_to_rim = float(target_lower[2] - destination_upper[2])
     if relation == "in":
-        descent_ready = aligned and bottom_to_rim <= -PLACEMENT_DESCENT_DEPTH_M
+        descent_ready = (
+            aligned
+            and bottom_to_rim <= PLACEMENT_RELEASE_ABOVE_RIM_CLEARANCE_M
+        )
     else:
         descent_ready = aligned and abs(bottom_to_rim) <= PLACEMENT_ON_VERTICAL_TOLERANCE_M
     stage = "release_ready" if descent_ready else (
@@ -551,6 +554,18 @@ class SimulatorEvidence:
                 if getattr(self, self.held_arm).target_contact
                 else Evidence.FALSE
             )
+        grasp_effector = (
+            getattr(self, self.grasp_arm) if self.grasp_arm is not None else None
+        )
+        grasp_lateral_error_m = np.nan
+        if (
+            grasp_effector is not None
+            and grasp_effector.joint_best_candidate is not None
+            and grasp_effector.joint_best_candidate.error_local is not None
+        ):
+            grasp_lateral_error_m = float(np.linalg.norm(
+                grasp_effector.joint_best_candidate.error_local[1:]
+            ))
         return ActionGraphState(
             held=self.held,
             held_contact=held_contact,
@@ -566,6 +581,18 @@ class SimulatorEvidence:
             grasp_substage=self.grasp_substage,
             grasp_arm=self.grasp_arm,
             grasp_close_immediate=self.grasp_close_immediate,
+            grasp_target_contact=(
+                grasp_effector.target_contact if grasp_effector is not None else False
+            ),
+            grasp_height_aligned=(
+                grasp_effector.grasp_height_aligned
+                if grasp_effector is not None else False
+            ),
+            grasp_orientation_aligned=(
+                grasp_effector.grasp_orientation_aligned
+                if grasp_effector is not None else False
+            ),
+            grasp_lateral_error_m=grasp_lateral_error_m,
         )
 
     def live_task_state(self) -> LiveTaskState:

@@ -41,8 +41,6 @@ from .simulator_evidence import (
 )
 
 
-IMMINENT_GRIPPER_OBSTACLE_CLEARANCE_M = 0.20
-
 
 def _resolve_wrapped_actor(task_env: Any, name: str) -> Any | None:
     """Find the wrapped ``Actor`` (with annotated grasp geometry) for ``name``.
@@ -531,17 +529,21 @@ def vla_label_from_catalog_entry(entry: dict[str, Any]) -> str:
 
     A semantic label that differs from the simulator name is treated as an
     explicit catalog override. Otherwise, only known infrastructure prefixes
-    and a trailing numeric instance identifier are removed. Directional and
-    descriptive words such as ``left``, ``right``, and colors are preserved;
-    aliases remain the source of identity when normalized labels are equal.
+    and a trailing numeric instance identifier are removed. Colors and other
+    descriptive words are preserved. As a temporary compatibility exception, standalone
+    ``left`` and ``right`` tokens are removed from legacy-name fallbacks because
+    those actor suffixes are not reliable camera-relative language. Explicit
+    semantic labels are preserved; aliases remain the source of identity when
+    normalized labels are equal.
     """
     name = str(entry.get("name") or "").strip()
     semantic = str(entry.get("semantic_label") or "").strip()
-    value = semantic if semantic and semantic != name else name or semantic
+    explicit_semantic_override = bool(semantic and semantic != name)
+    value = semantic if explicit_semantic_override else name or semantic
     if not value:
         return "object"
 
-    if not (semantic and semantic != name):
+    if not explicit_semantic_override:
         lowered = value.lower()
         for prefix in _SIMULATOR_LABEL_PREFIXES:
             if lowered.startswith(prefix):
@@ -550,6 +552,14 @@ def vla_label_from_catalog_entry(entry: dict[str, Any]) -> str:
         value = re.sub(r"[_-]\d+$", "", value)
 
     value = re.sub(r"[_-]+", " ", value)
+    if not explicit_semantic_override:
+        # Temporary legacy-name compatibility hack: scene actors such as
+        # ``basket_right`` use left/right as simulator identity, not as a
+        # camera-relative instruction. Hide those standalone tokens only in
+        # VLA-facing fallback labels. Stable object IDs/aliases still retain
+        # identity. Future fix: provide unambiguous semantic_label values in
+        # the benchmark catalog and remove this name-based exception.
+        value = re.sub(r"\b(?:left|right)\b", " ", value, flags=re.IGNORECASE)
     value = re.sub(r"\s+", " ", value).strip()
     return value if value and not value.isdigit() else "object"
 
@@ -791,57 +801,11 @@ def grasp_intent(
     )
     if not side:
         return fallback
-    approach = ActionIntent(
-        IntentOperation.GRASP, target_label, preferred_arm=side
-    )
-    blocked_index = next(
-        index for index, state in enumerate(evidence)
-        if state is Evidence.TRUE
-    )
-    active_blockers = blocker_indices[
-        by_effector[blocker_indices, target_index, blocked_index]
-        & valid[blocker_indices, target_index, blocked_index]
-    ]
-    blocked_name = retriever.blocks_effector_names[blocked_index].lower()
-    blocked_side = (
-        "left" if "left" in blocked_name
-        else "right" if "right" in blocked_name
-        else ""
-    )
-    blocked_effector_id = -2 if blocked_side == "left" else -3
-    blocked_effector_pose = retriever._poses_world.get(blocked_effector_id)
-    if not blocked_side or blocked_effector_pose is None or not len(active_blockers):
-        return approach
-    positioned = [
-        int(index) for index in active_blockers
-        if int(retriever.object_ids[index]) in retriever._aabb_bounds
-    ]
-    if not positioned:
-        return approach
-
-    def point_aabb_clearance(index: int) -> float:
-        lower, upper = retriever._aabb_bounds[
-            int(retriever.object_ids[index])
-        ]
-        point = blocked_effector_pose[:3]
-        separation = np.maximum(np.maximum(lower - point, point - upper), 0.0)
-        return float(np.linalg.norm(separation))
-
-    blocker_index = min(
-        positioned,
-        key=point_aabb_clearance,
-    )
-    if point_aabb_clearance(blocker_index) > IMMINENT_GRIPPER_OBSTACLE_CLEARANCE_M:
-        return approach
-    blocker_id = int(retriever.object_ids[blocker_index])
-    blocker_label = retriever._label_by_id.get(blocker_id, "obstacle")
+    # Blocked alternate corridors are used only to select the uniquely
+    # clear arm. Once selected, mentioning an obstacle for the inactive arm
+    # is non-actionable and can distract the policy from the active command.
     return ActionIntent(
-        IntentOperation.GRASP,
-        target_label,
-        preferred_arm=side,
-        blocked_arm=blocked_side,
-        obstacle_label=blocker_label,
-        collision_imminent=True,
+        IntentOperation.GRASP, target_label, preferred_arm=side
     )
 
 

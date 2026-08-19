@@ -780,6 +780,9 @@ def test_annotated_close_requires_calibrated_approach_axis_and_distance():
     assert not _close_geometry_ready(annotated(0.04, 0.021))
     assert not _close_geometry_ready(annotated(0.06, 0.0))
     assert _close_geometry_ready(annotated(0.08, -0.04, contact=True))
+    assert not _close_geometry_ready(
+        annotated(0.08, -0.04, contact=True, lateral=0.016)
+    )
     assert _close_geometry_ready(annotated(0.04, 0.01, lateral=0.015))
     assert not _close_geometry_ready(annotated(0.04, 0.01, lateral=0.016))
     assert not _close_geometry_ready(
@@ -810,12 +813,31 @@ def test_placement_geometry_requires_safe_footprint_and_descent():
     assert not edge.aligned and not edge.descent_ready
 
     centered_above = placement_geometry_from_bounds(
-        np.array([0.12, 0.12, 0.23]), np.array([0.18, 0.18, 0.35]),
+        np.array([0.12, 0.12, 0.26]), np.array([0.18, 0.18, 0.38]),
         destination_lower, destination_upper, "in",
     )
     assert centered_above.aligned
     assert not centered_above.descent_ready
     assert centered_above.stage == "final_descent"
+
+    centered_near_rim = placement_geometry_from_bounds(
+        np.array([0.12, 0.12, 0.215]), np.array([0.18, 0.18, 0.335]),
+        destination_lower, destination_upper, "in",
+    )
+    assert centered_near_rim.aligned and centered_near_rim.descent_ready
+    assert np.isclose(centered_near_rim.target_bottom_to_destination_rim_m, 0.015)
+
+    at_clearance = placement_geometry_from_bounds(
+        np.array([0.12, 0.12, 0.25]), np.array([0.18, 0.18, 0.37]),
+        destination_lower, destination_upper, "in",
+    )
+    assert at_clearance.aligned and at_clearance.descent_ready
+
+    above_clearance = placement_geometry_from_bounds(
+        np.array([0.12, 0.12, 0.251]), np.array([0.18, 0.18, 0.371]),
+        destination_lower, destination_upper, "in",
+    )
+    assert above_clearance.aligned and not above_clearance.descent_ready
 
     centered_inside = placement_geometry_from_bounds(
         np.array([0.12, 0.12, 0.18]), np.array([0.18, 0.18, 0.30]),
@@ -1537,14 +1559,13 @@ def test_grasp_hint_selects_only_a_valid_uniquely_clear_gripper(tmp_path):
         "Align the right gripper with the target."
     )
 
-    # Only an imminent blocker produces a warning, and it is attributed to
-    # the arm whose corridor it actually blocks.
+    # Even when the alternate-arm blocker is physically close, it remains
+    # selection evidence rather than distracting active-arm language.
     retriever._aabb_bounds[20] = (
         np.array([0.55, -0.10, 0.40]),
         np.array([0.65, 0.10, 0.60]),
     )
     assert compact_grasp_hint(retriever, 10) == (
-        "Collision risk: the box blocks the left gripper. "
         "Align the right gripper with the target."
     )
 
@@ -1627,13 +1648,19 @@ def test_vla_labels_hide_simulator_names_conservatively():
     ) == "sauce can"
     assert vla_label_from_catalog_entry(
         {"name": "basket_right", "semantic_label": "basket_right"}
-    ) == "basket right"
+    ) == "basket"
     assert vla_label_from_catalog_entry(
         {"name": "model_red_bowl_3", "semantic_label": "model_red_bowl_3"}
     ) == "red bowl"
     assert vla_label_from_catalog_entry(
         {"name": "task_sauce_can", "semantic_label": "tomato sauce can"}
     ) == "tomato sauce can"
+    assert vla_label_from_catalog_entry(
+        {"name": "legacy_bowl", "semantic_label": "left blue bowl"}
+    ) == "left blue bowl"
+    assert vla_label_from_catalog_entry(
+        {"name": "bright_cup", "semantic_label": "bright_cup"}
+    ) == "bright cup"
     assert vla_label_from_catalog_entry(
         {"name": "object_12", "semantic_label": "object_12"}
     ) == "object"

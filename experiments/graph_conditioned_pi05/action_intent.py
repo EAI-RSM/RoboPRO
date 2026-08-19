@@ -124,7 +124,10 @@ class ActionIntent:
                 )
             else:
                 instruction = f"Align the {arm} with the {self.target_label}."
-            if self.collision_imminent:
+            if (
+                self.collision_imminent
+                and self.blocked_arm == self.preferred_arm
+            ):
                 return (
                     f"Collision risk: the {self.obstacle_label} blocks the "
                     f"{self.blocked_arm} gripper. {instruction}"
@@ -148,9 +151,16 @@ class ActionIntent:
                 f"of the {self.destination_label}."
             )
         if self.placement_substage is PlacementSubstage.FINAL_DESCENT:
+            if self.placement_relation is PlacementRelation.IN:
+                return (
+                    f"Keep holding the {self.target_label}. Move it straight down "
+                    f"into the {self.destination_label}. Do not move sideways. "
+                    f"Keep lowering it until it reaches the rim."
+                )
             return (
-                f"Keep holding the {self.target_label}. Lower it {preposition} "
-                f"the {self.destination_label}."
+                f"Keep holding the {self.target_label}. Move it straight down "
+                f"onto the {self.destination_label}. Do not move sideways. "
+                f"Keep lowering it until it touches the surface."
             )
         if self.motion_directions:
             motion = " and ".join(direction.value for direction in self.motion_directions)

@@ -356,3 +356,45 @@ def test_directional_alignment_corrections_are_debounced():
     assert up.requires_replan
     assert up.reason == "grasp_substage:move_up"
     assert controller.grasp_substage is GraspSubstage.MOVE_UP
+
+
+def test_relaxed_close_requires_two_aligned_contact_frames():
+    controller = GraphControllerState(grasp_substage=GraspSubstage.GRASP_APPROACH)
+    contacted = dict(
+        grasp_substage=GraspSubstage.GRASP_APPROACH,
+        grasp_arm="left",
+        grasp_target_contact=True,
+        grasp_height_aligned=True,
+        grasp_orientation_aligned=True,
+        grasp_lateral_error_m=0.0178,
+    )
+    first, first_record = controller.observe(state(**contacted), 10)
+    assert not first.requires_replan
+    assert first_record["validated_contact_count"] == 1
+    second, second_record = controller.observe(state(**contacted), 9)
+    assert second.requires_replan
+    assert second.reason == "grasp_substage:close"
+    assert controller.grasp_substage is GraspSubstage.CLOSE
+    assert second_record["validated_contact_close"]
+
+
+def test_relaxed_contact_close_resets_and_keeps_limits_strict():
+    controller = GraphControllerState()
+    base = dict(
+        grasp_substage=GraspSubstage.GRASP_APPROACH,
+        grasp_arm="left",
+        grasp_target_contact=True,
+        grasp_height_aligned=True,
+        grasp_orientation_aligned=True,
+        grasp_lateral_error_m=0.0174,
+    )
+    controller.observe(state(**base), 10)
+    controller.observe(state(**{**base, "grasp_height_aligned": False}), 9)
+    assert controller._contact_candidate_count == 0
+    controller.observe(state(**base), 8)
+    assert controller._contact_candidate_count == 1
+    too_wide = {**base, "grasp_lateral_error_m": 0.019}
+    controller.observe(state(**too_wide), 7)
+    controller.observe(state(**too_wide), 6)
+    assert controller._contact_candidate_count == 0
+    assert controller.grasp_substage is not GraspSubstage.CLOSE

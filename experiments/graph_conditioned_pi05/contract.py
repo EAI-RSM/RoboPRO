@@ -12,7 +12,7 @@ class InputCondition(str, Enum):
     VISUAL_RETRIEVED_GRAPH = "visual_retrieved_graph"
 
 
-GRAPH_TREATMENT_VERSION = "graph_delta_destination_alignment_descent_v18"
+GRAPH_TREATMENT_VERSION = "graph_delta_contact_1p8cm_v26"
 
 
 RELATION_PRIORITY = (
