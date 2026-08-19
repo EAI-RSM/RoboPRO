@@ -22,12 +22,9 @@ GRASP_ALIGNMENT_DISTANCE_M = 0.12
 GRASP_CLOSE_PREFERRED_DISTANCE_M = 0.08
 GRASP_CLOSE_MAX_DISTANCE_M = 0.10
 ANNOTATED_GRASP_CLOSE_MAX_DISTANCE_M = 0.05
-# Once an orientation-compatible annotated grasp candidate is within this
-# region, combine vertical correction with forward approach. This prevents a
-# small height-band excursion from replacing the approach goal with a pure
-# move-up/down instruction. The wider bound is an approach guard, not a close
-# threshold; closure still requires the stricter 5 cm geometry above.
-ANNOTATED_GRASP_FINAL_APPROACH_MAX_DISTANCE_M = 0.08
+# Annotated closure requires the TCP to lie within this signed interval along
+# the selected candidate's local approach axis, in addition to the 5 cm total
+# distance and lateral-centering limits.
 ANNOTATED_GRASP_APPROACH_ERROR_MIN_M = 0.005
 ANNOTATED_GRASP_APPROACH_ERROR_MAX_M = 0.020
 # Maximum displacement orthogonal to the annotated local approach axis.
@@ -387,36 +384,6 @@ class EffectorEvidence:
 
 
 
-def _final_approach_geometry_ready(effector: EffectorEvidence) -> bool:
-    """Select the bounded, open-gripper approach immediately before close.
-
-    Height is deliberately not required here. Inside this bounded approach
-    region, the prompt combines any required vertical correction with motion
-    toward the target instead of dropping the forward goal and oscillating in
-    a pure MOVE_UP/MOVE_DOWN state.
-    """
-    match = effector.joint_best_candidate
-    return bool(
-        effector.grasp_orientation_aligned
-        and effector.joint_best_selection_status
-        == "orientation_band_then_nearest"
-        and match is not None
-        and match.error_local is not None
-        and match.error_local[0] < ANNOTATED_GRASP_APPROACH_ERROR_MIN_M
-        and effector.target_distance_m
-        <= ANNOTATED_GRASP_FINAL_APPROACH_MAX_DISTANCE_M
-    )
-
-
-def _final_approach_substage(effector: EffectorEvidence) -> GraspSubstage:
-    """Add the needed vertical correction without dropping forward approach."""
-    if effector.grasp_height_aligned:
-        return GraspSubstage.FINAL_APPROACH
-    if effector.target_vertical_offset_m > 0:
-        return GraspSubstage.FINAL_APPROACH_DOWN
-    return GraspSubstage.FINAL_APPROACH_UP
-
-
 def _close_geometry_ready(effector: EffectorEvidence) -> bool:
     """Authorize closure without changing unannotated-object fallback."""
     if not (effector.grasp_height_aligned and effector.grasp_orientation_aligned):
@@ -665,7 +632,6 @@ class SimulatorEvidence:
                 "grasp_reference_target_dis_m": 0.0,
                 "grasp_reference_approach_standoff_m": GRASP_APPROACH_STANDOFF_M,
                 "annotated_grasp_close_max_distance_m": ANNOTATED_GRASP_CLOSE_MAX_DISTANCE_M,
-                "annotated_grasp_final_approach_max_distance_m": ANNOTATED_GRASP_FINAL_APPROACH_MAX_DISTANCE_M,
                 "annotated_grasp_approach_error_min_m": ANNOTATED_GRASP_APPROACH_ERROR_MIN_M,
                 "annotated_grasp_approach_error_max_m": ANNOTATED_GRASP_APPROACH_ERROR_MAX_M,
                 "annotated_grasp_lateral_error_max_m": ANNOTATED_GRASP_LATERAL_ERROR_MAX_M,
@@ -996,6 +962,11 @@ def extract_simulator_evidence(context: "LiveGraphContext") -> SimulatorEvidence
         if effectors[arm].grasp_orientation_aligned
         and effectors[arm].target_distance_m <= GRASP_ALIGNMENT_DISTANCE_M
     ]
+    orientation_misaligned_arms = [
+        arm for arm in finite_arms
+        if not effectors[arm].grasp_orientation_aligned
+        and effectors[arm].target_distance_m <= GRASP_ALIGNMENT_DISTANCE_M
+    ]
     if close_arms:
         grasp_substage = GraspSubstage.CLOSE
         grasp_arm = min(
@@ -1018,6 +989,13 @@ def extract_simulator_evidence(context: "LiveGraphContext") -> SimulatorEvidence
         grasp_substage = GraspSubstage.GRASP_APPROACH
         grasp_arm = min(
             approach_arms, key=lambda arm: effectors[arm].target_distance_m
+        )
+        grasp_close_immediate = False
+    elif orientation_misaligned_arms:
+        grasp_substage = GraspSubstage.ORIENTATION_ALIGN
+        grasp_arm = min(
+            orientation_misaligned_arms,
+            key=lambda arm: effectors[arm].target_distance_m,
         )
         grasp_close_immediate = False
     else:

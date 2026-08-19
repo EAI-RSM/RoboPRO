@@ -95,6 +95,11 @@ class ActionIntent:
                     f"{arm}. Keep moving toward it until the gripper is centered "
                     f"for grasping."
                 )
+            elif self.grasp_substage is GraspSubstage.ORIENTATION_ALIGN:
+                instruction = (
+                    f"Rotate the {arm} to align its grasping orientation with "
+                    f"the {self.target_label}."
+                )
             elif self.grasp_substage is GraspSubstage.MOVE_DOWN:
                 instruction = (
                     f"Move the {arm} down to align it with the {self.target_label}."
@@ -102,21 +107,6 @@ class ActionIntent:
             elif self.grasp_substage is GraspSubstage.MOVE_UP:
                 instruction = (
                     f"Move the {arm} up to align it with the {self.target_label}."
-                )
-            elif self.grasp_substage is GraspSubstage.FINAL_APPROACH:
-                instruction = (
-                    f"Move the {arm} straight toward the {self.target_label}. "
-                    f"Keep the {arm} open and move closer before closing."
-                )
-            elif self.grasp_substage is GraspSubstage.FINAL_APPROACH_DOWN:
-                instruction = (
-                    f"Move the {arm} down and toward the {self.target_label}. "
-                    f"Keep the {arm} open and move closer before closing."
-                )
-            elif self.grasp_substage is GraspSubstage.FINAL_APPROACH_UP:
-                instruction = (
-                    f"Move the {arm} up and toward the {self.target_label}. "
-                    f"Keep the {arm} open and move closer before closing."
                 )
             elif self.grasp_substage is GraspSubstage.MOVE_CLOSER:
                 instruction = (

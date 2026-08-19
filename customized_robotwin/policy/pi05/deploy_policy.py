@@ -23,6 +23,7 @@ from experiments.graph_conditioned_pi05.live_adapter import (
 from experiments.graph_conditioned_pi05.graph_replanning import (
     GraphControllerState,
     GraspSubstage,
+    OPEN_GRIPPER_SUBSTAGES,
     PromptPhase,
 )
 from experiments.graph_conditioned_pi05.action_diagnostics import graph_evidence
@@ -145,13 +146,7 @@ def _execute_action_chunk(task_env, model, observation, actions, controller):
         approach_arm = (
             controller.grasp_arm
             if controller.phase is PromptPhase.GRASP
-            and controller.grasp_substage in {
-                GraspSubstage.MOVE_CLOSER,
-                GraspSubstage.GRASP_APPROACH,
-                GraspSubstage.FINAL_APPROACH,
-                GraspSubstage.FINAL_APPROACH_DOWN,
-                GraspSubstage.FINAL_APPROACH_UP,
-            }
+            and controller.grasp_substage in OPEN_GRIPPER_SUBSTAGES
             else None
         )
         executed_action = (

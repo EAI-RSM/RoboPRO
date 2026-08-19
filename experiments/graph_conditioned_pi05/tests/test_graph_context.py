@@ -44,8 +44,6 @@ from experiments.graph_conditioned_pi05.simulator_evidence import (
     CandidateMatch,
     EffectorEvidence,
     _close_geometry_ready,
-    _final_approach_geometry_ready,
-    _final_approach_substage,
     GRASP_TOWARDS_AXIS,
     expand_grasp_pose_family,
     extract_simulator_evidence,
@@ -788,21 +786,6 @@ def test_annotated_close_requires_calibrated_approach_axis_and_distance():
     assert not _close_geometry_ready(
         annotated(0.08, -0.04, contact=True, lateral=0.031)
     )
-    assert _final_approach_geometry_ready(annotated(0.04, 0.004))
-    assert not _final_approach_geometry_ready(annotated(0.04, 0.006))
-    assert _final_approach_geometry_ready(annotated(0.06, -0.03))
-    assert not _final_approach_geometry_ready(annotated(0.081, -0.03))
-
-    above = annotated(0.06, -0.03)
-    above = EffectorEvidence(**{**above.__dict__,
-        "grasp_height_aligned": False, "target_vertical_offset_m": 0.04})
-    below = EffectorEvidence(**{**above.__dict__, "target_vertical_offset_m": -0.04})
-    assert _final_approach_geometry_ready(above)
-    assert _final_approach_substage(above) is GraspSubstage.FINAL_APPROACH_DOWN
-    assert _final_approach_substage(below) is GraspSubstage.FINAL_APPROACH_UP
-    assert _final_approach_substage(annotated(0.04, -0.019)) is GraspSubstage.FINAL_APPROACH
-
-
 def test_placement_geometry_requires_safe_footprint_and_descent():
     destination_lower = np.array([0.0, 0.0, 0.0])
     destination_upper = np.array([0.30, 0.30, 0.20])
@@ -966,7 +949,8 @@ def test_grasp_orientation_gate_uses_annotated_contact_pose(tmp_path):
 
     # A contact point annotated 90 degrees away has no compatible joint
     # candidate: geometry-specific readiness must not use its attractive but
-    # physically incoherent position, so control falls back to ALIGN.
+    # physically incoherent position, so nearby control requests an explicit
+    # orientation correction rather than falling through to generic ALIGN.
     task.target = _FakeGraspActor(
         "target", [(0.70710678, 0.70710678, 0.0, 0.0)]
     )
@@ -974,7 +958,8 @@ def test_grasp_orientation_gate_uses_annotated_contact_pose(tmp_path):
     misaligned_evidence = extract_simulator_evidence(misaligned_context)
     assert not misaligned_evidence.left.grasp_orientation_aligned
     assert misaligned_evidence.left.target_orientation_error_deg > 80.0
-    assert misaligned_evidence.grasp_substage is GraspSubstage.ALIGN
+    assert misaligned_evidence.grasp_substage is GraspSubstage.ORIENTATION_ALIGN
+    assert misaligned_evidence.grasp_arm == "left"
 
     # No resolvable actor: fails open, identical to pre-existing behavior
     # for objects without annotated grasp geometry -- but the status must

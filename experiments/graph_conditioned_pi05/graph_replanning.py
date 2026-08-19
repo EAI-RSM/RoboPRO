@@ -15,14 +15,19 @@ class PromptPhase(str, Enum):
 
 class GraspSubstage(str, Enum):
     ALIGN = "align"
+    ORIENTATION_ALIGN = "orientation_align"
     MOVE_DOWN = "move_down"
     MOVE_UP = "move_up"
     MOVE_CLOSER = "move_closer"
     GRASP_APPROACH = "grasp_approach"
-    FINAL_APPROACH = "final_approach"
-    FINAL_APPROACH_DOWN = "final_approach_down"
-    FINAL_APPROACH_UP = "final_approach_up"
     CLOSE = "close"
+
+
+OPEN_GRIPPER_SUBSTAGES = frozenset({
+    GraspSubstage.MOVE_CLOSER,
+    GraspSubstage.GRASP_APPROACH,
+    GraspSubstage.ORIENTATION_ALIGN,
+})
 
 
 class Evidence(str, Enum):

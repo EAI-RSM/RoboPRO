@@ -6,6 +6,7 @@ from experiments.graph_conditioned_pi05.graph_replanning import (
     GraphDeltaDetector,
     GraphEvent,
     GraspSubstage,
+    OPEN_GRIPPER_SUBSTAGES,
     PromptPhase,
     ReplanPolicy,
 )
@@ -23,6 +24,14 @@ def state(**values):
     }
     defaults.update(values)
     return ActionGraphState(**defaults)
+
+
+def test_open_gripper_substages_cover_live_approach_intents():
+    assert OPEN_GRIPPER_SUBSTAGES == {
+        GraspSubstage.MOVE_CLOSER,
+        GraspSubstage.GRASP_APPROACH,
+        GraspSubstage.ORIENTATION_ALIGN,
+    }
 
 
 def test_detector_debounces_and_unknown_is_not_false():

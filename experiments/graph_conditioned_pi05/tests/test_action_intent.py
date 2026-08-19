@@ -55,22 +55,10 @@ def test_grasp_substages_render_atomic_instructions():
         "Move the left gripper closer to the sauce can for grasping."
     )
     assert replace(
-        selected, grasp_substage=GraspSubstage.FINAL_APPROACH
+        selected, grasp_substage=GraspSubstage.ORIENTATION_ALIGN
     ).render_stage_instruction() == (
-        "Move the left gripper straight toward the sauce can. "
-        "Keep the left gripper open and move closer before closing."
-    )
-    assert replace(
-        selected, grasp_substage=GraspSubstage.FINAL_APPROACH_DOWN
-    ).render_stage_instruction() == (
-        "Move the left gripper down and toward the sauce can. "
-        "Keep the left gripper open and move closer before closing."
-    )
-    assert replace(
-        selected, grasp_substage=GraspSubstage.FINAL_APPROACH_UP
-    ).render_stage_instruction() == (
-        "Move the left gripper up and toward the sauce can. "
-        "Keep the left gripper open and move closer before closing."
+        "Rotate the left gripper to align its grasping orientation with "
+        "the sauce can."
     )
     assert replace(
         selected, grasp_substage=GraspSubstage.CLOSE
