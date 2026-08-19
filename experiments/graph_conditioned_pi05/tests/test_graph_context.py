@@ -35,14 +35,21 @@ from experiments.graph_conditioned_pi05.live_adapter import (
     grasp_pose_from_contact_matrix,
     grasp_quat_wxyz_from_contact_matrix,
     keep_active_gripper_closed,
+    keep_active_gripper_open,
     live_task_state,
     prepare_instruction,
     vla_label_from_catalog_entry,
 )
 from experiments.graph_conditioned_pi05.simulator_evidence import (
+    CandidateMatch,
+    EffectorEvidence,
+    _close_geometry_ready,
+    _final_approach_geometry_ready,
+    _final_approach_substage,
     GRASP_TOWARDS_AXIS,
     expand_grasp_pose_family,
     extract_simulator_evidence,
+    placement_geometry_from_bounds,
     _min_orientation_error_deg,
     _rotate_pose_about_point,
     _rotate_quat_about_own_local_axis,
@@ -407,7 +414,7 @@ def test_shared_live_context_has_value_parity_and_one_catalog_parse(tmp_path):
     object_state["pose_world"][3, :3] = [0.18, 0.20, 0.37]
     near_context = build_live_graph_context(task, observation, contract)
     near_evidence = extract_simulator_evidence(near_context)
-    assert near_evidence.grasp_substage is GraspSubstage.MOVE_DOWN
+    assert near_evidence.grasp_substage is GraspSubstage.GRASP_APPROACH
     assert near_evidence.grasp_arm == "left"
     assert near_evidence.left.target_contact
     assert not near_evidence.left.grasp_height_aligned
@@ -425,13 +432,13 @@ def test_shared_live_context_has_value_parity_and_one_catalog_parse(tmp_path):
     object_state["pose_world"][3, :3] = [0.18, 0.20, 0.31]
     below_context = build_live_graph_context(task, observation, contract)
     below_evidence = extract_simulator_evidence(below_context)
-    assert below_evidence.grasp_substage is GraspSubstage.MOVE_UP
+    assert below_evidence.grasp_substage is GraspSubstage.GRASP_APPROACH
     assert below_evidence.grasp_arm == "left"
 
     object_state["pose_world"][3, :3] = [0.20, 0.20, 0.34]
     vicinity_context = build_live_graph_context(task, observation, contract)
     vicinity_evidence = extract_simulator_evidence(vicinity_context)
-    assert vicinity_evidence.grasp_substage is GraspSubstage.MOVE_CLOSER
+    assert vicinity_evidence.grasp_substage is GraspSubstage.GRASP_APPROACH
     assert vicinity_evidence.grasp_arm == "left"
     assert not vicinity_evidence.grasp_close_immediate
 
@@ -661,6 +668,16 @@ def test_grasp_height_reference_prefers_annotation_over_aabb_top(tmp_path):
     # (0.1, 0.2, 0.3)) must be ~0 -- not the ~10cm a stale object-center
     # reference would report despite a perfect grasp-pose alignment.
     assert evidence.left.target_distance_m < 1e-6
+    assert context.left_reference_candidate_metadata == ((0, 0, 0), (0, 0, 1))
+    assert evidence.left.selected_candidate_index == 0
+    assert evidence.left.selected_contact_point_index == 0
+    assert evidence.left.selected_arc_sample_index == 0
+    assert evidence.left.selected_finger_flip_index == 0
+    assert evidence.left.orientation_best_candidate.index == 0
+    assert evidence.left.joint_best_candidate.index == 0
+    assert evidence.left.joint_best_selection_status == "orientation_band_then_nearest"
+    assert np.allclose(evidence.left.selected_candidate_error_world, (0, 0, 0), atol=1e-6)
+    assert np.allclose(evidence.left.selected_candidate_error_local, (0, 0, 0), atol=1e-6)
     assert abs(evidence.left.target_horizontal_offset_m) < 1e-6
 
 
@@ -728,9 +745,105 @@ def test_grasp_distance_uses_grasp_pose_reference_not_object_center(tmp_path):
     assert stale_object_center_distance > 0.15
 
     assert evidence.left.target_distance_m < 1e-6
+    assert context.left_reference_candidate_metadata == ((0, 0, 0), (0, 0, 1))
+    assert evidence.left.selected_candidate_index == 0
+    assert evidence.left.selected_contact_point_index == 0
+    assert evidence.left.selected_arc_sample_index == 0
+    assert evidence.left.selected_finger_flip_index == 0
+    assert evidence.left.orientation_best_candidate.index == 0
+    assert evidence.left.joint_best_candidate.index == 0
+    assert evidence.left.joint_best_selection_status == "orientation_band_then_nearest"
+    assert np.allclose(evidence.left.selected_candidate_error_world, (0, 0, 0), atol=1e-6)
+    assert np.allclose(evidence.left.selected_candidate_error_local, (0, 0, 0), atol=1e-6)
     assert evidence.left.grasp_height_aligned
     assert evidence.grasp_substage is GraspSubstage.CLOSE
     assert evidence.grasp_arm == "left"
+
+
+def test_annotated_close_requires_calibrated_approach_axis_and_distance():
+    def annotated(distance, approach_x, contact=False, lateral=0.0):
+        return EffectorEvidence(
+            target_distance_m=distance,
+            joint_best_candidate=CandidateMatch(
+                error_local=(approach_x, lateral, 0.0), distance_m=distance
+            ),
+            joint_best_selection_status="orientation_band_then_nearest",
+            grasp_height_aligned=True,
+            grasp_orientation_aligned=True,
+            target_contact=contact,
+        )
+
+    assert not _close_geometry_ready(annotated(0.04, -0.001))
+    assert not _close_geometry_ready(annotated(0.04, 0.004))
+    assert _close_geometry_ready(annotated(0.04, 0.006))
+    assert _close_geometry_ready(annotated(0.04, 0.020))
+    assert not _close_geometry_ready(annotated(0.04, 0.021))
+    assert not _close_geometry_ready(annotated(0.06, 0.0))
+    assert _close_geometry_ready(annotated(0.08, -0.04, contact=True))
+    assert _close_geometry_ready(annotated(0.04, 0.01, lateral=0.015))
+    assert not _close_geometry_ready(annotated(0.04, 0.01, lateral=0.016))
+    assert not _close_geometry_ready(
+        annotated(0.08, -0.04, contact=True, lateral=0.031)
+    )
+    assert _final_approach_geometry_ready(annotated(0.04, 0.004))
+    assert not _final_approach_geometry_ready(annotated(0.04, 0.006))
+    assert _final_approach_geometry_ready(annotated(0.06, -0.03))
+    assert not _final_approach_geometry_ready(annotated(0.081, -0.03))
+
+    above = annotated(0.06, -0.03)
+    above = EffectorEvidence(**{**above.__dict__,
+        "grasp_height_aligned": False, "target_vertical_offset_m": 0.04})
+    below = EffectorEvidence(**{**above.__dict__, "target_vertical_offset_m": -0.04})
+    assert _final_approach_geometry_ready(above)
+    assert _final_approach_substage(above) is GraspSubstage.FINAL_APPROACH_DOWN
+    assert _final_approach_substage(below) is GraspSubstage.FINAL_APPROACH_UP
+    assert _final_approach_substage(annotated(0.04, -0.019)) is GraspSubstage.FINAL_APPROACH
+
+
+def test_placement_geometry_requires_safe_footprint_and_descent():
+    destination_lower = np.array([0.0, 0.0, 0.0])
+    destination_upper = np.array([0.30, 0.30, 0.20])
+    edge = placement_geometry_from_bounds(
+        np.array([0.01, 0.12, 0.23]), np.array([0.07, 0.18, 0.35]),
+        destination_lower, destination_upper, "in",
+    )
+    assert not edge.aligned and not edge.descent_ready
+
+    centered_above = placement_geometry_from_bounds(
+        np.array([0.12, 0.12, 0.23]), np.array([0.18, 0.18, 0.35]),
+        destination_lower, destination_upper, "in",
+    )
+    assert centered_above.aligned
+    assert not centered_above.descent_ready
+    assert centered_above.stage == "final_descent"
+
+    centered_inside = placement_geometry_from_bounds(
+        np.array([0.12, 0.12, 0.18]), np.array([0.18, 0.18, 0.30]),
+        destination_lower, destination_upper, "in",
+    )
+    assert centered_inside.aligned and centered_inside.descent_ready
+    assert np.isclose(centered_inside.target_bottom_to_destination_rim_m, -0.02)
+
+    on_surface = placement_geometry_from_bounds(
+        np.array([0.12, 0.12, 0.21]), np.array([0.18, 0.18, 0.33]),
+        destination_lower, destination_upper, "on",
+    )
+    assert on_surface.aligned and on_surface.descent_ready
+
+
+def test_unannotated_close_preserves_distance_only_fallback():
+    assert _close_geometry_ready(EffectorEvidence(
+        target_distance_m=0.09,
+        joint_best_selection_status="position_only_fallback",
+        grasp_height_aligned=True,
+        grasp_orientation_aligned=True,
+    ))
+    assert not _close_geometry_ready(EffectorEvidence(
+        target_distance_m=0.11,
+        joint_best_selection_status="position_only_fallback",
+        grasp_height_aligned=True,
+        grasp_orientation_aligned=True,
+    ))
 
 
 def test_grasp_height_reference_falls_back_to_aabb_top_without_annotation(tmp_path):
@@ -785,11 +898,11 @@ def test_grasp_height_reference_falls_back_to_aabb_top_without_annotation(tmp_pa
 
 
 def test_grasp_orientation_gate_uses_annotated_contact_pose(tmp_path):
-    """Orientation error is measured against an annotated grasp contact
-    point -- not a fixed world-frame assumption -- but is diagnostics-only
-    for now: it must never block CLOSE, aligned or not, until a real batch
-    confirms it predicts outcomes and a corrective instruction exists for a
-    misaligned orientation."""
+    """Orientation and position must describe one coherent control pose.
+
+    Annotated candidates outside the 20-degree compatibility band must block
+    CLOSE and return to generic ALIGN; missing annotations still fail open.
+    """
 
     class Task:
         def __init__(self, catalog):
@@ -829,11 +942,9 @@ def test_grasp_orientation_gate_uses_annotated_contact_pose(tmp_path):
     assert aligned_evidence.orientation_reference_status == "available"
     assert aligned_evidence.orientation_reference_count == 1
 
-    # A contact point annotated 90 degrees away from the effector's actual
-    # orientation is recorded as misaligned, but must NOT block CLOSE --
-    # diagnostics-only, no gating -- since there is no corrective instruction
-    # for a misaligned orientation and the fallback substages (move_closer)
-    # give actively wrong advice for an orientation-only defect.
+    # A contact point annotated 90 degrees away has no compatible joint
+    # candidate: geometry-specific readiness must not use its attractive but
+    # physically incoherent position, so control falls back to ALIGN.
     task.target = _FakeGraspActor(
         "target", [(0.70710678, 0.70710678, 0.0, 0.0)]
     )
@@ -841,7 +952,7 @@ def test_grasp_orientation_gate_uses_annotated_contact_pose(tmp_path):
     misaligned_evidence = extract_simulator_evidence(misaligned_context)
     assert not misaligned_evidence.left.grasp_orientation_aligned
     assert misaligned_evidence.left.target_orientation_error_deg > 80.0
-    assert misaligned_evidence.grasp_substage is GraspSubstage.CLOSE
+    assert misaligned_evidence.grasp_substage is GraspSubstage.ALIGN
 
     # No resolvable actor: fails open, identical to pre-existing behavior
     # for objects without annotated grasp geometry -- but the status must
@@ -1464,8 +1575,17 @@ def test_transport_gripper_latch_changes_only_the_active_channel():
     assert right[13] == 0.0 and np.array_equal(right[:13], action[:13])
     assert action[6] != 0.0 and action[13] != 0.0  # input is never mutated
 
+    approach_left = keep_active_gripper_open(np.zeros(14), "left")
+    approach_right = keep_active_gripper_open(np.zeros(14), "right")
+    assert approach_left[6] == 1.0
+    assert np.array_equal(approach_left[7:], np.zeros(7))
+    assert approach_right[13] == 1.0
+    assert np.array_equal(approach_right[:13], np.zeros(13))
+
     with raises(ValueError):
         keep_active_gripper_closed(np.zeros(13), "left")
+    with raises(ValueError):
+        keep_active_gripper_open(np.zeros(13), "left")
 
 
 def test_destination_name_fallback_resolves_catalog_id_and_rejects_ambiguity():

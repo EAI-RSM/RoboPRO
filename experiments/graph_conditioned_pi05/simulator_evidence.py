@@ -14,11 +14,27 @@ if TYPE_CHECKING:
     from .live_adapter import LiveGraphContext
 
 
-RELEASE_READY_VERTICAL_CLEARANCE_M = 0.10
+PLACEMENT_HORIZONTAL_MARGIN_M = 0.01
+PLACEMENT_DESCENT_DEPTH_M = 0.02
+PLACEMENT_ON_VERTICAL_TOLERANCE_M = 0.02
 EFFECTOR_IDS = {"left": -2, "right": -3}
 GRASP_ALIGNMENT_DISTANCE_M = 0.12
 GRASP_CLOSE_PREFERRED_DISTANCE_M = 0.08
 GRASP_CLOSE_MAX_DISTANCE_M = 0.10
+ANNOTATED_GRASP_CLOSE_MAX_DISTANCE_M = 0.05
+# Once an orientation-compatible annotated grasp candidate is within this
+# region, combine vertical correction with forward approach. This prevents a
+# small height-band excursion from replacing the approach goal with a pure
+# move-up/down instruction. The wider bound is an approach guard, not a close
+# threshold; closure still requires the stricter 5 cm geometry above.
+ANNOTATED_GRASP_FINAL_APPROACH_MAX_DISTANCE_M = 0.08
+ANNOTATED_GRASP_APPROACH_ERROR_MIN_M = 0.005
+ANNOTATED_GRASP_APPROACH_ERROR_MAX_M = 0.020
+# Maximum displacement orthogonal to the annotated local approach axis.
+# This prevents incidental off-center contact from bypassing grasp alignment.
+ANNOTATED_GRASP_LATERAL_ERROR_MAX_M = 0.015
+# Contact-calibrated gripper-center TCP offset along annotated local -X.
+GRASP_APPROACH_STANDOFF_M = 0.05
 # Symmetric tolerance around the grasp-position reference. When an annotated
 # grasp pose is available (context.left/right_reference_grasp_positions_m),
 # the reference is that pose's actual world position -- not the object's
@@ -167,7 +183,7 @@ def expand_grasp_pose_family(
       contact point, NOT the seed's own position) -- an earlier version of
       this code rotated only the orientation and left the seed's position
       fixed, which is wrong: the offset from the contact center to the
-      seed has magnitude ``GRASP_APPROACH_STANDOFF_M`` (12cm), so rotating
+      seed has magnitude ``GRASP_APPROACH_STANDOFF_M`` (5cm), so rotating
       it can move the candidate's height by up to ``STANDOFF * sin(theta)``
       -- several cm for even a ~1 radian arc, comfortably larger than a
       few-cm height tolerance.
@@ -178,7 +194,7 @@ def expand_grasp_pose_family(
       with ``towards``), recomputes the WHOLE candidate -- position AND
       orientation -- using ``-theta`` instead. An earlier version of this
       code always used the configured ``+theta`` directly; since the
-      rotated offset has magnitude ``GRASP_APPROACH_STANDOFF_M`` (12cm),
+      rotated offset has magnitude ``GRASP_APPROACH_STANDOFF_M`` (5cm),
       picking the wrong sign can move a candidate's height by up to twice
       its unrotated-seed-relative displacement -- several cm, again
       comfortably larger than the height tolerance, and specifically what
@@ -283,6 +299,53 @@ def _min_orientation_error_deg(
 
 
 @dataclass(frozen=True)
+class CandidateMatch:
+    index: int = -1
+    contact_point_index: int = -1
+    arc_sample_index: int = -1
+    finger_flip_index: int = -1
+    position_world: tuple[float, float, float] | None = None
+    orientation_wxyz: tuple[float, float, float, float] | None = None
+    error_world: tuple[float, float, float] | None = None
+    error_local: tuple[float, float, float] | None = None
+    distance_m: float = np.nan
+    orientation_error_deg: float = np.nan
+
+
+def _candidate_match(index, positions, orientations, metadata, deltas, orientation_errors):
+    """Materialize one coupled pose candidate for diagnostics only."""
+    if index is None or index < 0 or index >= len(positions):
+        return CandidateMatch()
+    position = tuple(float(value) for value in positions[index])
+    orientation = (
+        tuple(float(value) for value in orientations[index])
+        if index < len(orientations) else None
+    )
+    identity = metadata[index] if index < len(metadata) else (-1, -1, -1)
+    error_world = tuple(float(value) for value in deltas[index])
+    error_local = None
+    if orientation is not None:
+        rotation = t3d.quaternions.quat2mat(orientation)
+        error_local = tuple(float(value) for value in rotation.T @ np.asarray(error_world))
+    orientation_error = (
+        float(orientation_errors[index])
+        if index < len(orientation_errors) else np.nan
+    )
+    return CandidateMatch(
+        index=int(index),
+        contact_point_index=int(identity[0]),
+        arc_sample_index=int(identity[1]),
+        finger_flip_index=int(identity[2]),
+        position_world=position,
+        orientation_wxyz=orientation,
+        error_world=error_world,
+        error_local=error_local,
+        distance_m=float(np.linalg.norm(error_world)),
+        orientation_error_deg=orientation_error,
+    )
+
+
+@dataclass(frozen=True)
 class EffectorEvidence:
     tcp_position_world: tuple[float, float, float] | None = None
     # target_distance_m and target_vertical_offset_m are now measured
@@ -301,6 +364,18 @@ class EffectorEvidence:
     target_distance_m: float = np.nan
     target_vertical_offset_m: float = np.nan
     target_horizontal_offset_m: float = np.nan
+    selected_candidate_index: int = -1
+    selected_contact_point_index: int = -1
+    selected_arc_sample_index: int = -1
+    selected_finger_flip_index: int = -1
+    selected_candidate_position_world: tuple[float, float, float] | None = None
+    selected_candidate_orientation_wxyz: tuple[float, float, float, float] | None = None
+    selected_candidate_error_world: tuple[float, float, float] | None = None
+    selected_candidate_error_local: tuple[float, float, float] | None = None
+    selected_candidate_orientation_error_deg: float = np.nan
+    orientation_best_candidate: CandidateMatch | None = None
+    joint_best_candidate: CandidateMatch | None = None
+    joint_best_selection_status: str = "unavailable"
     grasp_height_aligned: bool = False
     target_orientation_error_deg: float = np.nan
     # Fails open (True) when no reference orientation is available, so
@@ -311,6 +386,62 @@ class EffectorEvidence:
     target_held: bool = False
 
 
+
+def _final_approach_geometry_ready(effector: EffectorEvidence) -> bool:
+    """Select the bounded, open-gripper approach immediately before close.
+
+    Height is deliberately not required here. Inside this bounded approach
+    region, the prompt combines any required vertical correction with motion
+    toward the target instead of dropping the forward goal and oscillating in
+    a pure MOVE_UP/MOVE_DOWN state.
+    """
+    match = effector.joint_best_candidate
+    return bool(
+        effector.grasp_orientation_aligned
+        and effector.joint_best_selection_status
+        == "orientation_band_then_nearest"
+        and match is not None
+        and match.error_local is not None
+        and match.error_local[0] < ANNOTATED_GRASP_APPROACH_ERROR_MIN_M
+        and effector.target_distance_m
+        <= ANNOTATED_GRASP_FINAL_APPROACH_MAX_DISTANCE_M
+    )
+
+
+def _final_approach_substage(effector: EffectorEvidence) -> GraspSubstage:
+    """Add the needed vertical correction without dropping forward approach."""
+    if effector.grasp_height_aligned:
+        return GraspSubstage.FINAL_APPROACH
+    if effector.target_vertical_offset_m > 0:
+        return GraspSubstage.FINAL_APPROACH_DOWN
+    return GraspSubstage.FINAL_APPROACH_UP
+
+
+def _close_geometry_ready(effector: EffectorEvidence) -> bool:
+    """Authorize closure without changing unannotated-object fallback."""
+    if not (effector.grasp_height_aligned and effector.grasp_orientation_aligned):
+        return False
+    if effector.joint_best_selection_status != "orientation_band_then_nearest":
+        return effector.target_distance_m <= GRASP_CLOSE_MAX_DISTANCE_M
+    match = effector.joint_best_candidate
+    error_local = match.error_local if match is not None else None
+    if error_local is None:
+        return False
+    lateral_error_m = float(np.linalg.norm(error_local[1:]))
+    if lateral_error_m > ANNOTATED_GRASP_LATERAL_ERROR_MAX_M:
+        return False
+    return bool(
+        effector.target_contact
+        or (
+            ANNOTATED_GRASP_APPROACH_ERROR_MIN_M
+            <= error_local[0]
+            <= ANNOTATED_GRASP_APPROACH_ERROR_MAX_M
+            and effector.target_distance_m
+            <= ANNOTATED_GRASP_CLOSE_MAX_DISTANCE_M
+        )
+    )
+
+
 @dataclass(frozen=True)
 class LiveTaskState:
     """Compatibility projection of evidence used by legacy adapter callers."""
@@ -319,6 +450,68 @@ class LiveTaskState:
     held_arm: str | None
     target_inside_destination: bool
     release_ready: bool
+
+
+@dataclass(frozen=True)
+class PlacementGeometry:
+    """Footprint-aware target geometry relative to its destination."""
+
+    stage: str = "align_destination"
+    aligned: bool = False
+    descent_ready: bool = False
+    offset_x_m: float = np.nan
+    offset_y_m: float = np.nan
+    horizontal_safe_margin_m: float = np.nan
+    target_bottom_to_destination_rim_m: float = np.nan
+
+
+def placement_geometry_from_bounds(
+    target_lower: np.ndarray,
+    target_upper: np.ndarray,
+    destination_lower: np.ndarray,
+    destination_upper: np.ndarray,
+    relation: str,
+) -> PlacementGeometry:
+    """Classify placement using the target footprint, not only its center."""
+    arrays = tuple(
+        np.asarray(value, dtype=np.float64)
+        for value in (target_lower, target_upper, destination_lower, destination_upper)
+    )
+    if relation not in {"in", "on"} or any(
+        value.shape != (3,) or not np.all(np.isfinite(value)) for value in arrays
+    ):
+        return PlacementGeometry()
+    target_lower, target_upper, destination_lower, destination_upper = arrays
+    if np.any(target_upper < target_lower) or np.any(destination_upper < destination_lower):
+        return PlacementGeometry()
+
+    target_center = 0.5 * (target_lower + target_upper)
+    destination_center = 0.5 * (destination_lower + destination_upper)
+    target_half_footprint = 0.5 * (target_upper[:2] - target_lower[:2])
+    safe_lower = destination_lower[:2] + target_half_footprint + PLACEMENT_HORIZONTAL_MARGIN_M
+    safe_upper = destination_upper[:2] - target_half_footprint - PLACEMENT_HORIZONTAL_MARGIN_M
+    clearances = np.concatenate(
+        (target_center[:2] - safe_lower, safe_upper - target_center[:2])
+    )
+    safe_margin = float(np.min(clearances))
+    aligned = bool(np.all(safe_lower <= safe_upper) and safe_margin >= 0.0)
+    bottom_to_rim = float(target_lower[2] - destination_upper[2])
+    if relation == "in":
+        descent_ready = aligned and bottom_to_rim <= -PLACEMENT_DESCENT_DEPTH_M
+    else:
+        descent_ready = aligned and abs(bottom_to_rim) <= PLACEMENT_ON_VERTICAL_TOLERANCE_M
+    stage = "release_ready" if descent_ready else (
+        "final_descent" if aligned else "align_destination"
+    )
+    return PlacementGeometry(
+        stage=stage,
+        aligned=aligned,
+        descent_ready=descent_ready,
+        offset_x_m=float(target_center[0] - destination_center[0]),
+        offset_y_m=float(target_center[1] - destination_center[1]),
+        horizontal_safe_margin_m=safe_margin,
+        target_bottom_to_destination_rim_m=bottom_to_rim,
+    )
 
 
 @dataclass(frozen=True)
@@ -334,6 +527,7 @@ class SimulatorEvidence:
     visible: Evidence
     target_inside_destination: bool
     release_ready: bool
+    placement_geometry: PlacementGeometry
     left: EffectorEvidence
     right: EffectorEvidence
     grasp_substage: GraspSubstage
@@ -360,6 +554,9 @@ class SimulatorEvidence:
         return ActionGraphState(
             held=self.held,
             held_contact=held_contact,
+            destination_aligned=(
+                Evidence.TRUE if self.placement_geometry.aligned else Evidence.FALSE
+            ),
             release_ready=Evidence.TRUE if self.release_ready else Evidence.FALSE,
             goal_satisfied=self.goal_satisfied,
             path_blocked=self.path_blocked,
@@ -387,6 +584,12 @@ class SimulatorEvidence:
             "held_arm": self.held_arm or "",
             "grasp_close_immediate": self.grasp_close_immediate,
             "grasp_height_half_width": self.grasp_height_half_width_m,
+            "placement_stage": self.placement_geometry.stage,
+            "destination_aligned": self.placement_geometry.aligned,
+            "target_to_destination_dx_m": self.placement_geometry.offset_x_m,
+            "target_to_destination_dy_m": self.placement_geometry.offset_y_m,
+            "horizontal_safe_margin_m": self.placement_geometry.horizontal_safe_margin_m,
+            "target_bottom_to_destination_rim_m": self.placement_geometry.target_bottom_to_destination_rim_m,
             "orientation_reference_available": (
                 self.orientation_reference_status == "available"
             ),
@@ -400,6 +603,46 @@ class SimulatorEvidence:
                 f"target_{arm}_distance": effector.target_distance_m,
                 f"target_{arm}_vertical_offset": effector.target_vertical_offset_m,
                 f"target_{arm}_horizontal_offset": effector.target_horizontal_offset_m,
+                f"target_{arm}_selected_candidate_index": effector.selected_candidate_index,
+                f"target_{arm}_selected_contact_point_index": effector.selected_contact_point_index,
+                f"target_{arm}_selected_arc_sample_index": effector.selected_arc_sample_index,
+                f"target_{arm}_selected_finger_flip_index": effector.selected_finger_flip_index,
+                f"target_{arm}_selected_candidate_position_world": effector.selected_candidate_position_world,
+                f"target_{arm}_selected_candidate_orientation_wxyz": effector.selected_candidate_orientation_wxyz,
+                f"target_{arm}_selected_candidate_error_world": effector.selected_candidate_error_world,
+                f"target_{arm}_selected_candidate_error_local": effector.selected_candidate_error_local,
+                f"target_{arm}_selected_candidate_orientation_error_deg": effector.selected_candidate_orientation_error_deg,
+                f"target_{arm}_orientation_best_candidate_index": (effector.orientation_best_candidate or CandidateMatch()).index,
+                f"target_{arm}_orientation_best_contact_point_index": (effector.orientation_best_candidate or CandidateMatch()).contact_point_index,
+                f"target_{arm}_orientation_best_arc_sample_index": (effector.orientation_best_candidate or CandidateMatch()).arc_sample_index,
+                f"target_{arm}_orientation_best_finger_flip_index": (effector.orientation_best_candidate or CandidateMatch()).finger_flip_index,
+                f"target_{arm}_orientation_best_position_world": (effector.orientation_best_candidate or CandidateMatch()).position_world,
+                f"target_{arm}_orientation_best_orientation_wxyz": (effector.orientation_best_candidate or CandidateMatch()).orientation_wxyz,
+                f"target_{arm}_orientation_best_error_world": (effector.orientation_best_candidate or CandidateMatch()).error_world,
+                f"target_{arm}_orientation_best_error_local": (effector.orientation_best_candidate or CandidateMatch()).error_local,
+                f"target_{arm}_orientation_best_distance": (effector.orientation_best_candidate or CandidateMatch()).distance_m,
+                f"target_{arm}_orientation_best_orientation_error_deg": (effector.orientation_best_candidate or CandidateMatch()).orientation_error_deg,
+                f"target_{arm}_joint_best_candidate_index": (effector.joint_best_candidate or CandidateMatch()).index,
+                f"target_{arm}_joint_best_contact_point_index": (effector.joint_best_candidate or CandidateMatch()).contact_point_index,
+                f"target_{arm}_joint_best_arc_sample_index": (effector.joint_best_candidate or CandidateMatch()).arc_sample_index,
+                f"target_{arm}_joint_best_finger_flip_index": (effector.joint_best_candidate or CandidateMatch()).finger_flip_index,
+                f"target_{arm}_joint_best_position_world": (effector.joint_best_candidate or CandidateMatch()).position_world,
+                f"target_{arm}_joint_best_orientation_wxyz": (effector.joint_best_candidate or CandidateMatch()).orientation_wxyz,
+                f"target_{arm}_joint_best_error_world": (effector.joint_best_candidate or CandidateMatch()).error_world,
+                f"target_{arm}_joint_best_error_local": (effector.joint_best_candidate or CandidateMatch()).error_local,
+                f"target_{arm}_joint_best_distance": (effector.joint_best_candidate or CandidateMatch()).distance_m,
+                f"target_{arm}_joint_best_orientation_error_deg": (effector.joint_best_candidate or CandidateMatch()).orientation_error_deg,
+                f"target_{arm}_joint_best_selection_status": effector.joint_best_selection_status,
+                f"{arm}_tcp_pose_source": f"task_env.robot.get_{arm}_tcp_pose",
+                f"{arm}_tcp_relation_object_id": EFFECTOR_IDS[arm],
+                "grasp_reference_target_dis_m": 0.0,
+                "grasp_reference_approach_standoff_m": GRASP_APPROACH_STANDOFF_M,
+                "annotated_grasp_close_max_distance_m": ANNOTATED_GRASP_CLOSE_MAX_DISTANCE_M,
+                "annotated_grasp_final_approach_max_distance_m": ANNOTATED_GRASP_FINAL_APPROACH_MAX_DISTANCE_M,
+                "annotated_grasp_approach_error_min_m": ANNOTATED_GRASP_APPROACH_ERROR_MIN_M,
+                "annotated_grasp_approach_error_max_m": ANNOTATED_GRASP_APPROACH_ERROR_MAX_M,
+                "annotated_grasp_lateral_error_max_m": ANNOTATED_GRASP_LATERAL_ERROR_MAX_M,
+                "grasp_reference_target_dis_source": "grasp_actor default grasp_dis/choose_grasp_pose target_dis",
                 f"target_{arm}_grasp_height_aligned": effector.grasp_height_aligned,
                 f"target_{arm}_orientation_error_deg": effector.target_orientation_error_deg,
                 f"target_{arm}_grasp_orientation_aligned": effector.grasp_orientation_aligned,
@@ -538,6 +781,14 @@ def extract_simulator_evidence(context: "LiveGraphContext") -> SimulatorEvidence
             if arm == "left"
             else context.right_reference_grasp_positions_m
         ) or aabb_fallback_positions_m
+        orientation_candidates = (
+            context.left_reference_orientations_wxyz
+            if arm == "left" else context.right_reference_orientations_wxyz
+        )
+        candidate_metadata = (
+            context.left_reference_candidate_metadata
+            if arm == "left" else context.right_reference_candidate_metadata
+        )
         # Pick ONE reference candidate -- whichever is nearest in full 3D --
         # and derive distance, vertical offset, AND horizontal offset from
         # THAT SAME candidate. Before this fix, distance picked the object's
@@ -567,6 +818,31 @@ def extract_simulator_evidence(context: "LiveGraphContext") -> SimulatorEvidence
             float(np.linalg.norm(deltas_m[nearest_index][:2]))
             if nearest_index is not None else np.nan
         )
+        selected_position = (
+            tuple(float(value) for value in position_candidates_m[nearest_index])
+            if nearest_index is not None else None
+        )
+        selected_orientation = (
+            tuple(float(value) for value in orientation_candidates[nearest_index])
+            if nearest_index is not None and nearest_index < len(orientation_candidates)
+            else None
+        )
+        selected_metadata = (
+            candidate_metadata[nearest_index]
+            if nearest_index is not None and nearest_index < len(candidate_metadata)
+            else (-1, -1, -1)
+        )
+        selected_error_world = (
+            tuple(float(value) for value in deltas_m[nearest_index])
+            if nearest_index is not None else None
+        )
+        selected_error_local = None
+        if selected_error_world is not None and selected_orientation is not None:
+            candidate_rotation = t3d.quaternions.quat2mat(selected_orientation)
+            selected_error_local = tuple(
+                float(value)
+                for value in candidate_rotation.T @ np.asarray(selected_error_world)
+            )
         height_aligned = (
             nearest_index is not None
             and abs(vertical_offset) <= target_height_half_width
@@ -576,11 +852,71 @@ def extract_simulator_evidence(context: "LiveGraphContext") -> SimulatorEvidence
             if effector_pose is not None and effector_pose.shape[0] >= 7
             else None
         )
-        orientation_error = _min_orientation_error_deg(
-            effector_quat,
-            context.left_reference_orientations_wxyz
-            if arm == "left"
-            else context.right_reference_orientations_wxyz,
+        candidate_orientation_errors = [
+            _quaternion_angle_deg(effector_quat, candidate)
+            for candidate in orientation_candidates
+        ] if effector_quat is not None else []
+        finite_orientation_indices = [
+            index for index, error in enumerate(candidate_orientation_errors)
+            if np.isfinite(error)
+        ]
+        orientation_best_index = (
+            min(finite_orientation_indices, key=lambda index: candidate_orientation_errors[index])
+            if finite_orientation_indices else None
+        )
+        orientation_eligible_indices = [
+            index for index in finite_orientation_indices
+            if candidate_orientation_errors[index] <= GRASP_ORIENTATION_MAX_ERROR_DEG
+        ]
+        if orientation_eligible_indices:
+            joint_best_index = min(
+                orientation_eligible_indices, key=lambda index: distances_m[index]
+            )
+            joint_best_status = "orientation_band_then_nearest"
+        elif orientation_best_index is not None:
+            joint_best_index = orientation_best_index
+            joint_best_status = "fallback_min_orientation"
+        elif nearest_index is not None:
+            joint_best_index = nearest_index
+            joint_best_status = "position_only_fallback"
+        else:
+            joint_best_index = None
+            joint_best_status = "unavailable"
+        orientation_best_match = _candidate_match(
+            orientation_best_index, position_candidates_m, orientation_candidates,
+            candidate_metadata, deltas_m, candidate_orientation_errors,
+        )
+        joint_best_match = _candidate_match(
+            joint_best_index, position_candidates_m, orientation_candidates,
+            candidate_metadata, deltas_m, candidate_orientation_errors,
+        )
+        # Behavior-changing v5 control reference: use the coherent joint
+        # candidate, not the independently nearest position. Position-best
+        # remains exported above for comparison only.
+        target_distance = joint_best_match.distance_m
+        vertical_offset = (
+            joint_best_match.error_world[2]
+            if joint_best_match.error_world is not None else np.nan
+        )
+        horizontal_offset = (
+            float(np.linalg.norm(joint_best_match.error_world[:2]))
+            if joint_best_match.error_world is not None else np.nan
+        )
+        height_aligned = bool(
+            np.isfinite(vertical_offset)
+            and abs(vertical_offset) <= target_height_half_width
+        )
+        control_orientation_aligned = joint_best_status in (
+            "orientation_band_then_nearest", "position_only_fallback"
+        )
+        orientation_error = (
+            min(candidate_orientation_errors[index] for index in finite_orientation_indices)
+            if finite_orientation_indices else np.nan
+        )
+        selected_orientation_error = (
+            _quaternion_angle_deg(effector_quat, selected_orientation)
+            if effector_quat is not None and selected_orientation is not None
+            else np.nan
         )
         effectors[arm] = EffectorEvidence(
             tcp_position_world=(
@@ -590,12 +926,21 @@ def extract_simulator_evidence(context: "LiveGraphContext") -> SimulatorEvidence
             target_distance_m=target_distance,
             target_vertical_offset_m=vertical_offset,
             target_horizontal_offset_m=horizontal_offset,
+            selected_candidate_index=(nearest_index if nearest_index is not None else -1),
+            selected_contact_point_index=int(selected_metadata[0]),
+            selected_arc_sample_index=int(selected_metadata[1]),
+            selected_finger_flip_index=int(selected_metadata[2]),
+            selected_candidate_position_world=selected_position,
+            selected_candidate_orientation_wxyz=selected_orientation,
+            selected_candidate_error_world=selected_error_world,
+            selected_candidate_error_local=selected_error_local,
+            selected_candidate_orientation_error_deg=selected_orientation_error,
+            orientation_best_candidate=orientation_best_match,
+            joint_best_candidate=joint_best_match,
+            joint_best_selection_status=joint_best_status,
             grasp_height_aligned=bool(height_aligned),
             target_orientation_error_deg=orientation_error,
-            grasp_orientation_aligned=bool(
-                not np.isfinite(orientation_error)
-                or orientation_error <= GRASP_ORIENTATION_MAX_ERROR_DEG
-            ),
+            grasp_orientation_aligned=bool(control_orientation_aligned),
             target_contact=bool(
                 target_index is not None
                 and effector_index is not None
@@ -612,32 +957,16 @@ def extract_simulator_evidence(context: "LiveGraphContext") -> SimulatorEvidence
             ),
         )
 
-    release_ready = _release_ready(context, target_id, held_arm)
+    placement_geometry = _placement_geometry(context, target_id)
+    release_ready = held_arm is not None and placement_geometry.descent_ready
     finite_arms = [
         arm for arm in ("left", "right")
         if np.isfinite(effectors[arm].target_distance_m)
     ]
-    close_arms = [
+    close_arms = [arm for arm in finite_arms if _close_geometry_ready(effectors[arm])]
+    approach_arms = [
         arm for arm in finite_arms
-        if effectors[arm].grasp_height_aligned
-        # Orientation is diagnostics-only for now: recorded on every
-        # EffectorEvidence and exported to the trace, but deliberately not
-        # gating CLOSE yet. There is no corrective instruction for a
-        # misaligned orientation (no ROTATE_FOR_GRASP substage), and the
-        # existing fallback substages (move_closer/align) give actively
-        # wrong advice for an orientation-only defect -- gating on it before
-        # a real batch confirms it predicts outcomes risks trading a known
-        # failure mode for an unvalidated, possibly worse one.
-        and effectors[arm].target_distance_m <= GRASP_CLOSE_MAX_DISTANCE_M
-    ]
-    vicinity_arms = [
-        arm for arm in finite_arms
-        if effectors[arm].grasp_height_aligned
-        and effectors[arm].target_distance_m <= GRASP_ALIGNMENT_DISTANCE_M
-    ]
-    vertical_correction_arms = [
-        arm for arm in finite_arms
-        if not effectors[arm].grasp_height_aligned
+        if effectors[arm].grasp_orientation_aligned
         and effectors[arm].target_distance_m <= GRASP_ALIGNMENT_DISTANCE_M
     ]
     if close_arms:
@@ -645,26 +974,23 @@ def extract_simulator_evidence(context: "LiveGraphContext") -> SimulatorEvidence
         grasp_arm = min(
             close_arms, key=lambda arm: effectors[arm].target_distance_m
         )
+        close_effector = effectors[grasp_arm]
+        annotated_close = (
+            close_effector.joint_best_selection_status
+            == "orientation_band_then_nearest"
+        )
         grasp_close_immediate = bool(
-            effectors[grasp_arm].target_contact
-            or effectors[grasp_arm].target_distance_m
-            <= GRASP_CLOSE_PREFERRED_DISTANCE_M
+            close_effector.target_contact
+            or (
+                not annotated_close
+                and close_effector.target_distance_m
+                <= GRASP_CLOSE_PREFERRED_DISTANCE_M
+            )
         )
-    elif vertical_correction_arms:
+    elif approach_arms:
+        grasp_substage = GraspSubstage.GRASP_APPROACH
         grasp_arm = min(
-            vertical_correction_arms,
-            key=lambda arm: effectors[arm].target_distance_m,
-        )
-        grasp_substage = (
-            GraspSubstage.MOVE_DOWN
-            if effectors[grasp_arm].target_vertical_offset_m > 0
-            else GraspSubstage.MOVE_UP
-        )
-        grasp_close_immediate = False
-    elif vicinity_arms:
-        grasp_substage = GraspSubstage.MOVE_CLOSER
-        grasp_arm = min(
-            vicinity_arms, key=lambda arm: effectors[arm].target_distance_m
+            approach_arms, key=lambda arm: effectors[arm].target_distance_m
         )
         grasp_close_immediate = False
     else:
@@ -682,6 +1008,7 @@ def extract_simulator_evidence(context: "LiveGraphContext") -> SimulatorEvidence
         visible=visible,
         target_inside_destination=inside_destination,
         release_ready=release_ready,
+        placement_geometry=placement_geometry,
         left=effectors["left"],
         right=effectors["right"],
         grasp_substage=grasp_substage,
@@ -693,12 +1020,12 @@ def extract_simulator_evidence(context: "LiveGraphContext") -> SimulatorEvidence
     )
 
 
-def _release_ready(
-    context: "LiveGraphContext", target_id: int | None, held_arm: str | None
-) -> bool:
+def _placement_geometry(
+    context: "LiveGraphContext", target_id: int | None
+) -> PlacementGeometry:
     destination_ids = context.goal.destination_ids
     if target_id is None or len(destination_ids) != 1:
-        return False
+        return PlacementGeometry()
     objects = context.object_state
     object_ids = np.asarray(objects["object_ids"], dtype=np.int64)
     aabb_lower = np.asarray(objects.get("aabb_lower", ()), dtype=np.float64)
@@ -718,17 +1045,11 @@ def _release_ready(
         and bool(has_aabb[target_index])
         and bool(has_aabb[destination_index])
     ):
-        return False
-    target_center = 0.5 * (aabb_lower[target_index] + aabb_upper[target_index])
-    destination_min = aabb_lower[destination_index]
-    destination_max = aabb_upper[destination_index]
-    horizontally_ready = bool(
-        np.all(target_center[:2] >= destination_min[:2])
-        and np.all(target_center[:2] <= destination_max[:2])
+        return PlacementGeometry()
+    return placement_geometry_from_bounds(
+        aabb_lower[target_index],
+        aabb_upper[target_index],
+        aabb_lower[destination_index],
+        aabb_upper[destination_index],
+        context.goal.relation,
     )
-    vertically_ready = bool(
-        target_center[2] >= destination_min[2] - 0.02
-        and aabb_lower[target_index, 2]
-        <= destination_max[2] + RELEASE_READY_VERTICAL_CLEARANCE_M
-    )
-    return held_arm is not None and horizontally_ready and vertically_ready

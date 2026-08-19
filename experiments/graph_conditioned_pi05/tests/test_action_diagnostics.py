@@ -27,6 +27,10 @@ def _record(recorder, frame, *, held=False, contact=False):
             "held_by_left": held,
             "held_by_right": False,
             "held_arm": "left" if held else "",
+            "target_left_selected_candidate_index": frame - 1,
+            "target_right_selected_candidate_index": 0,
+            "left_tcp_pose_source": "task_env.robot.get_left_tcp_pose",
+            "grasp_reference_target_dis_source": "grasp_actor default",
         },
         action_intent={"operation": "grasp", "preferred_arm": "left"},
     )
@@ -43,6 +47,11 @@ def test_summary_preserves_control_and_evidence_events():
     assert summary["left_first_held_frame"] == 2
     assert summary["left_gripper_override_count"] == 1
     assert summary["right_gripper_override_count"] == 0
+    assert not recorder.rows[0]["target_left_selected_candidate_changed"]
+    assert recorder.rows[1]["target_left_selected_candidate_changed"]
+    assert not recorder.rows[1]["target_right_selected_candidate_changed"]
+    assert not recorder.rows[1]["target_left_orientation_best_candidate_changed"]
+    assert not recorder.rows[1]["target_left_joint_best_candidate_changed"]
 
 
 def test_npz_round_trip_keeps_actions_and_text():
@@ -55,6 +64,10 @@ def test_npz_round_trip_keeps_actions_and_text():
             assert trace["executed_action"].shape == (1, 14)
             assert trace["prompt"][0].startswith("Task objective:")
             assert trace["phase"].tolist() == ["grasp"]
+            assert trace["left_tcp_pose_source"].tolist() == [
+                "task_env.robot.get_left_tcp_pose"
+            ]
+            assert not trace["target_left_selected_candidate_changed"][0]
             assert '"operation": "grasp"' in trace["action_intent"][0]
 
 

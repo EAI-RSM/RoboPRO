@@ -3,9 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from collections import deque
 from enum import Enum
-import math
 from typing import Mapping
 
 
@@ -20,6 +18,10 @@ class GraspSubstage(str, Enum):
     MOVE_DOWN = "move_down"
     MOVE_UP = "move_up"
     MOVE_CLOSER = "move_closer"
+    GRASP_APPROACH = "grasp_approach"
+    FINAL_APPROACH = "final_approach"
+    FINAL_APPROACH_DOWN = "final_approach_down"
+    FINAL_APPROACH_UP = "final_approach_up"
     CLOSE = "close"
 
 
@@ -45,6 +47,8 @@ class TaskGoal:
 class GraphEvent(str, Enum):
     GRASP_ACQUIRED = "grasp_acquired"
     GRASP_LOST = "grasp_lost"
+    DESTINATION_ALIGNED = "destination_aligned"
+    DESTINATION_MISALIGNED = "destination_misaligned"
     RELEASE_READY = "release_ready"
     GOAL_REACHED = "goal_reached"
     GOAL_LOST = "goal_lost"
@@ -60,6 +64,7 @@ class GraphEvent(str, Enum):
 class ActionGraphState:
     held: Evidence = Evidence.UNKNOWN
     held_contact: Evidence = Evidence.UNKNOWN
+    destination_aligned: Evidence = Evidence.UNKNOWN
     release_ready: Evidence = Evidence.UNKNOWN
     goal_satisfied: Evidence = Evidence.UNKNOWN
     path_blocked: Evidence = Evidence.UNKNOWN
@@ -79,6 +84,7 @@ class ActionGraphState:
             validated_hold = self.held_contact
         return {
             "held_by": validated_hold,
+            "destination_aligned": self.destination_aligned,
             "release_ready": self.release_ready,
             "goal_relation": self.goal_satisfied,
             "blocks": self.path_blocked,
@@ -102,49 +108,11 @@ class ReplanDecision:
     reason: str = ""
 
 
-class MotionStallDetector:
-    """Detect a plan whose robot TCPs remain inside a small motion radius."""
-
-    def __init__(self, horizon: int = 50, min_displacement_m: float = 0.002):
-        if horizon < 1:
-            raise ValueError("motion-stall horizon must be positive")
-        if min_displacement_m <= 0 or not math.isfinite(min_displacement_m):
-            raise ValueError("minimum TCP displacement must be positive and finite")
-        self.horizon = int(horizon)
-        self.min_displacement_m = float(min_displacement_m)
-        self._positions = deque(maxlen=self.horizon + 1)
-
-    def reset(self) -> None:
-        self._positions.clear()
-
-    @property
-    def has_observation(self) -> bool:
-        return bool(self._positions)
-
-    def observe(self, positions: tuple[float, ...]) -> bool:
-        if len(positions) != 6 or not all(math.isfinite(value) for value in positions):
-            self.reset()
-            return False
-        self._positions.append(tuple(float(value) for value in positions))
-        if len(self._positions) < self.horizon + 1:
-            return False
-        origin = self._positions[0]
-        max_displacement = max(
-            math.sqrt(
-                sum(
-                    (point[index] - origin[index]) ** 2
-                    for index in range(offset, offset + 3)
-                )
-            )
-            for point in self._positions
-            for offset in (0, 3)
-        )
-        return max_displacement < self.min_displacement_m
-
-
 _TRANSITIONS = {
     ("held_by", Evidence.FALSE, Evidence.TRUE): GraphEvent.GRASP_ACQUIRED,
     ("held_by", Evidence.TRUE, Evidence.FALSE): GraphEvent.GRASP_LOST,
+    ("destination_aligned", Evidence.FALSE, Evidence.TRUE): GraphEvent.DESTINATION_ALIGNED,
+    ("destination_aligned", Evidence.TRUE, Evidence.FALSE): GraphEvent.DESTINATION_MISALIGNED,
     ("release_ready", Evidence.FALSE, Evidence.TRUE): GraphEvent.RELEASE_READY,
     ("goal_relation", Evidence.FALSE, Evidence.TRUE): GraphEvent.GOAL_REACHED,
     ("goal_relation", Evidence.TRUE, Evidence.FALSE): GraphEvent.GOAL_LOST,
@@ -164,6 +132,8 @@ class GraphDeltaDetector:
         defaults = {
             GraphEvent.GRASP_ACQUIRED: 3,
             GraphEvent.GRASP_LOST: 2,
+            GraphEvent.DESTINATION_ALIGNED: 2,
+            GraphEvent.DESTINATION_MISALIGNED: 2,
             GraphEvent.RELEASE_READY: 2,
             GraphEvent.GOAL_REACHED: 2,
             GraphEvent.GOAL_LOST: 2,
@@ -219,6 +189,8 @@ class ReplanPolicy:
     _PRIORITY = (
         GraphEvent.GOAL_REACHED,
         GraphEvent.RELEASE_READY,
+        GraphEvent.DESTINATION_ALIGNED,
+        GraphEvent.DESTINATION_MISALIGNED,
         GraphEvent.GRASP_LOST,
         GraphEvent.GRASP_ACQUIRED,
         GraphEvent.GOAL_LOST,
@@ -255,6 +227,14 @@ class ReplanPolicy:
                 continue
             next_phase = self._next_phase(phase, event)
             if (
+                event is GraphEvent.GOAL_REACHED
+                and phase is PromptPhase.PLACEMENT
+                and state is not None
+                and state.held is Evidence.TRUE
+                and state.release_ready is not Evidence.TRUE
+            ):
+                continue
+            if (
                 event is GraphEvent.GOAL_LOST
                 and phase is PromptPhase.RELEASE
                 and state is not None
@@ -280,6 +260,11 @@ class ReplanPolicy:
             return PromptPhase.RELEASE
         if event is GraphEvent.GOAL_LOST and phase is PromptPhase.RELEASE:
             return PromptPhase.PLACEMENT
+        if event in {
+            GraphEvent.DESTINATION_ALIGNED,
+            GraphEvent.DESTINATION_MISALIGNED,
+        } and phase is PromptPhase.PLACEMENT:
+            return phase
         if event in {GraphEvent.PATH_BLOCKED, GraphEvent.PATH_CLEARED} and phase in {
             PromptPhase.GRASP,
             PromptPhase.PLACEMENT,
@@ -308,13 +293,53 @@ class GraphControllerState:
     grasp_arm: str | None = None
     _grasp_candidate: GraspSubstage | None = None
     _grasp_candidate_count: int = 0
-    motion_detector: MotionStallDetector = field(default_factory=MotionStallDetector)
+    close_latch_steps: int = 15
+    close_max_attempts: int = 2
+    close_latch_remaining: int = 0
+    close_attempt_count: int = 0
+
+    @property
+    def enforced_close_arm(self) -> str | None:
+        """Arm whose close command is currently latched, if any."""
+        if (
+            self.phase is PromptPhase.GRASP
+            and self.grasp_substage is GraspSubstage.CLOSE
+            and self.close_latch_remaining > 0
+        ):
+            return self.grasp_arm
+        return None
+
+    def consume_close_action(self) -> None:
+        """Account for one low-level action executed under the close latch."""
+        if self.enforced_close_arm is not None:
+            self.close_latch_remaining -= 1
 
     def _update_grasp_substage(self, state: ActionGraphState) -> bool:
         """Debounce grasp substages, including recoverable close attempts."""
         if self.phase is not PromptPhase.GRASP:
             return False
         desired = state.grasp_substage
+        # Once a geometrically authorized close begins, transient pose changes
+        # must not cancel it before the gripper has had time to respond.
+        if (
+            self.grasp_substage is GraspSubstage.CLOSE
+            and self.close_latch_remaining > 0
+            and desired is not GraspSubstage.CLOSE
+        ):
+            return False
+        # A close prompt that did not establish a validated hold gets one
+        # bounded retry. After that, request a small corrective approach.
+        if (
+            self.grasp_substage is GraspSubstage.CLOSE
+            and self.close_latch_remaining == 0
+            and desired is GraspSubstage.CLOSE
+            and state.held is not Evidence.TRUE
+        ):
+            if self.close_attempt_count < self.close_max_attempts:
+                self.close_attempt_count += 1
+                self.close_latch_remaining = self.close_latch_steps
+                return False
+            desired = GraspSubstage.GRASP_APPROACH
         if desired is self.grasp_substage:
             self._grasp_candidate = None
             self._grasp_candidate_count = 0
@@ -333,6 +358,12 @@ class GraphControllerState:
             return False
         self.grasp_substage = desired
         self.grasp_arm = state.grasp_arm
+        if desired is GraspSubstage.CLOSE:
+            self.close_attempt_count = 1
+            self.close_latch_remaining = self.close_latch_steps
+        else:
+            self.close_latch_remaining = 0
+            self.close_attempt_count = 0
         self._grasp_candidate = None
         self._grasp_candidate_count = 0
         return True
@@ -343,6 +374,17 @@ class GraphControllerState:
         substage_changed = self._update_grasp_substage(state)
         if state.held is Evidence.TRUE and state.held_arm is not None:
             self.held_arm = state.held_arm
+            if (
+                state.held_contact is Evidence.TRUE
+                and self.phase is PromptPhase.GRASP
+                and self.grasp_substage is GraspSubstage.CLOSE
+            ):
+                # Keep closure active until the delta detector confirms the
+                # hold. One provisional frame must never expose the policy's
+                # open command before the persistence window completes.
+                self.close_latch_remaining = max(
+                    self.close_latch_remaining, 1
+                )
         delta = self.detector.observe(state)
         opposites = {
             GraphEvent.PATH_BLOCKED: GraphEvent.PATH_CLEARED,
@@ -352,6 +394,8 @@ class GraphControllerState:
             GraphEvent.VISIBILITY_LOST: GraphEvent.VISIBILITY_RESTORED,
             GraphEvent.VISIBILITY_RESTORED: GraphEvent.VISIBILITY_LOST,
             GraphEvent.GOAL_REACHED: GraphEvent.GOAL_LOST,
+            GraphEvent.DESTINATION_ALIGNED: GraphEvent.DESTINATION_MISALIGNED,
+            GraphEvent.DESTINATION_MISALIGNED: GraphEvent.DESTINATION_ALIGNED,
             GraphEvent.GOAL_LOST: GraphEvent.GOAL_REACHED,
             GraphEvent.GRASP_ACQUIRED: GraphEvent.GRASP_LOST,
             GraphEvent.GRASP_LOST: GraphEvent.GRASP_ACQUIRED,
@@ -387,6 +431,8 @@ class GraphControllerState:
             "prior_grasp_substage": prior_substage.value,
             "next_grasp_substage": self.grasp_substage.value,
             "grasp_arm": self.grasp_arm,
+            "close_latch_remaining": self.close_latch_remaining,
+            "close_attempt_count": self.close_attempt_count,
         }
         if decision.requires_replan:
             self.phase = decision.next_phase
@@ -399,6 +445,13 @@ class GraphControllerState:
                     self.grasp_arm = None
                     self._grasp_candidate = None
                     self._grasp_candidate_count = 0
+                    self.close_latch_remaining = 0
+                    self.close_attempt_count = 0
+            else:
+                # Placement immediately takes over with its existing held-arm
+                # latch, so the close-attempt bookkeeping can be retired.
+                self.close_latch_remaining = 0
+                self.close_attempt_count = 0
             record["next_grasp_substage"] = self.grasp_substage.value
             record["grasp_arm"] = self.grasp_arm
         return decision, record

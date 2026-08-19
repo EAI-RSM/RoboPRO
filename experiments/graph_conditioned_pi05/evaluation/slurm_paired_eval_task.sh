@@ -122,6 +122,18 @@ then
   exit 3
 fi
 
+# Best-effort: render the episode video with a side panel showing the live
+# prompt, right beside episode0.mp4. Never fails the task -- this is a
+# debugging aid, not part of the evaluation result itself.
+if [[ -f "$result_dir/episode0.mp4" && -f "$result_dir/episode0_action_trace.npz" ]]; then
+  if ! "$PROJECT_ROOT/.venv/bin/python3" \
+    "$PROJECT_ROOT/experiments/graph_conditioned_pi05/evaluation/render_prompt_overlay.py" \
+    "$result_dir"
+  then
+    echo "WARNING: prompt-overlay render failed for $result_dir" >&2
+  fi
+fi
+
 seed_dir="$BATCH_DIR/$condition/seed_$(printf '%03d' "$eval_seed")"
 mkdir -p "$seed_dir"
 cp "$result_dir/_episodes.jsonl" "$seed_dir/_episodes.jsonl"

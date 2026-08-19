@@ -76,6 +76,14 @@ class ActionTraceRecorder:
                 float(measured[action_index]) if measured.size > action_index else np.nan
             )
         row.update(evidence or {})
+        for arm in ("left", "right"):
+            for family in ("selected", "orientation_best", "joint_best"):
+                key = f"target_{arm}_{family}_candidate_index"
+                current = int(row.get(key, -1))
+                previous = int(self.rows[-1].get(key, -1)) if self.rows else -1
+                row[f"target_{arm}_{family}_candidate_changed"] = bool(
+                    current >= 0 and previous >= 0 and current != previous
+                )
         self.rows.append(row)
 
     def summary(self) -> dict[str, Any]:
@@ -117,7 +125,13 @@ class ActionTraceRecorder:
         arrays = {}
         for key in keys:
             values = [row.get(key, np.nan) for row in self.rows]
-            if key in {"prompt", "phase", "held_arm", "action_intent"}:
+            if key in {
+                "prompt", "phase", "held_arm", "action_intent",
+                "left_tcp_pose_source", "right_tcp_pose_source",
+                "grasp_reference_target_dis_source",
+                "target_left_joint_best_selection_status",
+                "target_right_joint_best_selection_status",
+            }:
                 arrays[key] = np.asarray(values, dtype=str)
             else:
                 arrays[key] = np.asarray(values)

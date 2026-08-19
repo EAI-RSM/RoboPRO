@@ -20,6 +20,11 @@ class PlacementRelation(str, Enum):
     ON = "on"
 
 
+class PlacementSubstage(str, Enum):
+    ALIGN_DESTINATION = "align_destination"
+    FINAL_DESCENT = "final_descent"
+
+
 class MotionDirection(str, Enum):
     FORWARD = "forward"
     BACKWARD = "backward"
@@ -36,6 +41,7 @@ class ActionIntent:
     destination_label: str | None = None
     placement_relation: PlacementRelation | None = None
     motion_directions: tuple[MotionDirection, ...] = ()
+    placement_substage: PlacementSubstage | None = None
     preferred_arm: str | None = None
     blocked_arm: str | None = None
     obstacle_label: str | None = None
@@ -56,6 +62,12 @@ class ActionIntent:
             raise ValueError("grasp intent cannot carry a placement destination")
         if self.operation is not IntentOperation.PLACE and self.motion_directions:
             raise ValueError("only place intent can carry motion directions")
+        if self.operation is IntentOperation.PLACE and self.placement_substage is None:
+            object.__setattr__(
+                self, "placement_substage", PlacementSubstage.ALIGN_DESTINATION
+            )
+        if self.operation is not IntentOperation.PLACE and self.placement_substage is not None:
+            raise ValueError("only place intent can carry a placement substage")
         if self.collision_imminent and not (self.blocked_arm and self.obstacle_label):
             raise ValueError("collision warning requires blocked arm and obstacle")
         if self.operation is IntentOperation.GRASP and self.grasp_substage is None:
@@ -77,6 +89,12 @@ class ActionIntent:
             arm = f"{self.preferred_arm} gripper" if self.preferred_arm else "gripper"
             if self.grasp_substage is GraspSubstage.CLOSE:
                 instruction = f"Close the {arm} to grasp the {self.target_label}."
+            elif self.grasp_substage is GraspSubstage.GRASP_APPROACH:
+                instruction = (
+                    f"Approach the middle of the {self.target_label} with the open "
+                    f"{arm}. Keep moving toward it until the gripper is centered "
+                    f"for grasping."
+                )
             elif self.grasp_substage is GraspSubstage.MOVE_DOWN:
                 instruction = (
                     f"Move the {arm} down to align it with the {self.target_label}."
@@ -84,6 +102,21 @@ class ActionIntent:
             elif self.grasp_substage is GraspSubstage.MOVE_UP:
                 instruction = (
                     f"Move the {arm} up to align it with the {self.target_label}."
+                )
+            elif self.grasp_substage is GraspSubstage.FINAL_APPROACH:
+                instruction = (
+                    f"Move the {arm} straight toward the {self.target_label}. "
+                    f"Keep the {arm} open and move closer before closing."
+                )
+            elif self.grasp_substage is GraspSubstage.FINAL_APPROACH_DOWN:
+                instruction = (
+                    f"Move the {arm} down and toward the {self.target_label}. "
+                    f"Keep the {arm} open and move closer before closing."
+                )
+            elif self.grasp_substage is GraspSubstage.FINAL_APPROACH_UP:
+                instruction = (
+                    f"Move the {arm} up and toward the {self.target_label}. "
+                    f"Keep the {arm} open and move closer before closing."
                 )
             elif self.grasp_substage is GraspSubstage.MOVE_CLOSER:
                 instruction = (
@@ -109,6 +142,16 @@ class ActionIntent:
                 f"Release the held object {destination_preposition} "
                 f"the {self.destination_label}."
             )
+        if self.placement_substage is PlacementSubstage.ALIGN_DESTINATION:
+            return (
+                f"Keep holding the {self.target_label}. Move it over the center "
+                f"of the {self.destination_label}."
+            )
+        if self.placement_substage is PlacementSubstage.FINAL_DESCENT:
+            return (
+                f"Keep holding the {self.target_label}. Lower it {preposition} "
+                f"the {self.destination_label}."
+            )
         if self.motion_directions:
             motion = " and ".join(direction.value for direction in self.motion_directions)
             return (
@@ -124,6 +167,9 @@ class ActionIntent:
             self.placement_relation.value if self.placement_relation else None
         )
         result["motion_directions"] = [value.value for value in self.motion_directions]
+        result["placement_substage"] = (
+            self.placement_substage.value if self.placement_substage else None
+        )
         result["grasp_substage"] = (
             self.grasp_substage.value if self.grasp_substage else None
         )

@@ -15,6 +15,7 @@ from .action_intent import (
     IntentOperation,
     MotionDirection,
     PlacementRelation,
+    PlacementSubstage,
 )
 
 from .contract import (
@@ -31,10 +32,12 @@ from .contract import (
 from .graph_serializer import PackedItem
 from .graph_replanning import ActionGraphState, Evidence, GraspSubstage, TaskGoal
 from .simulator_evidence import (
+    GRASP_APPROACH_STANDOFF_M,
     LiveTaskState,
     SimulatorEvidence,
     expand_grasp_pose_family,
     extract_simulator_evidence,
+    placement_geometry_from_bounds,
 )
 
 
@@ -91,21 +94,6 @@ CONTACT_MATRIX_ORTHONORMALITY_ATOL = 1e-3
 CONTACT_MATRIX_DETERMINANT_ATOL = 1e-3
 CONTACT_MATRIX_HOMOGENEOUS_ROW_ATOL = 1e-6
 
-# get_grasp_pose (customized_robotwin/envs/_base_task.py) always offsets its
-# returned position backward along the local approach axis (-X) from the raw
-# contact point by this much, even at its own pre_dis=0 default:
-#   global_grasp_pose_p = contact_pos + contact_rot @ [-0.12 - pre_dis, 0, 0]
-# Traced through choose_grasp_pose's two-stage pre_dis/target_dis math: with
-# grasp_actor's own default target_dis=0, this constant IS the TCP position
-# at the moment of closing (not a pre-grasp hover point) -- presumably the
-# fixed mechanical offset between the TCP reference frame poses are reported
-# in and where the fingertips actually are. Using the raw contact point
-# position directly, with no offset, would be wrong by this amount.
-# Assumes target_dis=0 (grasp_actor's own default); a task calling
-# grasp_actor with a nonzero grasp_dis would need a different offset here --
-# an acknowledged gap, not a silent assumption.
-GRASP_APPROACH_STANDOFF_M = 0.12
-
 
 @dataclass(frozen=True)
 class GraspPose:
@@ -119,6 +107,7 @@ class GraspPose:
     # GRASP_APPROACH_STANDOFF_M, so rotating it moves position_world along
     # an arc of that radius, not just changing its orientation in place.
     contact_center_world: tuple[float, float, float]
+    contact_point_index: int = -1
 
 
 def grasp_pose_from_contact_matrix(contact_matrix: Any) -> GraspPose | None:
@@ -267,10 +256,15 @@ def target_grasp_poses(
     if not contact_points:
         return GraspPoseReference((), OrientationReferenceStatus.ANNOTATION_MISSING)
     poses = []
-    for _, matrix in contact_points:
+    for contact_point_index, matrix in contact_points:
         pose = grasp_pose_from_contact_matrix(matrix)
         if pose is not None:
-            poses.append(pose)
+            poses.append(GraspPose(
+                position_world=pose.position_world,
+                orientation_wxyz=pose.orientation_wxyz,
+                contact_center_world=pose.contact_center_world,
+                contact_point_index=int(contact_point_index),
+            ))
     if not poses:
         return GraspPoseReference((), OrientationReferenceStatus.ANNOTATION_INVALID)
     return GraspPoseReference(tuple(poses), OrientationReferenceStatus.AVAILABLE)
@@ -347,6 +341,9 @@ class LiveGraphContext:
     # an unrelated object-center distance -- see simulator_evidence.py).
     left_reference_grasp_positions_m: tuple[tuple[float, float, float], ...] = ()
     right_reference_grasp_positions_m: tuple[tuple[float, float, float], ...] = ()
+    # Parallel identity metadata: (contact point, arc sample, finger flip).
+    left_reference_candidate_metadata: tuple[tuple[int, int, int], ...] = ()
+    right_reference_candidate_metadata: tuple[tuple[int, int, int], ...] = ()
     # Why the tuples above are empty (or aren't) -- see
     # OrientationReferenceStatus. Exported to the trace precisely so a
     # smoke test can't silently look like it exercised orientation/height
@@ -411,10 +408,10 @@ def build_live_graph_context(
     # families (rotate_lim can differ per arm, and affects both the
     # orientation and the position reference) do not.
     reference = target_grasp_poses(task_env, target_name)
-    left_orientations, left_positions = _expand_arm_reference_poses(
+    left_orientations, left_positions, left_metadata = _expand_arm_reference_poses(
         reference.poses, task_env, "left"
     )
-    right_orientations, right_positions = _expand_arm_reference_poses(
+    right_orientations, right_positions, right_metadata = _expand_arm_reference_poses(
         reference.poses, task_env, "right"
     )
     return LiveGraphContext(
@@ -432,6 +429,8 @@ def build_live_graph_context(
         right_reference_orientations_wxyz=right_orientations,
         left_reference_grasp_positions_m=left_positions,
         right_reference_grasp_positions_m=right_positions,
+        left_reference_candidate_metadata=left_metadata,
+        right_reference_candidate_metadata=right_metadata,
         orientation_reference_status=reference.status.value,
         orientation_reference_count=len(reference.poses),
     )
@@ -462,6 +461,7 @@ def _expand_arm_reference_poses(
 ) -> tuple[
     tuple[tuple[float, float, float, float], ...],
     tuple[tuple[float, float, float], ...],
+    tuple[tuple[int, int, int], ...],
 ]:
     """One arm's full expanded family of valid grasp poses, split into the
     orientation tuple and the full position tuple callers actually consume.
@@ -484,14 +484,20 @@ def _expand_arm_reference_poses(
     rotate_lim = _effector_rotate_lim_rad(task_env, arm)
     orientations = []
     positions = []
-    for pose in poses:
-        for position, orientation in expand_grasp_pose_family(
+    metadata = []
+    for contact_index, pose in enumerate(poses):
+        family = expand_grasp_pose_family(
             pose.position_world, pose.orientation_wxyz, pose.contact_center_world,
             rotate_lim,
-        ):
+        )
+        for family_index, (position, orientation) in enumerate(family):
             orientations.append(orientation)
             positions.append(position)
-    return tuple(orientations), tuple(positions)
+            annotation_index = (
+                pose.contact_point_index if pose.contact_point_index >= 0 else contact_index
+            )
+            metadata.append((annotation_index, family_index // 2, family_index % 2))
+    return tuple(orientations), tuple(positions), tuple(metadata)
 
 
 def action_graph_state(
@@ -637,6 +643,20 @@ def keep_active_gripper_closed(action: np.ndarray, held_arm: str | None) -> np.n
     return result
 
 
+def keep_active_gripper_open(action: np.ndarray, arm: str | None) -> np.ndarray:
+    """Keep an approaching gripper open until guarded close is authorized."""
+    result = np.asarray(action, dtype=np.float64).copy()
+    if result.shape != (14,):
+        raise ValueError(f"expected a 14-dimensional pi0.5 action, got {result.shape}")
+    if arm == "left":
+        result[6] = 1.0
+    elif arm == "right":
+        result[13] = 1.0
+    elif arm is not None:
+        raise ValueError(f"unknown approach arm: {arm}")
+    return result
+
+
 def placement_intent(
     retriever: "LiveGraphRetriever",
     destination_object_ids: Iterable[int],
@@ -670,12 +690,23 @@ def placement_intent(
     if abs(left) >= 0.05:
         directions.append(MotionDirection.LEFT if left > 0 else MotionDirection.RIGHT)
     destination_label = retriever._label_by_id.get(destination_id, "destination")
+    target_bounds = retriever._aabb_bounds.get(target_id)
+    destination_bounds = retriever._aabb_bounds.get(destination_id)
+    placement_substage = PlacementSubstage.ALIGN_DESTINATION
+    if target_bounds is not None and destination_bounds is not None:
+        geometry = placement_geometry_from_bounds(
+            target_bounds[0], target_bounds[1],
+            destination_bounds[0], destination_bounds[1], relation,
+        )
+        if geometry.aligned:
+            placement_substage = PlacementSubstage.FINAL_DESCENT
     return ActionIntent(
         operation=IntentOperation.PLACE,
         target_label=retriever._label_by_id.get(target_id, "object"),
         destination_label=destination_label,
         placement_relation=PlacementRelation(relation),
         motion_directions=tuple(directions),
+        placement_substage=placement_substage,
     )
 
 

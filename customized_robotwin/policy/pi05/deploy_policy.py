@@ -17,11 +17,12 @@ from experiments.graph_conditioned_pi05.live_adapter import (
     action_graph_state,
     build_live_graph_context,
     keep_active_gripper_closed,
+    keep_active_gripper_open,
     prepare_instruction,
 )
 from experiments.graph_conditioned_pi05.graph_replanning import (
     GraphControllerState,
-    MotionStallDetector,
+    GraspSubstage,
     PromptPhase,
 )
 from experiments.graph_conditioned_pi05.action_diagnostics import graph_evidence
@@ -68,12 +69,10 @@ def get_model(usr_args):
     )
 
 
-def _controller(task_env, plan_horizon=50):
+def _controller(task_env):
     controller = getattr(task_env, "_graph_controller", None)
     if controller is None:
-        controller = GraphControllerState(
-            motion_detector=MotionStallDetector(horizon=int(plan_horizon))
-        )
+        controller = GraphControllerState()
         task_env._graph_controller = controller
     return controller
 
@@ -135,43 +134,36 @@ def _record_graph_observation(task_env, controller, state, remaining_actions):
     return decision.requires_replan
 
 
-def _tcp_positions(evidence):
-    positions = (
-        evidence.left.tcp_position_world,
-        evidence.right.tcp_position_world,
-    )
-    if any(position is None for position in positions):
-        return None
-    return tuple(value for position in positions for value in position)
-
-
-def _record_motion_or_terminate(task_env, controller, evidence, *, reset=False):
-    if reset:
-        controller.motion_detector.reset()
-    positions = _tcp_positions(evidence)
-    stalled = positions is not None and controller.motion_detector.observe(positions)
-    if stalled:
-        task_env._graph_termination_reason = (
-            "graph_motion_stall:"
-            f"{controller.phase.value}:{controller.grasp_substage.value}"
-        )
-    return stalled
-
-
 def _execute_action_chunk(task_env, model, observation, actions, controller):
-    initial_context = build_live_graph_context(
-        task_env, observation, _GRAPH_CONTRACT
-    )
-    initial_evidence = extract_simulator_evidence(initial_context)
-    if not controller.motion_detector.has_observation:
-        _record_motion_or_terminate(task_env, controller, initial_evidence)
     for index, action in enumerate(actions):
-        executed_action = (
-            keep_active_gripper_closed(action, controller.held_arm)
+        enforced_close_arm = controller.enforced_close_arm
+        latch_arm = (
+            controller.held_arm
             if controller.phase is PromptPhase.PLACEMENT
+            else enforced_close_arm
+        )
+        approach_arm = (
+            controller.grasp_arm
+            if controller.phase is PromptPhase.GRASP
+            and controller.grasp_substage in {
+                GraspSubstage.MOVE_CLOSER,
+                GraspSubstage.GRASP_APPROACH,
+                GraspSubstage.FINAL_APPROACH,
+                GraspSubstage.FINAL_APPROACH_DOWN,
+                GraspSubstage.FINAL_APPROACH_UP,
+            }
+            else None
+        )
+        executed_action = (
+            keep_active_gripper_closed(action, latch_arm)
+            if latch_arm is not None
+            else keep_active_gripper_open(action, approach_arm)
+            if approach_arm is not None
             else action
         )
         task_env.take_action(executed_action)
+        if enforced_close_arm is not None:
+            controller.consume_close_action()
         controller.actions_since_replan += 1
         observation = task_env.get_obs()
         context = build_live_graph_context(task_env, observation, _GRAPH_CONTRACT)
@@ -189,10 +181,6 @@ def _execute_action_chunk(task_env, model, observation, actions, controller):
         interrupted = _record_graph_observation(
             task_env, controller, state, len(actions) - index - 1
         )
-        if _record_motion_or_terminate(
-            task_env, controller, evidence, reset=interrupted
-        ):
-            break
         if interrupted:
             break
 
@@ -213,6 +201,11 @@ def _record_action_trace(
         # Diagnostics must not make an otherwise valid rollout fail. Missing
         # graph support remains visible as absent/NaN fields in the trace.
         trace_evidence = {}
+    if controller is not None:
+        trace_evidence.update({
+            "close_latch_remaining": controller.close_latch_remaining,
+            "close_attempt_count": controller.close_attempt_count,
+        })
     recorder.record(
         frame=task_env.take_action_cnt,
         prompt=getattr(task_env, "_graph_active_prompt", None) or task_env.get_instruction(),
@@ -238,7 +231,7 @@ def _truncate_actions_to_step_limit(task_env, actions):
 def eval(TASK_ENV, model, observation):
     controller = None
     if _GRAPH_CONDITION is InputCondition.VISUAL_RETRIEVED_GRAPH:
-        controller = _controller(TASK_ENV, model.pi0_step)
+        controller = _controller(TASK_ENV)
         if controller.frame == 0:
             _record_graph_observation(
                 TASK_ENV,
