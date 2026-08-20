@@ -455,7 +455,8 @@ def test_shared_live_context_has_value_parity_and_one_catalog_parse(tmp_path):
     contacted_evidence = extract_simulator_evidence(contacted_context)
     assert contacted_evidence.grasp_substage is GraspSubstage.CLOSE
     assert contacted_evidence.grasp_arm == "left"
-    assert contacted_evidence.grasp_close_immediate
+    # One raw-contact frame does not bypass the normal close debounce.
+    assert not contacted_evidence.grasp_close_immediate
     state["raw_contact"][:] = False
 
     object_state["pose_world"][3, :3] = [0.16, 0.20, 0.34]

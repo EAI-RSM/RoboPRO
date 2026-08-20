@@ -977,13 +977,13 @@ def extract_simulator_evidence(context: "LiveGraphContext") -> SimulatorEvidence
             close_effector.joint_best_selection_status
             == "orientation_band_then_nearest"
         )
+        # Raw contact is not sufficient to accelerate annotated closure.
+        # GraphControllerState grants immediate CLOSE only after contact
+        # persists with valid height, orientation, and lateral alignment.
         grasp_close_immediate = bool(
-            close_effector.target_contact
-            or (
-                not annotated_close
-                and close_effector.target_distance_m
-                <= GRASP_CLOSE_PREFERRED_DISTANCE_M
-            )
+            not annotated_close
+            and close_effector.target_distance_m
+            <= GRASP_CLOSE_PREFERRED_DISTANCE_M
         )
     elif approach_arms:
         grasp_substage = GraspSubstage.GRASP_APPROACH
