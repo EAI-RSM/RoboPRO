@@ -355,6 +355,7 @@ class GraphControllerState:
             return False
         contact_close = self._validated_contact_close(state)
         desired = GraspSubstage.CLOSE if contact_close else state.grasp_substage
+        retry_exhausted = False
         # Once a geometrically authorized close begins, transient pose changes
         # must not cancel it before the gripper has had time to respond.
         if (
@@ -376,6 +377,7 @@ class GraphControllerState:
                 self.close_latch_remaining = self.close_latch_steps
                 return False
             desired = GraspSubstage.GRASP_APPROACH
+            retry_exhausted = True
         if desired is self.grasp_substage:
             self._grasp_candidate = None
             self._grasp_candidate_count = 0
@@ -387,8 +389,11 @@ class GraphControllerState:
             self._grasp_candidate_count = 1
         threshold = (
             1
-            if desired is GraspSubstage.CLOSE
-            and (state.grasp_close_immediate or contact_close)
+            if retry_exhausted
+            or (
+                desired is GraspSubstage.CLOSE
+                and (state.grasp_close_immediate or contact_close)
+            )
             else 2
         )
         if self._grasp_candidate_count < threshold:

@@ -269,16 +269,14 @@ def test_close_is_latched_then_recovers_after_bounded_attempts():
     controller.consume_close_action()
 
     # Failure to establish held_by recovers through a corrective approach.
-    pending, _ = controller.observe(state(
-        grasp_substage=GraspSubstage.CLOSE, grasp_arm="left"
-    ), 7)
-    assert not pending.requires_replan
     recovery, _ = controller.observe(state(
         grasp_substage=GraspSubstage.CLOSE, grasp_arm="left"
-    ), 6)
+    ), 7)
     assert recovery.requires_replan
     assert recovery.reason == "grasp_substage:grasp_approach"
     assert controller.grasp_substage is GraspSubstage.GRASP_APPROACH
+    assert controller.grasp_substage in OPEN_GRIPPER_SUBSTAGES
+    assert controller.close_latch_remaining == 0
 
 
 def test_provisional_hold_keeps_close_latched_until_grasp_is_confirmed():
