@@ -791,7 +791,8 @@ def test_placement_geometry_requires_safe_footprint_and_descent():
     destination_lower = np.array([0.0, 0.0, 0.0])
     destination_upper = np.array([0.30, 0.30, 0.20])
     edge = placement_geometry_from_bounds(
-        np.array([0.01, 0.12, 0.23]), np.array([0.07, 0.18, 0.35]),
+        # One millimeter outside the required 1 cm interior margin.
+        np.array([0.009, 0.12, 0.23]), np.array([0.069, 0.18, 0.35]),
         destination_lower, destination_upper, "in",
     )
     assert not edge.aligned and not edge.descent_ready
@@ -907,7 +908,7 @@ def test_grasp_orientation_gate_uses_annotated_contact_pose(tmp_path):
     """Orientation and position must describe one coherent control pose.
 
     Annotated candidates outside the 20-degree compatibility band must block
-    CLOSE and return to generic ALIGN; missing annotations still fail open.
+    CLOSE and request orientation alignment; missing annotations still fail open.
     """
 
     class Task:
@@ -931,9 +932,10 @@ def test_grasp_orientation_gate_uses_annotated_contact_pose(tmp_path):
     state["in"] = np.zeros((5, 5), dtype=bool)
     state["containment_valid"] = np.ones((5, 5), dtype=bool)
     state["raw_contact"] = np.zeros((5, 5), dtype=bool)
-    # Same close-ready position as the CLOSE case above: height-aligned,
-    # within the close distance, no contact yet.
-    object_state["pose_world"][3, :3] = [0.16, 0.20, 0.34]
+    # The annotated candidate is at (0.10, 0.20, 0.34). Put the TCP 1 cm
+    # forward along its local approach axis: inside both the +0.5--2.0 cm
+    # approach interval and the 5 cm total-distance ceiling, without contact.
+    object_state["pose_world"][3, :3] = [0.11, 0.20, 0.34]
     observation = {
         "benchmark_support": {"relation_state": state, "object_state": object_state},
     }
@@ -944,6 +946,11 @@ def test_grasp_orientation_gate_uses_annotated_contact_pose(tmp_path):
     aligned_evidence = extract_simulator_evidence(aligned_context)
     assert aligned_evidence.grasp_substage is GraspSubstage.CLOSE
     assert aligned_evidence.left.grasp_orientation_aligned
+    assert np.isclose(aligned_evidence.left.target_distance_m, 0.01)
+    assert np.isclose(
+        aligned_evidence.left.joint_best_candidate.error_local[0], 0.01
+    )
+    assert not aligned_evidence.left.target_contact
     assert aligned_evidence.left.target_orientation_error_deg == 0.0
     assert aligned_evidence.orientation_reference_status == "available"
     assert aligned_evidence.orientation_reference_count == 1
@@ -1055,11 +1062,10 @@ def test_grasp_orientation_arc_preserves_configured_rotate_lim_order():
 def test_grasp_pose_family_rotates_position_not_just_orientation():
     """create_target_pose_list rotates the seed's POSITION as an offset
     from the raw contact center, not just its orientation in place: the
-    offset from center to the seed has magnitude GRASP_APPROACH_STANDOFF_M
-    (12cm), so sweeping the rotate_lim arc moves the candidate's height by
-    up to ~STANDOFF*sin(rotate_lim range) -- close to 10cm for a ~1 radian
-    arc. An earlier version of this code treated every arc candidate's
-    height as identical to the unrotated seed's, which is wrong by exactly
+    offset from center to the seed has magnitude GRASP_APPROACH_STANDOFF_M,
+    so sweeping the rotate_lim arc moves the candidate's height by
+    STANDOFF*sin(theta). An earlier version of this code treated every arc
+    candidate's height as identical to the unrotated seed's, which is wrong by exactly
     this amount -- far larger than any reasonable height tolerance."""
     standoff = GRASP_APPROACH_STANDOFF_M
     seed_position = (-standoff, 0.0, 0.0)
@@ -1073,11 +1079,11 @@ def test_grasp_pose_family_rotates_position_not_just_orientation():
 
     # The theta=0 candidate must still be exactly the unrotated seed height.
     assert any(abs(h - seed_position[2]) < 1e-9 for h in heights)
-    # But the arc must ALSO produce heights far from the seed's -- close to
-    # the reviewer's ~10cm estimate for this standoff and range, not
-    # clustered near zero as they would be if position were frozen at the
-    # seed's own height across the whole arc.
-    assert max(heights) - min(heights) > 0.09
+    # The half-open 10-sample arc reaches theta=0.9, so its height span must
+    # match the configured standoff rather than a stale hardcoded distance.
+    assert np.isclose(
+        max(heights) - min(heights), standoff * np.sin(0.9), atol=1e-9
+    )
 
 
 def test_grasp_pose_family_applies_towards_sign_disambiguation():
@@ -1457,8 +1463,8 @@ def test_prepare_instruction_preserves_visual_only_and_fits_graph(tmp_path):
     assert placement.selected_fact_count == 1
     assert placement.instruction == (
         "Task objective: put target in box\n"
-        "Current stage: Keep holding the object. "
-        "Move it forward and left into the box."
+        "Current stage: Keep holding the target. "
+        "Move it over the center of the box."
     )
     assert len(model.calls) == 2
     held_event = live_task_state(task, observation, RetrievalContract())
@@ -1505,8 +1511,8 @@ def test_prepare_instruction_preserves_visual_only_and_fits_graph(tmp_path):
     # gravity can finish insertion after a controlled release.
     state["in"][:] = False
     state["held_by"][0, 0] = True
-    object_state["aabb_lower"][0] = [0.35, 0.45, 0.79]
-    object_state["aabb_upper"][0] = [0.40, 0.50, 0.87]
+    object_state["aabb_lower"][0] = [0.35, 0.45, 0.749]
+    object_state["aabb_upper"][0] = [0.40, 0.50, 0.829]
     object_state["aabb_lower"][1] = [0.30, 0.40, 0.50]
     object_state["aabb_upper"][1] = [0.50, 0.60, 0.70]
     ready = live_task_state(task, observation, RetrievalContract())
@@ -1518,13 +1524,13 @@ def test_prepare_instruction_preserves_visual_only_and_fits_graph(tmp_path):
     too_high = live_task_state(task, observation, RetrievalContract())
     assert not too_high.release_ready
 
-    # Job 10517 used center-only horizontal alignment: an object whose center
-    # is inside the destination is release-ready even when its AABB touches an
-    # edge.
+    # Job 10517 used center-only horizontal alignment. Current placement
+    # control requires the full target footprint plus its safety margin to fit,
+    # so an AABB touching the destination edge must not be release-ready.
     object_state["aabb_lower"][0] = [0.30, 0.45, 0.79]
     object_state["aabb_upper"][0] = [0.35, 0.50, 0.87]
     edge = live_task_state(task, observation, RetrievalContract())
-    assert edge.release_ready
+    assert not edge.release_ready
 
 
 def test_grasp_hint_selects_only_a_valid_uniquely_clear_gripper(tmp_path):
